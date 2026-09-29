@@ -8,7 +8,7 @@ It works as a root module (copy this directory) or as a module sourced from git:
 
 ```hcl
 module "cf_auth" {
-  source = "git::https://github.com/cf-contrib/cf-auth.git//examples/terraform?ref=v1"
+  source = "git::https://github.com/cf-contrib/cf-auth.git//examples/terraform?ref=v0.1.0" # x-release-please-version
 
   account_id            = var.account_id
   workers_dev_subdomain = "example"

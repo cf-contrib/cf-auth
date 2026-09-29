@@ -19,7 +19,7 @@ permissions:
   id-token: write
 
 steps:
-  - uses: cf-contrib/cf-auth@v1
+  - uses: cf-contrib/cf-auth@v0.1.0 # x-release-please-version
     with:
       broker-url: https://cf-auth.example.com
       rule: workers-deploy
@@ -28,7 +28,7 @@ steps:
 
 | Component | Ships as | What it is |
 |---|---|---|
-| [Action](packages/cf-auth-action) | `uses: cf-contrib/cf-auth@v1` | Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. No runtime dependencies. |
+| [Action](packages/cf-auth-action) | `uses: cf-contrib/cf-auth@<version>` | Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. No runtime dependencies. |
 | [Broker](packages/cf-auth-broker) | `broker.js` in [Releases](https://github.com/cf-contrib/cf-auth/releases) | A Worker in your account that checks the OIDC token against your policy and mints the Cloudflare token. |
 | [Terraform example](examples/terraform) | `examples/terraform` | Deploys the released broker with its bindings, custom domain and cleanup cron. |
 
@@ -91,7 +91,7 @@ pnpm build                                  # packages/cf-auth-broker/dist/broke
 pnpm --filter cf-auth-broker check:bundle   # boot the built broker.js, check its size
 ```
 
-Releases are cut by release-please from Conventional Commits. Each release attaches `broker.js` and `broker.js.sha256` and moves the `vX` major tag.
+Releases are cut by release-please from Conventional Commits. Each release is tagged `vX.Y.Z` and attaches `broker.js` and `broker.js.sha256`. Pin the action to a release tag or its commit SHA: before 1.0 there is no floating major tag, because minor releases may break.
 
 ## License
 
