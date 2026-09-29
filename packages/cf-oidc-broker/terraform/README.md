@@ -2,16 +2,15 @@
 
 > The Terraform / OpenTofu half of [cf-oidc-auth](../../..): deploys the released
 > `broker.js` as a Cloudflare Worker, with its bindings, hourly cleanup cron, and
-> either a custom domain or a workers.dev URL. No `wrangler` or local build is
-> needed.
+> a workers.dev URL (or, optionally, a custom domain). No `wrangler` or local
+> build is needed.
 
 ```hcl
 module "cf_auth" {
   source = "git::https://github.com/cf-contrib/cf-oidc-auth.git//packages/cf-oidc-broker/terraform?ref=v0.3.0" # x-release-please-version
 
   account_id          = var.account_id
-  zone_id             = var.zone_id
-  hostname            = "cf-auth.example.com"
+  hostname            = "cf-auth.example.workers.dev"
   broker_token_secret = { store_id = var.store_id, secret_name = "cf-auth-broker-token" }
   policy_file         = "${path.root}/policy.yaml"
 }
@@ -60,10 +59,14 @@ Secrets Store; the broker reads it on every request.
 
 ## URL
 
-Set **one** of:
+`hostname` decides where the broker is served:
 
-- `hostname` and `zone_id`: the broker is served on that custom domain only, and workers.dev is disabled.
-- `workers_dev_subdomain`: the broker is served on `https://<worker_name>.<subdomain>.workers.dev`. Find your subdomain in the dashboard under Workers & Pages, or with `GET /accounts/<account_id>/workers/subdomain`.
+- A `*.workers.dev` hostname serves it on workers.dev. It must be
+  `<worker_name>.<subdomain>.workers.dev`, with your account's subdomain: find it
+  in the dashboard under Workers & Pages, or with
+  `GET /accounts/<account_id>/workers/subdomain`. Leave `zone_id` unset.
+- Any other hostname is a custom domain and needs `zone_id`. The broker is then
+  served on that domain only, and workers.dev is disabled.
 
 Either way the broker is reachable on exactly one URL, `broker_url`, which is also the OIDC audience.
 
@@ -119,9 +122,8 @@ Nothing is downloaded then.
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `account_id` | yes | | Cloudflare account ID. The broker runs here and mints tokens for it. |
-| `hostname` | one of | `null` | Custom domain for the broker. Needs `zone_id`. |
-| `zone_id` | with `hostname` | `null` | Zone ID of the zone holding `hostname`. |
-| `workers_dev_subdomain` | one of | `null` | Your account's workers.dev subdomain, instead of a custom domain. |
+| `hostname` | yes | | `<worker_name>.<subdomain>.workers.dev`, or a custom domain. |
+| `zone_id` | for a custom domain | `null` | Zone ID of the zone holding a custom-domain `hostname`. |
 | `broker_token_secret` | yes | | `{ store_id, secret_name }` of the Secrets Store secret holding the broker token. Recommended. |
 | `policy_file` | yes | | Policy YAML path, rendered as a template. |
 | `policy_vars` | no | `{}` | Extra template variables for the policy. |

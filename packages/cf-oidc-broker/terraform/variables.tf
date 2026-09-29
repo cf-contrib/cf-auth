@@ -5,20 +5,28 @@ variable "account_id" {
 
 variable "hostname" {
   type        = string
-  description = "Custom domain for the broker, e.g. cf-auth.example.com. Set this and zone_id, or workers_dev_subdomain."
-  default     = null
+  description = "The broker's hostname, which is also the OIDC audience: <worker_name>.<subdomain>.workers.dev, or a custom domain such as cf-auth.example.com (needs zone_id)."
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]+(\\.[a-z0-9-]+)+$", var.hostname))
+    error_message = "hostname must be a bare lowercase hostname, without a scheme, port or path."
+  }
+
+  validation {
+    condition     = !endswith(var.hostname, ".workers.dev") || (startswith(var.hostname, "${var.worker_name}.") && length(split(".", var.hostname)) == 4)
+    error_message = "A workers.dev hostname must be ${var.worker_name}.<subdomain>.workers.dev: Cloudflare serves the Worker under its name."
+  }
 }
 
 variable "zone_id" {
   type        = string
-  description = "Zone ID of the zone that holds hostname."
+  description = "Zone ID of the zone that holds a custom-domain hostname. Not used for workers.dev."
   default     = null
-}
 
-variable "workers_dev_subdomain" {
-  type        = string
-  description = "Your account's workers.dev subdomain. Serves the broker at https://<worker_name>.<subdomain>.workers.dev instead of a custom domain."
-  default     = null
+  validation {
+    condition     = (var.zone_id == null) == endswith(var.hostname, ".workers.dev")
+    error_message = "Set zone_id for a custom domain, and not for a workers.dev hostname."
+  }
 }
 
 variable "broker_token_secret" {
