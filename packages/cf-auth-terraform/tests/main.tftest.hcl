@@ -1,4 +1,4 @@
-# Plans the example with mocked providers: no credentials or network needed.
+# Plans the module with mocked providers: no credentials or network needed.
 # Covers the broker token binding, URL modes, local artifacts, the policy template and
 # the policy size limit.
 mock_provider "cloudflare" {}
@@ -33,6 +33,7 @@ variables {
   account_id          = "0123456789abcdef0123456789abcdef"
   zone_id             = "fedcba9876543210fedcba9876543210"
   hostname            = "cf-auth.example.com"
+  policy_file         = "tests/fixtures/policy.yaml"
 }
 
 run "secrets_store_binding" {
@@ -76,13 +77,13 @@ run "rejects_an_oversized_policy" {
   expect_failures = [cloudflare_worker_version.cf_auth]
 }
 
-run "example_policy_fits" {
+run "sample_policy_fits" {
   command = plan
 
 
   assert {
     condition     = length(local.policy_json) < local.policy_max_length
-    error_message = "the example policy should fit in one binding"
+    error_message = "the sample policy should fit in one binding"
   }
 }
 

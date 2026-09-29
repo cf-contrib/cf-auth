@@ -30,9 +30,9 @@ steps:
 |---|---|---|
 | [Action](packages/cf-auth-action) | `uses: cf-contrib/cf-auth@<version>` | Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. No runtime dependencies. |
 | [Broker](packages/cf-auth-broker) | `broker.js` in [Releases](https://github.com/cf-contrib/cf-auth/releases) | A Worker in your account that checks the OIDC token against your policy and mints the Cloudflare token. |
-| [Terraform example](examples/terraform) | `examples/terraform` | Deploys the released broker with its bindings, custom domain and cleanup cron. |
+| [Terraform module](packages/cf-auth-terraform) | `//packages/cf-auth-terraform?ref=<version>` | Deploys the released broker with its bindings, custom domain and cleanup cron. |
 
-The action and the broker are released together from one tag. The action talks only to the broker, never to the Cloudflare API.
+The action, the broker and the Terraform module are released together from one tag. The action talks only to the broker, never to the Cloudflare API.
 
 ## How it works
 
@@ -75,7 +75,7 @@ If a stored secret is acceptable to you, it's less to run.
 
 1. **Create the broker token.** In the Cloudflare dashboard, create an account-owned API token with only **Account API Tokens Write**, and store it in Secrets Store.
 2. **Write a policy** that says which repos, branches and environments get which permissions. See the [broker's README](packages/cf-auth-broker#policy).
-3. **Deploy the broker** with the [Terraform example](examples/terraform), on a custom domain or workers.dev, then check that `<broker-url>/healthz` returns `200`.
+3. **Deploy the broker** with the [Terraform module](packages/cf-auth-terraform), on a custom domain or workers.dev, then check that `<broker-url>/healthz` returns `200`.
 4. **Add the action** to a job with `permissions: id-token: write`. See the [action's README](packages/cf-auth-action).
 
 ## Development
