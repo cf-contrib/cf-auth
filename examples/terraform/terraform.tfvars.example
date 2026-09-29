@@ -1,0 +1,23 @@
+account_id = "0123456789abcdef0123456789abcdef"
+
+# Custom domain...
+zone_id  = "fedcba9876543210fedcba9876543210"
+hostname = "cf-auth.example.com"
+
+# ...or workers.dev instead (https://cf-auth.<subdomain>.workers.dev):
+# workers_dev_subdomain = "example"
+
+# Optional: deploy a locally built broker.js instead of a release.
+# broker_file = "../../packages/cf-auth-broker/dist/broker.js"
+
+# Optional: pin the release and its checksum (from broker.js.sha256).
+# release_tag   = "v1.0.0"
+# broker_sha256 = "..."
+
+# The broker token lives in Secrets Store; Terraform only references it.
+#   wrangler secrets-store store list --remote
+#   wrangler secrets-store secret create <store-id> --name cf-auth-broker-token --scopes workers --remote
+broker_token_secret = {
+  store_id    = "00000000000000000000000000000000"
+  secret_name = "cf-auth-broker-token"
+}

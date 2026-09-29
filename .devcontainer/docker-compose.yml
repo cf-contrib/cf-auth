@@ -1,0 +1,8 @@
+services:
+  workspace:
+    image: mcr.microsoft.com/devcontainers/base:bookworm
+    command: sleep infinity
+    volumes:
+      - ..:/home/vscode/workspace:cached
+    ports:
+      - 8787

@@ -1,0 +1,38 @@
+# Local development and build-from-source deploys. Production deploys normally
+# use the prebuilt release artifact (see examples/terraform).
+name = "cf-auth"
+main = "src/index.ts"
+compatibility_date = "2026-08-15"
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["17 * * * *"] # hourly cleanup of expired cf-auth:* tokens
+
+# The broker token must come from Secrets Store; a plain `wrangler secret` is
+# refused. For `wrangler dev`, create it in the local store:
+#   wrangler secrets-store secret create <store-id> --name cf-auth-broker-token --scopes workers
+[[secrets_store_secrets]]
+binding = "CF_AUTH_BROKER_TOKEN"
+store_id = "00000000000000000000000000000000"
+secret_name = "cf-auth-broker-token"
+
+[vars]
+CF_AUTH_BROKER_ACCOUNT_ID = "00000000000000000000000000000000"
+
+[vars.CF_AUTH_BROKER_POLICY]
+version = 1
+
+[vars.CF_AUTH_BROKER_POLICY.github]
+audience = "http://localhost:8787"
+owner_id = "100000001"
+
+[[vars.CF_AUTH_BROKER_POLICY.rules]]
+name = "workers-deploy"
+match = { repository_id = "200000002", ref = "refs/heads/main" }
+
+[[vars.CF_AUTH_BROKER_POLICY.rules.token.policies]]
+effect = "allow"
+permissions = ["Workers Scripts Write"]
+resources = { "com.cloudflare.api.account.00000000000000000000000000000000" = "*" }

@@ -1,0 +1,14 @@
+# Uses policy_vars, for tests/main.tftest.hcl.
+version: 1
+github:
+  audience: ${broker_url}
+  owner_id: "${owner_id}"
+rules:
+  - name: e2e
+    match:
+      repository_id: "${repository_id}"
+    token:
+      policies:
+        - permissions: ["Workers Scripts Read"]
+          resources:
+            "com.cloudflare.api.account.${account_id}": "*"
