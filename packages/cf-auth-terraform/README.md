@@ -7,7 +7,7 @@
 
 ```hcl
 module "cf_auth" {
-  source = "git::https://github.com/cf-contrib/cf-auth.git//packages/cf-auth-terraform?ref=v0.2.0" # x-release-please-version
+  source = "git::https://github.com/cf-contrib/cf-auth.git//packages/cf-auth-terraform?ref=v0.3.0" # x-release-please-version
 
   account_id          = var.account_id
   zone_id             = var.zone_id

@@ -43,7 +43,7 @@ variable "policy_vars" {
 variable "release_tag" {
   type        = string
   description = "cf-auth release to deploy, e.g. v1.2.3, or \"latest\". Defaults to the release this module comes from."
-  default     = "v0.2.0" # x-release-please-version
+  default     = "v0.3.0" # x-release-please-version
 }
 
 variable "broker_file" {
