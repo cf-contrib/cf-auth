@@ -51,6 +51,7 @@ A floating `v1` tag will follow each release from 1.0 on.
 | `broker-url` | yes | Broker base URL, e.g. `https://cf-auth.example.com`. Its origin is the OIDC audience and must equal `github.audience` in the policy. |
 | `rule` | no | Rule to request. Recommended when more than one rule could match. |
 | `ttl` | no | Requested lifetime such as `5m` or `1h`. Defaults to the rule's `ttl`, capped at its `max_ttl`. |
+| `r2-credentials` | no | `true` to also export S3-compatible R2 credentials derived from the token. Default `false`. See [R2 over the S3 API](#r2-over-the-s3-api). |
 
 ## What it does
 
@@ -59,13 +60,14 @@ A floating `v1` tag will follow each release from 1.0 on.
   - asks the broker for a Cloudflare token (not retried, because minting isn't idempotent);
   - masks the token and the OIDC token;
   - exports `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for the rest of the job;
+  - with `r2-credentials: true`, also exports S3-compatible R2 credentials (`AWS_*`) and masks the secret. The access key ID is the token ID, which isn't secret and is logged;
   - logs the token ID, rule and expiry (none of them secret), so a run can be matched to the broker's audit log:
     ```
     cf-auth: minted token 3f2a… (rule workers-deploy, expires 2026-09-28T12:15:00Z)
     ```
 - **Post step:** revokes the token. It runs even when the job fails. A failed revoke is a warning, not an error: the token expires on its own and the broker's cron deletes it.
 
-None of this can be switched off. Exported values are also in the `env` context, so actions that take credentials as inputs can use `${{ env.CLOUDFLARE_API_TOKEN }}`.
+Apart from `r2-credentials`, none of this can be switched off. Exported values are also in the `env` context, so actions that take credentials as inputs can use `${{ env.CLOUDFLARE_API_TOKEN }}`.
 
 ## Examples
 
@@ -94,6 +96,68 @@ None of this can be switched off. Exported values are also in the `env` context,
           ttl: 30m
       - run: tofu apply -auto-approve # the cloudflare provider reads CLOUDFLARE_API_TOKEN
 ```
+
+### R2 over the S3 API
+
+S3 tools need an access key pair, not an API token. R2 derives one from any token with R2 permissions: the access key ID is the token's ID, and the secret is the SHA-256 of its value. With `r2-credentials: true` the action exports that pair along with the account's R2 endpoint:
+
+| Variable | Value |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | the token's ID (not secret, not masked) |
+| `AWS_SECRET_ACCESS_KEY` | SHA-256 (hex) of the token, masked |
+| `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN` | empty, clearing any left by an earlier AWS step |
+| `AWS_ENDPOINT_URL_S3` | `https://<account_id>.r2.cloudflarestorage.com` |
+| `AWS_REGION`, `AWS_DEFAULT_REGION` | `auto` |
+
+**AWS CLI and SDKs** read all of these. `AWS_ENDPOINT_URL_S3` needs a version with service-specific endpoint support (added in 2023). With an older one, pass the endpoint yourself:
+
+```yaml
+      - uses: cf-contrib/cf-auth@v0.1.0 # x-release-please-version
+        with:
+          broker-url: https://cf-auth.example.com
+          rule: r2-sync
+          r2-credentials: true
+      - run: aws s3 sync ./dist "s3://my-bucket/" --endpoint-url "$AWS_ENDPOINT_URL_S3"
+```
+
+**OpenTofu / Terraform `s3` backend** takes the credentials from the environment, but R2 isn't AWS, so the backend's AWS-only checks must be switched off:
+
+```hcl
+terraform {
+  backend "s3" {
+    bucket = "tofu-state"
+    key    = "prod/terraform.tfstate"
+    region = "auto"
+
+    endpoints = { s3 = "https://<account_id>.r2.cloudflarestorage.com" }
+
+    skip_credentials_validation = true
+    skip_region_validation      = true
+    skip_requesting_account_id  = true
+    skip_metadata_api_check     = true
+    skip_s3_checksum            = true
+    use_path_style              = true
+  }
+}
+```
+
+**rclone** doesn't read `AWS_ENDPOINT_URL_S3`. Point it at R2 and tell it to use the environment's keys:
+
+```yaml
+      - run: rclone copy ./dist r2:my-bucket
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ENV_AUTH: "true"
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ env.AWS_ENDPOINT_URL_S3 }}
+```
+
+Notes:
+
+- **Permissions:** the rule must grant R2 permissions, e.g. `Workers R2 Storage Bucket Item Read`/`Write` on `com.cloudflare.edge.r2.bucket.<account_id>_default_<bucket>`. Without them the credentials are rejected.
+- **Lifetime:** the pair lives and dies with the token. The post step's revoke invalidates it too.
+- **Why it's opt-in:** it replaces any `AWS_*` credentials already set in the job. A job that also talks to AWS should get R2 access in a separate job.
+- **Jurisdictions:** buckets in a jurisdiction (`eu`, `fedramp`) use a different endpoint, e.g. `https://<account_id>.eu.r2.cloudflarestorage.com`. Set it in the tool's config, which takes precedence over `AWS_ENDPOINT_URL_S3`.
 
 ### Two scopes: two jobs
 

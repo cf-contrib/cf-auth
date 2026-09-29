@@ -59,6 +59,8 @@ jobs:
           node packages/cf-auth-action/test/stub.js > "$RUNNER_TEMP/stub.log" 2>&1 &
           for _ in $(seq 20); do grep -q listening "$RUNNER_TEMP/stub.log" && exit 0; sleep 0.5; done
           cat "$RUNNER_TEMP/stub.log"; exit 1
+      - name: Leave a Stale AWS Session Token
+        run: echo "AWS_SESSION_TOKEN=stale-session-token" >> "$GITHUB_ENV"
       - name: Run cf-auth
         uses: ./
         env:
@@ -68,11 +70,19 @@ jobs:
           broker-url: http://127.0.0.1:8787
           rule: smoke
           ttl: 5m
+          r2-credentials: true
       - name: Check Exported Credentials
         run: |
           test "$CLOUDFLARE_API_TOKEN" = stub-cloudflare-token
           test "$CLOUDFLARE_ACCOUNT_ID" = 0123456789abcdef0123456789abcdef
           test "${{ env.CLOUDFLARE_ACCOUNT_ID }}" = 0123456789abcdef0123456789abcdef
+          test "$AWS_ACCESS_KEY_ID" = stub-token-id
+          test "$AWS_SECRET_ACCESS_KEY" = "$(printf %s stub-cloudflare-token | sha256sum | cut -d' ' -f1)"
+          test "$AWS_ENDPOINT_URL_S3" = https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com
+          test "$AWS_REGION" = auto
+          test "$AWS_DEFAULT_REGION" = auto
+          test -z "$AWS_SESSION_TOKEN"     # the stale one set before cf-auth is cleared
+          test -z "$AWS_SECURITY_TOKEN"
 
   release:
     needs: [test, smoke]

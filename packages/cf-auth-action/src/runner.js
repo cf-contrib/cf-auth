@@ -9,6 +9,18 @@ import { setTimeout as sleep } from "node:timers/promises";
 /** @param {string} name */
 export const input = (name) => process.env[`INPUT_${name.replace(/ /g, "_").toUpperCase()}`]?.trim() ?? "";
 
+/**
+ * Reads a boolean input the way @actions/core does: `true`/`True`/`TRUE` or
+ * `false`/`False`/`FALSE`. Unset counts as false.
+ * @param {string} name
+ */
+export function booleanInput(name) {
+  const value = input(name);
+  if (["true", "True", "TRUE"].includes(value)) return true;
+  if (["", "false", "False", "FALSE"].includes(value)) return false;
+  throw new Error(`Input ${name} must be true or false, got: ${value}`);
+}
+
 /** @param {string} name */
 export const state = (name) => process.env[`STATE_${name}`] ?? "";
 
