@@ -19,7 +19,7 @@ jobs:
       id-token: write # required: lets the job request an OIDC token
     steps:
       - uses: actions/checkout@v6
-      - uses: cf-contrib/cf-auth@v1
+      - uses: cf-contrib/cf-auth@v0.1.0 # x-release-please-version
         with:
           broker-url: https://cf-auth.example.com
           rule: workers-deploy
@@ -27,6 +27,22 @@ jobs:
 ```
 
 It needs a deployed [broker](../cf-auth-broker) whose policy allows this workflow.
+
+## Versions
+
+Pin a release. Before 1.0 there's no floating `v0` tag, because a minor release may contain breaking changes:
+
+```yaml
+- uses: cf-contrib/cf-auth@v0.1.0 # x-release-please-version
+```
+
+For the strictest setup, pin the commit SHA the tag points to, and let Dependabot's `github-actions` updates keep it current:
+
+```yaml
+- uses: cf-contrib/cf-auth@<commit-sha> # v0.1.0
+```
+
+A floating `v1` tag will follow each release from 1.0 on.
 
 ## Inputs
 
@@ -58,7 +74,7 @@ None of this can be switched off. Exported values are also in the `env` context,
 `wrangler-action` sets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from its own inputs. If you omit them it overwrites the exported values with empty strings, so pass them explicitly:
 
 ```yaml
-      - uses: cf-contrib/cf-auth@v1
+      - uses: cf-contrib/cf-auth@v0.1.0 # x-release-please-version
         with:
           broker-url: https://cf-auth.example.com
           rule: workers-deploy
@@ -71,7 +87,7 @@ None of this can be switched off. Exported values are also in the `env` context,
 ### Terraform / OpenTofu apply
 
 ```yaml
-      - uses: cf-contrib/cf-auth@v1
+      - uses: cf-contrib/cf-auth@v0.1.0 # x-release-please-version
         with:
           broker-url: https://cf-auth.example.com
           rule: infra-cloudflare
@@ -89,7 +105,7 @@ jobs:
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/checkout@v6
-      - uses: cf-contrib/cf-auth@v1
+      - uses: cf-contrib/cf-auth@v0.1.0 # x-release-please-version
         with: { broker-url: https://cf-auth.example.com, rule: service-dns }
       - run: ./scripts/update-dns.sh
 
@@ -100,7 +116,7 @@ jobs:
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/checkout@v6
-      - uses: cf-contrib/cf-auth@v1
+      - uses: cf-contrib/cf-auth@v0.1.0 # x-release-please-version
         with: { broker-url: https://cf-auth.example.com, rule: workers-deploy }
       - run: npx wrangler deploy
 ```

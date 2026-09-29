@@ -8,7 +8,8 @@
       "include-v-in-release-name": true,
       "include-component-in-tag": false,
       "initial-version": "0.1.0",
-      "bump-minor-pre-major": true
+      "bump-minor-pre-major": true,
+      "extra-files": ["README.md", "packages/cf-auth-action/README.md", "examples/terraform/README.md"]
     }
   }
 }
