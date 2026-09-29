@@ -68,11 +68,16 @@ jobs:
           broker-url: http://127.0.0.1:8787
           rule: smoke
           ttl: 5m
+          s3-credentials: true
       - name: Check Exported Credentials
         run: |
           test "$CLOUDFLARE_API_TOKEN" = stub-cloudflare-token
           test "$CLOUDFLARE_ACCOUNT_ID" = 0123456789abcdef0123456789abcdef
           test "${{ env.CLOUDFLARE_ACCOUNT_ID }}" = 0123456789abcdef0123456789abcdef
+          test "$AWS_ACCESS_KEY_ID" = stub-token-id
+          test "$AWS_SECRET_ACCESS_KEY" = "$(printf %s stub-cloudflare-token | sha256sum | cut -d' ' -f1)"
+          test "$AWS_ENDPOINT_URL_S3" = https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com
+          test "$AWS_REGION" = auto
 
   release:
     needs: [test, smoke]

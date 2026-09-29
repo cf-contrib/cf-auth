@@ -51,6 +51,7 @@ A floating `v1` tag will follow each release from 1.0 on.
 | `broker-url` | yes | Broker base URL, e.g. `https://cf-auth.example.com`. Its origin is the OIDC audience and must equal `github.audience` in the policy. |
 | `rule` | no | Rule to request. Recommended when more than one rule could match. |
 | `ttl` | no | Requested lifetime such as `5m` or `1h`. Defaults to the rule's `ttl`, capped at its `max_ttl`. |
+| `s3-credentials` | no | `true` to also export R2 S3 API credentials derived from the token. Default `false`. See [R2 over the S3 API](#r2-over-the-s3-api). |
 
 ## What it does
 
@@ -59,13 +60,14 @@ A floating `v1` tag will follow each release from 1.0 on.
   - asks the broker for a Cloudflare token (not retried, because minting isn't idempotent);
   - masks the token and the OIDC token;
   - exports `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for the rest of the job;
+  - with `s3-credentials: true`, also masks and exports `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL_S3` and `AWS_REGION`;
   - logs the token ID, rule and expiry (none of them secret), so a run can be matched to the broker's audit log:
     ```
     cf-auth: minted token 3f2a… (rule workers-deploy, expires 2026-09-28T12:15:00Z)
     ```
 - **Post step:** revokes the token. It runs even when the job fails. A failed revoke is a warning, not an error: the token expires on its own and the broker's cron deletes it.
 
-None of this can be switched off. Exported values are also in the `env` context, so actions that take credentials as inputs can use `${{ env.CLOUDFLARE_API_TOKEN }}`.
+Apart from `s3-credentials`, none of this can be switched off. Exported values are also in the `env` context, so actions that take credentials as inputs can use `${{ env.CLOUDFLARE_API_TOKEN }}`.
 
 ## Examples
 
@@ -94,6 +96,32 @@ None of this can be switched off. Exported values are also in the `env` context,
           ttl: 30m
       - run: tofu apply -auto-approve # the cloudflare provider reads CLOUDFLARE_API_TOKEN
 ```
+
+### R2 over the S3 API
+
+Tools that speak S3 (`aws s3`, `rclone`, the OpenTofu/Terraform `s3` backend) need an access key pair, not an API token. R2 derives one from any token with R2 permissions: the access key ID is the token's ID and the secret is the SHA-256 of its value. With `s3-credentials: true` the action exports that pair along with the account's R2 endpoint:
+
+| Variable | Value |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | the token's ID |
+| `AWS_SECRET_ACCESS_KEY` | SHA-256 (hex) of the token, masked |
+| `AWS_ENDPOINT_URL_S3` | `https://<account_id>.r2.cloudflarestorage.com` |
+| `AWS_REGION` | `auto` |
+
+```yaml
+      - uses: cf-contrib/cf-auth@v0.1.0 # x-release-please-version
+        with:
+          broker-url: https://cf-auth.example.com
+          rule: infra-cloudflare
+          ttl: 30m
+          s3-credentials: true
+      - run: tofu init && tofu apply -auto-approve # s3 backend on R2, cloudflare provider
+```
+
+- The rule must grant R2 permissions, e.g. `Workers R2 Storage Bucket Item Read`/`Write` on `com.cloudflare.edge.r2.bucket.<account_id>_default_<bucket>`. Without them the credentials are rejected.
+- The pair lives and dies with the token: the post step's revoke invalidates it too.
+- It's opt-in because it overwrites any `AWS_*` credentials already set in the job. A job that also talks to AWS should get R2 access in a separate job.
+- Buckets in a jurisdiction (`eu`, `fedramp`) use a different endpoint, e.g. `https://<account_id>.eu.r2.cloudflarestorage.com`. Set it in the tool's config, which takes precedence over `AWS_ENDPOINT_URL_S3`.
 
 ### Two scopes: two jobs
 
