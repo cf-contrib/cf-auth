@@ -1,6 +1,6 @@
 {
   "name": "cf-auth",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Keyless Cloudflare API access from GitHub Actions via OIDC",
   "license": "MIT",
