@@ -1,5 +1,5 @@
 # Local development and build-from-source deploys. Production deploys normally
-# use the prebuilt release artifact (see packages/cf-auth-terraform).
+# use the prebuilt release artifact (see terraform/).
 name = "cf-auth"
 main = "src/index.ts"
 compatibility_date = "2026-08-15"

@@ -45,7 +45,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
    gh api orgs/<org> --jq .id           # github.owner_id
    gh api repos/<org>/<repo> --jq .id   # match.repository_id
    ```
-3. **Deploy** the released `broker.js` with the [Terraform module](../cf-auth-terraform). It downloads the release (optionally pinned to a checksum) and sets up the bindings, custom domain and cron. To build from source instead:
+3. **Deploy** the released `broker.js` with the [Terraform module](terraform) (`//packages/cf-auth-broker/terraform?ref=<version>`). It downloads the release (optionally pinned to a checksum) and sets up the bindings, custom domain and cron. To build from source instead:
    ```sh
    wrangler deploy   # after setting CF_AUTH_BROKER_ACCOUNT_ID, CF_AUTH_BROKER_POLICY and [[secrets_store_secrets]] in wrangler.toml
    ```
