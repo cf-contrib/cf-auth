@@ -42,7 +42,7 @@ updates:
       prefix: "chore"
       include: "scope"
   - package-ecosystem: "terraform"
-    directory: "/examples/terraform"
+    directory: "/packages/cf-auth-terraform"
     schedule:
       interval: "weekly"
     groups:

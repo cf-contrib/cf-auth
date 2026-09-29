@@ -35,8 +35,8 @@ jobs:
         run: nix develop --command pnpm build
       - name: Check Bundle
         run: nix develop --command pnpm --filter cf-auth-broker check:bundle
-      - name: Validate Terraform Example
-        working-directory: examples/terraform
+      - name: Validate Terraform Module
+        working-directory: packages/cf-auth-terraform
         run: |
           nix develop --command tofu fmt -check -recursive
           nix develop --command tofu init -backend=false

@@ -45,7 +45,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
    gh api orgs/<org> --jq .id           # github.owner_id
    gh api repos/<org>/<repo> --jq .id   # match.repository_id
    ```
-3. **Deploy** the released `broker.js` with the [Terraform example](../../examples/terraform). It downloads the release (optionally pinned to a checksum) and sets up the bindings, custom domain and cron. To build from source instead:
+3. **Deploy** the released `broker.js` with the [Terraform module](../cf-auth-terraform). It downloads the release (optionally pinned to a checksum) and sets up the bindings, custom domain and cron. To build from source instead:
    ```sh
    wrangler deploy   # after setting CF_AUTH_BROKER_ACCOUNT_ID, CF_AUTH_BROKER_POLICY and [[secrets_store_secrets]] in wrangler.toml
    ```
@@ -143,7 +143,7 @@ curl -H "Authorization: Bearer <token>" \
 | One zone | `com.cloudflare.api.account.zone.<zone_id>: "*"` |
 | Every zone in the account | `com.cloudflare.api.account.<account_id>: { com.cloudflare.api.account.zone.*: "*" }` |
 
-Keys must start with `com.cloudflare.`, and account keys must name `CF_AUTH_BROKER_ACCOUNT_ID`. Add a comment with the zone's name next to each zone ID so reviewers can tell them apart. With the Terraform example, write `${account_id}` and it's filled in from `var.account_id`.
+Keys must start with `com.cloudflare.`, and account keys must name `CF_AUTH_BROKER_ACCOUNT_ID`. Add a comment with the zone's name next to each zone ID so reviewers can tell them apart. With the Terraform module, write `${account_id}` and it's filled in from `var.account_id`.
 
 ### TTL and names
 
@@ -212,7 +212,7 @@ Denials are `token.deny` with a `reason`:
 
 ## Limitations
 
-- **The policy must fit in 5 KB.** `CF_AUTH_BROKER_POLICY` is a Worker binding, and Cloudflare caps each at 5 KB, which is roughly 15–20 rules. The Terraform example fails the plan if it's larger. Split large policies across brokers per team or trust domain.
+- **The policy must fit in 5 KB.** `CF_AUTH_BROKER_POLICY` is a Worker binding, and Cloudflare caps each at 5 KB, which is roughly 15–20 rules. The Terraform module fails the plan if it's larger. Split large policies across brokers per team or trust domain.
 - **One account per broker.** Tokens are minted in `CF_AUTH_BROKER_ACCOUNT_ID` only. Deploy one broker per account.
 - **GitHub Actions only.** Other OIDC issuers (GitLab CI, Buildkite, …) aren't supported yet.
 - **No JWT replay cache.** A stolen JWT can be exchanged again until it expires. The custom audience and its short lifetime limit this.

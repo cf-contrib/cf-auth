@@ -31,8 +31,7 @@ variable "broker_token_secret" {
 
 variable "policy_file" {
   type        = string
-  description = "Path to the policy YAML, rendered as a template with $${account_id}, $${broker_url} and policy_vars."
-  default     = "policy.yaml"
+  description = "Path to the policy YAML, rendered as a template with $${account_id}, $${broker_url} and policy_vars. Use an absolute path such as \"$${path.root}/policy.yaml\"."
 }
 
 variable "policy_vars" {
@@ -43,8 +42,8 @@ variable "policy_vars" {
 
 variable "release_tag" {
   type        = string
-  description = "cf-auth release to deploy, e.g. v1.2.3, or \"latest\"."
-  default     = "latest"
+  description = "cf-auth release to deploy, e.g. v1.2.3, or \"latest\". Defaults to the release this module comes from."
+  default     = "v0.2.0" # x-release-please-version
 }
 
 variable "broker_file" {
