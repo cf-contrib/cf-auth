@@ -45,11 +45,11 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
    gh api orgs/<org> --jq .id           # github.owner_id
    gh api repos/<org>/<repo> --jq .id   # match.repository_id
    ```
-3. **Deploy** the released `broker.js` with the [Terraform module](terraform) (`//packages/cf-oidc-broker/terraform?ref=<version>`). It downloads the release (optionally pinned to a checksum) and sets up the bindings, custom domain and cron. To build from source instead:
+3. **Deploy** the released `broker.js` with the [Terraform module](terraform) (`//packages/cf-oidc-broker/terraform?ref=<version>`). It downloads the release (optionally pinned to a checksum) and sets up the bindings, the workers.dev URL (or an optional custom domain) and the cron. To build from source instead:
    ```sh
    wrangler deploy   # after setting CF_AUTH_BROKER_ACCOUNT_ID, CF_AUTH_BROKER_POLICY and [[secrets_store_secrets]] in wrangler.toml
    ```
-4. **Check** that `<broker-url>/healthz` returns `200` (a custom domain, or `https://cf-auth.<subdomain>.workers.dev`). A `500` means the policy was rejected or the broker token can't be read; the reasons are in Workers Logs.
+4. **Check** that `<broker-url>/healthz` returns `200` (`https://cf-auth.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or the broker token can't be read; the reasons are in Workers Logs.
 
 ## Bindings
 

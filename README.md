@@ -74,7 +74,7 @@ If a stored secret is acceptable to you, it's less to run.
 
 1. **Create the broker token.** In the Cloudflare dashboard, create an account-owned API token with only **Account API Tokens Write**, and store it in Secrets Store.
 2. **Write a policy** that says which repos, branches and environments get which permissions. See the [broker's README](packages/cf-oidc-broker#policy).
-3. **Deploy the broker** with the [Terraform module](packages/cf-oidc-broker/terraform), on a custom domain or workers.dev, then check that `<broker-url>/healthz` returns `200`.
+3. **Deploy the broker** with the [Terraform module](packages/cf-oidc-broker/terraform), on workers.dev (a custom domain is optional), then check that `<broker-url>/healthz` returns `200`.
 4. **Add the action** to a job with `permissions: id-token: write`. See the [action's README](packages/cf-oidc-action).
 
 ## Development

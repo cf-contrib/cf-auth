@@ -1,12 +1,12 @@
 locals {
-  custom_domain = var.hostname != null
+  custom_domain = !endswith(var.hostname, ".workers.dev")
 
   # The OIDC audience. The policy gets it as $${broker_url}, so the two can't drift.
-  broker_url = local.custom_domain ? "https://${var.hostname}" : "https://${var.worker_name}.${var.workers_dev_subdomain}.workers.dev"
+  broker_url = "https://${var.hostname}"
 }
 
-# Worker script. It's reachable on exactly one URL, the OIDC audience: the
-# custom domain if there is one, otherwise workers.dev.
+# Worker script. It's reachable on exactly one URL, the OIDC audience: its
+# workers.dev URL, or the custom domain if hostname is one.
 resource "cloudflare_worker" "cf_auth" {
   account_id = var.account_id
   name       = var.worker_name
@@ -44,11 +44,6 @@ resource "cloudflare_worker_version" "cf_auth" {
   main_module        = "broker.js"
 
   lifecycle {
-    precondition {
-      condition     = (var.hostname == null) != (var.workers_dev_subdomain == null) && (var.hostname == null) == (var.zone_id == null)
-      error_message = "Set hostname and zone_id for a custom domain, or workers_dev_subdomain for workers.dev."
-    }
-
     precondition {
       condition     = var.broker_sha256 == null || sha256(local.broker_js) == var.broker_sha256
       error_message = "broker.js does not match broker_sha256."

@@ -31,8 +31,7 @@ override_data {
 variables {
   broker_token_secret = { store_id = "00000000000000000000000000000000", secret_name = "cf-auth-broker-token" }
   account_id          = "0123456789abcdef0123456789abcdef"
-  zone_id             = "fedcba9876543210fedcba9876543210"
-  hostname            = "cf-auth.example.com"
+  hostname            = "cf-auth.example.workers.dev"
   policy_file         = "tests/fixtures/policy.yaml"
 }
 
@@ -87,29 +86,8 @@ run "sample_policy_fits" {
   }
 }
 
-run "custom_domain" {
-  command = plan
-
-
-  assert {
-    condition     = length(cloudflare_workers_custom_domain.cf_auth) == 1 && !cloudflare_worker.cf_auth.subdomain.enabled
-    error_message = "a custom domain deploy should disable workers.dev"
-  }
-
-  assert {
-    condition     = output.broker_url == "https://cf-auth.example.com"
-    error_message = "broker_url should be the custom domain"
-  }
-}
-
 run "workers_dev" {
   command = plan
-
-  variables {
-    hostname              = null
-    zone_id               = null
-    workers_dev_subdomain = "example"
-  }
 
   assert {
     condition     = length(cloudflare_workers_custom_domain.cf_auth) == 0 && cloudflare_worker.cf_auth.subdomain.enabled
@@ -127,14 +105,77 @@ run "workers_dev" {
   }
 }
 
-run "rejects_both_url_modes" {
+run "custom_domain" {
   command = plan
 
   variables {
-    workers_dev_subdomain = "example"
+    hostname = "cf-auth.example.com"
+    zone_id  = "fedcba9876543210fedcba9876543210"
   }
 
-  expect_failures = [cloudflare_worker_version.cf_auth]
+  assert {
+    condition     = length(cloudflare_workers_custom_domain.cf_auth) == 1 && !cloudflare_worker.cf_auth.subdomain.enabled
+    error_message = "a custom domain deploy should disable workers.dev"
+  }
+
+  assert {
+    condition     = output.broker_url == "https://cf-auth.example.com"
+    error_message = "broker_url should be the custom domain"
+  }
+}
+
+run "workers_dev_follows_worker_name" {
+  command = plan
+
+  variables {
+    worker_name = "auth"
+    hostname    = "auth.example.workers.dev"
+  }
+
+  assert {
+    condition     = output.broker_url == "https://auth.example.workers.dev"
+    error_message = "a workers.dev hostname matching worker_name should be accepted"
+  }
+}
+
+run "rejects_a_workers_dev_name_mismatch" {
+  command = plan
+
+  variables {
+    hostname = "auth.example.workers.dev"
+  }
+
+  expect_failures = [var.hostname]
+}
+
+run "rejects_a_url" {
+  command = plan
+
+  variables {
+    hostname = "https://cf-auth.example.workers.dev"
+  }
+
+  expect_failures = [var.hostname]
+}
+
+run "rejects_a_custom_domain_without_zone_id" {
+  command = plan
+
+  variables {
+    hostname = "cf-auth.example.com"
+  }
+
+  expect_failures = [var.zone_id]
+}
+
+run "rejects_zone_id_on_workers_dev" {
+  command = plan
+
+  variables {
+    zone_id = "fedcba9876543210fedcba9876543210"
+  }
+
+  expect_failures = [var.zone_id]
 }
 
 run "local_broker_file" {
