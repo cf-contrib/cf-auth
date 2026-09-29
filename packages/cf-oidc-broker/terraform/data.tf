@@ -3,7 +3,7 @@ data "github_release" "cf_auth" {
   count = var.broker_file == null ? 1 : 0
 
   owner       = "cf-contrib"
-  repository  = "cf-auth"
+  repository  = "cf-oidc-auth"
   retrieve_by = var.release_tag == "latest" ? "latest" : "tag"
   release_tag = var.release_tag == "latest" ? null : var.release_tag
 }

@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/devcontainers/spec/refs/heads/main/schemas/devContainer.base.schema.json",
-  "name": "cf-auth",
+  "name": "cf-oidc-auth",
   "service": "workspace",
   "dockerComposeFile": "docker-compose.yml",
   "workspaceFolder": "/home/vscode/workspace",

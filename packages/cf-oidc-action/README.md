@@ -1,9 +1,9 @@
-# cf-auth action
+# cf-oidc-auth action
 
-> The GitHub Action half of [cf-auth](../..): exchange the job's OIDC token for
+> The GitHub Action half of [cf-oidc-auth](../..): exchange the job's OIDC token for
 > a short-lived Cloudflare API token, export it, and revoke it when the job ends.
 
-[![CI](https://github.com/cf-contrib/cf-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-auth/actions/workflows/ci.yml)
+[![CI](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 
 > [!NOTE]
@@ -19,27 +19,27 @@ jobs:
       id-token: write # required: lets the job request an OIDC token
     steps:
       - uses: actions/checkout@v6
-      - uses: cf-contrib/cf-auth@v0.3.0 # x-release-please-version
+      - uses: cf-contrib/cf-oidc-auth@v0.3.0 # x-release-please-version
         with:
           broker-url: https://cf-auth.example.com
           rule: workers-deploy
       - run: npx wrangler deploy
 ```
 
-It needs a deployed [broker](../cf-auth-broker) whose policy allows this workflow.
+It needs a deployed [broker](../cf-oidc-broker) whose policy allows this workflow.
 
 ## Versions
 
 Pin a release. Before 1.0 there's no floating `v0` tag, because a minor release may contain breaking changes:
 
 ```yaml
-- uses: cf-contrib/cf-auth@v0.3.0 # x-release-please-version
+- uses: cf-contrib/cf-oidc-auth@v0.3.0 # x-release-please-version
 ```
 
 For the strictest setup, pin the commit SHA the tag points to, and let Dependabot's `github-actions` updates keep it current:
 
 ```yaml
-- uses: cf-contrib/cf-auth@<commit-sha> # v0.1.0
+- uses: cf-contrib/cf-oidc-auth@<commit-sha> # v0.1.0
 ```
 
 A floating `v1` tag will follow each release from 1.0 on.
@@ -76,7 +76,7 @@ Apart from `r2-credentials`, none of this can be switched off. Exported values a
 `wrangler-action` sets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from its own inputs. If you omit them it overwrites the exported values with empty strings, so pass them explicitly:
 
 ```yaml
-      - uses: cf-contrib/cf-auth@v0.3.0 # x-release-please-version
+      - uses: cf-contrib/cf-oidc-auth@v0.3.0 # x-release-please-version
         with:
           broker-url: https://cf-auth.example.com
           rule: workers-deploy
@@ -89,7 +89,7 @@ Apart from `r2-credentials`, none of this can be switched off. Exported values a
 ### Terraform / OpenTofu apply
 
 ```yaml
-      - uses: cf-contrib/cf-auth@v0.3.0 # x-release-please-version
+      - uses: cf-contrib/cf-oidc-auth@v0.3.0 # x-release-please-version
         with:
           broker-url: https://cf-auth.example.com
           rule: infra-cloudflare
@@ -112,7 +112,7 @@ S3 tools need an access key pair, not an API token. R2 derives one from any toke
 **AWS CLI and SDKs** read all of these. `AWS_ENDPOINT_URL_S3` needs a version with service-specific endpoint support (added in 2023). With an older one, pass the endpoint yourself:
 
 ```yaml
-      - uses: cf-contrib/cf-auth@v0.3.0 # x-release-please-version
+      - uses: cf-contrib/cf-oidc-auth@v0.3.0 # x-release-please-version
         with:
           broker-url: https://cf-auth.example.com
           rule: r2-sync
@@ -169,7 +169,7 @@ jobs:
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/checkout@v6
-      - uses: cf-contrib/cf-auth@v0.3.0 # x-release-please-version
+      - uses: cf-contrib/cf-oidc-auth@v0.3.0 # x-release-please-version
         with: { broker-url: https://cf-auth.example.com, rule: service-dns }
       - run: ./scripts/update-dns.sh
 
@@ -180,7 +180,7 @@ jobs:
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/checkout@v6
-      - uses: cf-contrib/cf-auth@v0.3.0 # x-release-please-version
+      - uses: cf-contrib/cf-oidc-auth@v0.3.0 # x-release-please-version
         with: { broker-url: https://cf-auth.example.com, rule: workers-deploy }
       - run: npx wrangler deploy
 ```

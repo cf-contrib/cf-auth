@@ -3,7 +3,7 @@
   "packages": {
     ".": {
       "release-type": "node",
-      "package-name": "cf-auth",
+      "package-name": "cf-oidc-auth",
       "include-v-in-tag": true,
       "include-v-in-release-name": true,
       "include-component-in-tag": false,
@@ -11,9 +11,9 @@
       "bump-minor-pre-major": true,
       "extra-files": [
         "README.md",
-        "packages/cf-auth-action/README.md",
-        "packages/cf-auth-broker/terraform/README.md",
-        "packages/cf-auth-broker/terraform/variables.tf"
+        "packages/cf-oidc-action/README.md",
+        "packages/cf-oidc-broker/terraform/README.md",
+        "packages/cf-oidc-broker/terraform/variables.tf"
       ]
     }
   }

@@ -1,7 +1,7 @@
 // @ts-check
-/** @typedef {import("../../cf-auth-broker/src/api.js").TokenRequest} TokenRequest */
-/** @typedef {import("../../cf-auth-broker/src/api.js").TokenResponse} TokenResponse */
-/** @typedef {import("../../cf-auth-broker/src/api.js").ErrorResponse} ErrorResponse */
+/** @typedef {import("../../cf-oidc-broker/src/api.js").TokenRequest} TokenRequest */
+/** @typedef {import("../../cf-oidc-broker/src/api.js").TokenResponse} TokenResponse */
+/** @typedef {import("../../cf-oidc-broker/src/api.js").ErrorResponse} ErrorResponse */
 import { createHash } from "node:crypto";
 import { booleanInput, brokerURL, fail, idToken, input, mask, write } from "./runner.js";
 
