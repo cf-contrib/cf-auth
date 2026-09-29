@@ -1,13 +1,13 @@
 # cf-auth Terraform module
 
-> The Terraform / OpenTofu half of [cf-auth](../..): deploys the released
+> The Terraform / OpenTofu half of [cf-auth](../../..): deploys the released
 > `broker.js` as a Cloudflare Worker, with its bindings, hourly cleanup cron, and
 > either a custom domain or a workers.dev URL. No `wrangler` or local build is
 > needed.
 
 ```hcl
 module "cf_auth" {
-  source = "git::https://github.com/cf-contrib/cf-auth.git//packages/cf-auth-terraform?ref=v0.3.0" # x-release-please-version
+  source = "git::https://github.com/cf-contrib/cf-auth.git//packages/cf-auth-broker/terraform?ref=v0.3.0" # x-release-please-version
 
   account_id          = var.account_id
   zone_id             = var.zone_id
@@ -28,7 +28,7 @@ by default deploys the `broker.js` of the release its `ref` points to.
 
 - Terraform or OpenTofu >= 1.9.
 - The **broker token**, an account-owned API token with only
-  **Account API Tokens Write** (see the [broker's README](../cf-auth-broker#deploy)),
+  **Account API Tokens Write** (see the [broker's README](..#deploy)),
   stored in [Secrets Store](https://developers.cloudflare.com/secrets-store/) (open beta).
 - A separate API token for *deploying*, exported as `CLOUDFLARE_API_TOKEN`, with:
   - **Account → Workers Scripts: Edit**
@@ -92,7 +92,7 @@ rules:
             "com.cloudflare.api.account.${account_id}": "*"
 ```
 
-The format is documented in the [broker's README](../cf-auth-broker#policy). A
+The format is documented in the [broker's README](..#policy). A
 fuller sample is in [`tests/fixtures/policy.yaml`](tests/fixtures/policy.yaml).
 
 The rendered policy must fit in one Worker binding: Cloudflare allows 5 KB per

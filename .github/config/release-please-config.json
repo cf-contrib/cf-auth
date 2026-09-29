@@ -12,8 +12,8 @@
       "extra-files": [
         "README.md",
         "packages/cf-auth-action/README.md",
-        "packages/cf-auth-terraform/README.md",
-        "packages/cf-auth-terraform/variables.tf"
+        "packages/cf-auth-broker/terraform/README.md",
+        "packages/cf-auth-broker/terraform/variables.tf"
       ]
     }
   }
