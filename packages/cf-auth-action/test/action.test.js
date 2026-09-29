@@ -111,12 +111,12 @@ describe("main", () => {
     expect(stub.calls.find((c) => c.path === "/v1/token")?.body).toEqual({});
   });
 
-  it("exports R2 S3 credentials derived from the token when asked", async () => {
+  it("exports S3-compatible R2 credentials derived from the token when asked", async () => {
     stub = await startStub();
     const r = await action("main.js", {
       ...oidcEnv(stub.url),
       "INPUT_BROKER-URL": stub.url,
-      "INPUT_S3-CREDENTIALS": "true",
+      "INPUT_R2-CREDENTIALS": "true",
     });
 
     const secret = createHash("sha256").update(STUB_TOKEN).digest("hex");
@@ -126,25 +126,41 @@ describe("main", () => {
       CLOUDFLARE_ACCOUNT_ID: STUB_ACCOUNT_ID,
       AWS_ACCESS_KEY_ID: STUB_TOKEN_ID,
       AWS_SECRET_ACCESS_KEY: secret,
+      AWS_SESSION_TOKEN: "",
+      AWS_SECURITY_TOKEN: "",
       AWS_ENDPOINT_URL_S3: `https://${STUB_ACCOUNT_ID}.r2.cloudflarestorage.com`,
       AWS_REGION: "auto",
+      AWS_DEFAULT_REGION: "auto",
     });
     // The secret only ever appears in the mask command.
     const out = r.stdout.split("\n");
     expect(out.filter((l) => l.includes(secret))).toEqual([`::add-mask::${secret}`]);
   });
 
-  it("rejects a non-boolean s3-credentials before minting", async () => {
+  it("rejects a non-boolean r2-credentials before minting", async () => {
     stub = await startStub();
     const r = await action("main.js", {
       ...oidcEnv(stub.url),
       "INPUT_BROKER-URL": stub.url,
-      "INPUT_S3-CREDENTIALS": "yes",
+      "INPUT_R2-CREDENTIALS": "yes",
     });
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain("::error::Input s3-credentials must be true or false, got: yes");
+    expect(r.stdout).toContain("::error::Input r2-credentials must be true or false, got: yes");
     expect(stub.calls).toEqual([]);
     expect(r.env).toEqual({});
+  });
+
+  it.each(["token", "token_id", "account_id"])("fails clearly when the broker response lacks %s", async (field) => {
+    stub = await startStub({ tokenFields: { [field]: undefined } });
+    const r = await action("main.js", {
+      ...oidcEnv(stub.url),
+      "INPUT_BROKER-URL": stub.url,
+      "INPUT_R2-CREDENTIALS": "true",
+    });
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain(`::error::cf-auth broker returned an invalid response: missing ${field}`);
+    expect(r.env).toEqual({});
+    expect(r.state).toEqual({});
   });
 
   it("explains a missing id-token permission", async () => {

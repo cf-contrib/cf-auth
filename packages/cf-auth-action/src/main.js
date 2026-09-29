@@ -15,7 +15,7 @@ const HINTS = /** @type {Record<number, string>} */ ({
 try {
   const broker = brokerURL(input("broker-url"));
   // Parsed before minting, so a typo doesn't leave a token behind.
-  const s3 = booleanInput("s3-credentials");
+  const r2 = booleanInput("r2-credentials");
   const jwt = await idToken(broker.origin);
   mask(jwt);
 
@@ -38,6 +38,12 @@ try {
   }
 
   const t = /** @type {TokenResponse} */ (await response.json());
+  // Everything below is derived from these; fail here rather than export "undefined".
+  for (const field of /** @type {const} */ (["token", "token_id", "account_id"])) {
+    if (typeof t[field] !== "string" || t[field] === "") {
+      throw new Error(`cf-auth broker returned an invalid response: missing ${field}`);
+    }
+  }
 
   mask(t.token);
   write("GITHUB_ENV", "CLOUDFLARE_API_TOKEN", t.token);
@@ -45,15 +51,20 @@ try {
   write("GITHUB_STATE", "token", t.token); // read by post.js as STATE_token
   write("GITHUB_STATE", "token_id", t.token_id);
 
-  if (s3) {
+  if (r2) {
     // R2 accepts any token with R2 permissions as S3 credentials: the token ID is the
     // access key and the SHA-256 of its value the secret. Revoking the token revokes both.
     const secret = createHash("sha256").update(t.token).digest("hex");
     mask(secret);
     write("GITHUB_ENV", "AWS_ACCESS_KEY_ID", t.token_id);
     write("GITHUB_ENV", "AWS_SECRET_ACCESS_KEY", secret);
+    // A session token left by an earlier AWS step would be sent along and break every
+    // request. Empty means unset to the AWS CLI and SDKs; botocore also reads the legacy name.
+    write("GITHUB_ENV", "AWS_SESSION_TOKEN", "");
+    write("GITHUB_ENV", "AWS_SECURITY_TOKEN", "");
     write("GITHUB_ENV", "AWS_ENDPOINT_URL_S3", `https://${t.account_id}.r2.cloudflarestorage.com`);
     write("GITHUB_ENV", "AWS_REGION", "auto");
+    write("GITHUB_ENV", "AWS_DEFAULT_REGION", "auto");
   }
 
   console.log(`cf-auth: minted token ${t.token_id} (rule ${t.rule}, expires ${t.expires_on})`);

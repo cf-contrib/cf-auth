@@ -11,9 +11,16 @@ export const STUB_ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
 
 /**
  * @typedef {{ method: string, path: string, authorization?: string, body?: unknown }} Call
- * @param {{ port?: number, tokenStatus?: number, revokeStatus?: number, oidcStatuses?: number[] }} [options]
+ * @param {{ port?: number, tokenStatus?: number, revokeStatus?: number, oidcStatuses?: number[], tokenFields?: Record<string, unknown> }} [options]
+ *   `tokenFields` overrides fields of the 200 token response; `undefined` removes one.
  */
-export function startStub({ port = 0, tokenStatus = 200, revokeStatus = 204, oidcStatuses = [] } = {}) {
+export function startStub({
+  port = 0,
+  tokenStatus = 200,
+  revokeStatus = 204,
+  oidcStatuses = [],
+  tokenFields = {},
+} = {}) {
   /** @type {Call[]} */
   const calls = [];
   const oidc = [...oidcStatuses];
@@ -48,6 +55,7 @@ export function startStub({ port = 0, tokenStatus = 200, revokeStatus = 204, oid
         account_id: STUB_ACCOUNT_ID,
         expires_on: "2026-09-28T12:15:00Z",
         rule: body?.rule ?? "default",
+        ...tokenFields,
       });
     }
     if (req.method === "POST" && url.pathname === "/v1/revoke") {

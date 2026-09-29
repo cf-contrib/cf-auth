@@ -14,10 +14,10 @@ inputs:
   ttl:
     required: false
     description: Requested token lifetime such as 10m or 1h (capped by the broker)
-  s3-credentials:
+  r2-credentials:
     required: false
     default: "false"
-    description: Also export R2 S3 API credentials derived from the token (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL_S3, AWS_REGION)
+    description: Also export S3-compatible R2 credentials derived from the token (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL_S3, AWS_REGION), for aws s3, the s3 backend and other S3 tools
 runs:
   using: node24
   main: packages/cf-auth-action/src/main.js
