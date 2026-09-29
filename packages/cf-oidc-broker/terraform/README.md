@@ -7,7 +7,7 @@
 
 ```hcl
 module "cf_auth" {
-  source = "git::https://github.com/cf-contrib/cf-oidc-auth.git//packages/cf-oidc-broker/terraform?ref=v0.3.0" # x-release-please-version
+  source = "git::https://github.com/cf-contrib/cf-oidc-auth.git//packages/cf-oidc-broker/terraform?ref=v0.4.0" # x-release-please-version
 
   account_id          = var.account_id
   hostname            = "cf-auth.example.workers.dev"

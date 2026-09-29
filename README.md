@@ -19,7 +19,7 @@ permissions:
   id-token: write
 
 steps:
-  - uses: cf-contrib/cf-oidc-auth@v0.3.0 # x-release-please-version
+  - uses: cf-contrib/cf-oidc-auth@v0.4.0 # x-release-please-version
     with:
       broker-url: https://cf-auth.example.com
       rule: workers-deploy
