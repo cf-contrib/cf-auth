@@ -1,5 +1,5 @@
 {
-  description = "cf-auth - GitHub Actions OIDC for the Cloudflare API.";
+  description = "cf-oidc-auth - GitHub Actions OIDC for the Cloudflare API.";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -19,7 +19,7 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          name = "cf-auth";
+          name = "cf-oidc-auth";
           packages = [
             pkgs.nodejs_24
             pkgs.pnpm

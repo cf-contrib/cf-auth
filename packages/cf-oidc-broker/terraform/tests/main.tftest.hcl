@@ -18,7 +18,7 @@ override_data {
       node_id              = "RA_test"
       size                 = 18
       updated_at           = "2026-09-29T00:00:00Z"
-      url                  = "https://api.github.com/repos/cf-contrib/cf-auth/releases/assets/1"
+      url                  = "https://api.github.com/repos/cf-contrib/cf-oidc-auth/releases/assets/1"
     }]
   }
 }

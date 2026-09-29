@@ -1,13 +1,13 @@
-# cf-auth Terraform module
+# cf-oidc-auth Terraform module
 
-> The Terraform / OpenTofu half of [cf-auth](../../..): deploys the released
+> The Terraform / OpenTofu half of [cf-oidc-auth](../../..): deploys the released
 > `broker.js` as a Cloudflare Worker, with its bindings, hourly cleanup cron, and
 > either a custom domain or a workers.dev URL. No `wrangler` or local build is
 > needed.
 
 ```hcl
 module "cf_auth" {
-  source = "git::https://github.com/cf-contrib/cf-auth.git//packages/cf-auth-broker/terraform?ref=v0.3.0" # x-release-please-version
+  source = "git::https://github.com/cf-contrib/cf-oidc-auth.git//packages/cf-oidc-broker/terraform?ref=v0.3.0" # x-release-please-version
 
   account_id          = var.account_id
   zone_id             = var.zone_id
@@ -111,7 +111,7 @@ release's `broker.js.sha256`. The plan fails if the download doesn't match. Set
 `release_tag = "latest"` to track the newest release instead.
 
 To deploy a build of your own (an unreleased branch, a fork), run `pnpm build`
-and set `broker_file` to the resulting `packages/cf-auth-broker/dist/broker.js`.
+and set `broker_file` to the resulting `packages/cf-oidc-broker/dist/broker.js`.
 Nothing is downloaded then.
 
 ## Inputs

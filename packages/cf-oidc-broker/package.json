@@ -1,5 +1,5 @@
 {
-  "name": "cf-auth-broker",
+  "name": "cf-oidc-broker",
   "version": "0.0.0",
   "private": true,
   "type": "module",

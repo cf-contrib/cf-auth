@@ -1,10 +1,10 @@
-# cf-auth broker
+# cf-oidc-auth broker
 
-> The Worker half of [cf-auth](../..): verifies a GitHub Actions OIDC token,
+> The Worker half of [cf-oidc-auth](../..): verifies a GitHub Actions OIDC token,
 > matches it against your policy, and mints a short-lived Cloudflare API token
 > with exactly that rule's permissions.
 
-[![CI](https://github.com/cf-contrib/cf-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-auth/actions/workflows/ci.yml)
+[![CI](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 
 > [!NOTE]
@@ -45,7 +45,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
    gh api orgs/<org> --jq .id           # github.owner_id
    gh api repos/<org>/<repo> --jq .id   # match.repository_id
    ```
-3. **Deploy** the released `broker.js` with the [Terraform module](terraform) (`//packages/cf-auth-broker/terraform?ref=<version>`). It downloads the release (optionally pinned to a checksum) and sets up the bindings, custom domain and cron. To build from source instead:
+3. **Deploy** the released `broker.js` with the [Terraform module](terraform) (`//packages/cf-oidc-broker/terraform?ref=<version>`). It downloads the release (optionally pinned to a checksum) and sets up the bindings, custom domain and cron. To build from source instead:
    ```sh
    wrangler deploy   # after setting CF_AUTH_BROKER_ACCOUNT_ID, CF_AUTH_BROKER_POLICY and [[secrets_store_secrets]] in wrangler.toml
    ```
