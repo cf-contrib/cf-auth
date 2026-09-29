@@ -1,0 +1,22 @@
+{
+  "name": "cf-auth",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Keyless Cloudflare API access from GitHub Actions via OIDC",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.27.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "build": "pnpm -r build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14"
+  }
+}

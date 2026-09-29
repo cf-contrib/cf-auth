@@ -1,0 +1,140 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+      - name: Setup Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+        with:
+          use-flakehub: disabled
+          use-gha-cache: enabled
+      - name: Install
+        run: nix develop --command pnpm install --frozen-lockfile
+      - name: Lint
+        run: nix develop --command pnpm lint
+      - name: Typecheck
+        run: nix develop --command pnpm typecheck
+      - name: Test
+        run: nix develop --command pnpm test
+      - name: Build
+        run: nix develop --command pnpm build
+      - name: Check Bundle
+        run: nix develop --command pnpm --filter cf-auth-broker check:bundle
+      - name: Validate Terraform Example
+        working-directory: examples/terraform
+        run: |
+          nix develop --command tofu fmt -check -recursive
+          nix develop --command tofu init -backend=false
+          nix develop --command tofu validate
+          nix develop --command tofu test
+
+  # Runs the action from a fresh checkout with nothing installed, against a stub
+  # broker that also stands in for the runner's OIDC endpoint. Catches runtime
+  # imports from outside packages/cf-auth-action and broken action.yml paths.
+  smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Start Stub Broker
+        run: |
+          node packages/cf-auth-action/test/stub.js > "$RUNNER_TEMP/stub.log" 2>&1 &
+          for _ in $(seq 20); do grep -q listening "$RUNNER_TEMP/stub.log" && exit 0; sleep 0.5; done
+          cat "$RUNNER_TEMP/stub.log"; exit 1
+      - name: Run cf-auth
+        uses: ./
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:8787/oidc?api-version=2.0
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: stub-request-token
+        with:
+          broker-url: http://127.0.0.1:8787
+          rule: smoke
+          ttl: 5m
+      - name: Check Exported Credentials
+        run: |
+          test "$CLOUDFLARE_API_TOKEN" = stub-cloudflare-token
+          test "$CLOUDFLARE_ACCOUNT_ID" = 0123456789abcdef0123456789abcdef
+          test "${{ env.CLOUDFLARE_ACCOUNT_ID }}" = 0123456789abcdef0123456789abcdef
+
+  release:
+    needs: [test, smoke]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    timeout-minutes: 15
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      major: ${{ steps.release.outputs.major }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Create Release PR
+        id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          manifest-file: .github/config/release-please-manifest.json
+          config-file: .github/config/release-please-config.json
+          target-branch: main
+
+  publish:
+    needs: release
+    if: ${{ needs.release.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.tag_name }}
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+      - name: Setup Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+        with:
+          use-flakehub: disabled
+          use-gha-cache: enabled
+      - name: Build
+        run: |
+          nix develop --command pnpm install --frozen-lockfile
+          nix develop --command pnpm build
+          cd packages/cf-auth-broker/dist && sha256sum broker.js > broker.js.sha256
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.release.outputs.tag_name }}
+          files: |
+            packages/cf-auth-broker/dist/broker.js
+            packages/cf-auth-broker/dist/broker.js.sha256
+      - name: Move Major Tag
+        env:
+          TAG: ${{ needs.release.outputs.tag_name }}
+          MAJOR: v${{ needs.release.outputs.major }}
+        run: |
+          git tag --force "$MAJOR" "$TAG"
+          git push --force origin "refs/tags/$MAJOR"

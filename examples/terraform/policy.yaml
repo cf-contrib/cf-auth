@@ -1,0 +1,29 @@
+# cf-auth policy. See packages/cf-auth-broker/README.md for the full reference.
+# This file is a Terraform template: ${account_id} and ${broker_url} are filled
+# in by the module, plus anything in var.policy_vars.
+# All IDs below are placeholders: find yours with
+#   gh api orgs/<org> --jq .id
+#   gh api repos/<org>/<repo> --jq .id
+version: 1
+
+github:
+  issuer: https://token.actions.githubusercontent.com
+  audience: ${broker_url} # the broker's URL, filled in by Terraform
+  owner_id: "100000001" # REQUIRED: numeric org/user ID, applied to every rule
+
+defaults:
+  ttl: 15m
+  max_ttl: 1h
+
+rules:
+  - name: workers-deploy
+    match:
+      repository_id: "200000002"
+      ref: refs/heads/main
+      environment: prod
+    token:
+      policies:
+        - effect: allow
+          permissions: ["Workers Scripts Write"] # names from the permission groups API
+          resources: # Cloudflare's own token resources format
+            "com.cloudflare.api.account.${account_id}": "*"
