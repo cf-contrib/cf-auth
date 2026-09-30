@@ -1,5 +1,5 @@
 # The release is only downloaded when no local broker_file is given.
-data "github_release" "cf_auth" {
+data "github_release" "broker" {
   count = var.broker_file == null ? 1 : 0
 
   owner       = "cf-contrib"
@@ -10,7 +10,7 @@ data "github_release" "cf_auth" {
 
 locals {
   release_assets = var.broker_file != null ? {} : {
-    for asset in data.github_release.cf_auth[0].assets : asset.name => asset.browser_download_url
+    for asset in data.github_release.broker[0].assets : asset.name => asset.browser_download_url
   }
 }
 

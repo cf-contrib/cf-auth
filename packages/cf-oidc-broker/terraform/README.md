@@ -6,7 +6,7 @@
 > build is needed.
 
 ```hcl
-module "cf_auth" {
+module "cf_oidc_broker" {
   source = "git::https://github.com/cf-contrib/cf-oidc-auth.git//packages/cf-oidc-broker/terraform?ref=v0.4.1" # x-release-please-version
 
   account_id          = var.account_id
@@ -16,7 +16,7 @@ module "cf_auth" {
 }
 
 output "broker_url" {
-  value = module.cf_auth.broker_url
+  value = module.cf_oidc_broker.url
 }
 ```
 
@@ -68,7 +68,7 @@ Secrets Store; the broker reads it on every request.
 - Any other hostname is a custom domain and needs `zone_id`. The broker is then
   served on that domain only, and workers.dev is disabled.
 
-Either way the broker is reachable on exactly one URL, `broker_url`, which is also the OIDC audience.
+Either way the broker is reachable on exactly one URL, the `url` output, which is also the OIDC audience.
 
 ## Policy
 
