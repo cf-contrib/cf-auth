@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.4.0...v0.4.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* rename policy rules to profiles ([#15](https://github.com/cf-contrib/cf-oidc-auth/issues/15)) ([25bd573](https://github.com/cf-contrib/cf-oidc-auth/commit/25bd573e17b7bd68bc66458e73cd3bb4039d13b0))
+
 ## [0.4.0](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.3.0...v0.4.0) (2026-09-29)
 
 
