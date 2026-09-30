@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --minify --format=esm --platform=neutral --main-fields=module,main --conditions=workerd,worker,browser --target=es2024 --outfile=dist/broker.js",
+    "build": "esbuild src/index.ts --bundle --minify --format=esm --platform=neutral --main-fields=module,main --conditions=workerd,worker,browser --target=es2024 --external:./policy.json --outfile=dist/broker.js",
     "check:bundle": "vitest run -c vitest.bundle.config.ts && node -e \"const n=require('node:zlib').gzipSync(require('node:fs').readFileSync('dist/broker.js')).length;console.log('broker.js gzip: '+n+' bytes');if(n>256*1024){console.error('bundle exceeds 256 KiB gzipped');process.exit(1)}\"",
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit",

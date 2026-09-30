@@ -1,5 +1,8 @@
 # Local development and build-from-source deploys. Production deploys normally
 # use the prebuilt release artifact (see terraform/).
+#
+# The policy is src/policy.json, bundled into the Worker. It isn't committed:
+#   cp src/policy.example.json src/policy.json
 name = "cf-auth"
 main = "src/index.ts"
 compatibility_date = "2026-08-15"
@@ -20,19 +23,3 @@ secret_name = "cf-auth-broker-token"
 
 [vars]
 CF_AUTH_BROKER_ACCOUNT_ID = "00000000000000000000000000000000"
-
-[vars.CF_AUTH_BROKER_POLICY]
-version = 1
-
-[vars.CF_AUTH_BROKER_POLICY.github]
-audience = "http://localhost:8787"
-owner_id = "100000001"
-
-[[vars.CF_AUTH_BROKER_POLICY.profiles]]
-name = "workers-deploy"
-match = { repository_id = "200000002", ref = "refs/heads/main" }
-
-[[vars.CF_AUTH_BROKER_POLICY.profiles.token.policies]]
-effect = "allow"
-permissions = ["Workers Scripts Write"]
-resources = { "com.cloudflare.api.account.00000000000000000000000000000000" = "*" }

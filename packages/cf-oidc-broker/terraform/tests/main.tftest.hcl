@@ -1,6 +1,6 @@
 # Plans the module with mocked providers: no credentials or network needed.
 # Covers the broker token binding, URL modes, local artifacts, the policy template and
-# the policy size limit.
+# the policy module.
 mock_provider "cloudflare" {}
 mock_provider "github" {}
 mock_provider "http" {}
@@ -59,30 +59,28 @@ run "policy_is_templated" {
 
   assert {
     condition = anytrue([
-      for b in cloudflare_worker_version.cf_auth.bindings :
-      b.name == "CF_AUTH_BROKER_POLICY" && strcontains(b.text, "com.cloudflare.api.account.0123456789abcdef0123456789abcdef")
+      for m in cloudflare_worker_version.cf_auth.modules :
+      m.name == "policy.json" && m.content_type == "text/plain" && strcontains(base64decode(m.content_base64), "com.cloudflare.api.account.0123456789abcdef0123456789abcdef")
     ])
-    error_message = "the policy should have account_id filled in"
+    error_message = "the policy should be a policy.json text module with account_id filled in"
+  }
+
+  assert {
+    condition     = length([for b in cloudflare_worker_version.cf_auth.bindings : b if b.name == "CF_AUTH_BROKER_POLICY"]) == 0
+    error_message = "the policy should not be a binding"
   }
 }
 
-run "rejects_an_oversized_policy" {
+run "accepts_a_large_policy" {
   command = plan
 
   variables {
     policy_file = "tests/fixtures/large-policy.yaml"
   }
 
-  expect_failures = [cloudflare_worker_version.cf_auth]
-}
-
-run "sample_policy_fits" {
-  command = plan
-
-
   assert {
-    condition     = length(local.policy_json) < local.policy_max_length
-    error_message = "the sample policy should fit in one binding"
+    condition     = length(local.policy_json) > 5000
+    error_message = "the fixture should be over the old 5 KB binding limit"
   }
 }
 

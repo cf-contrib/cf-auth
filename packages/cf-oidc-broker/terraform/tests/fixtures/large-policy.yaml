@@ -1,4 +1,4 @@
-# Deliberately over the 5 KB binding limit, for tests/main.tftest.hcl.
+# Over the 5 KB Worker binding limit, to show the policy module has no such cap.
 version: 1
 github:
   audience: https://cf-auth.example.com

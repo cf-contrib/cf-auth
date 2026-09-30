@@ -135,7 +135,7 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
     try {
       raw = JSON.parse(raw);
     } catch (err) {
-      throw new PolicyError([`CF_AUTH_BROKER_POLICY is not valid JSON: ${(err as Error).message}`]);
+      throw new PolicyError([`policy.json is not valid JSON: ${(err as Error).message}`]);
     }
   }
 

@@ -98,9 +98,9 @@ profiles:
 The format is documented in the [broker's README](..#policy). A
 fuller sample is in [`tests/fixtures/policy.yaml`](tests/fixtures/policy.yaml).
 
-The rendered policy must fit in one Worker binding: Cloudflare allows 5 KB per
-variable, which is roughly 15–20 profiles. The plan fails with the policy's size if
-it's larger. Past that, run a broker per team or trust domain.
+The rendered policy is uploaded as `policy.json`, a second file in the Worker
+version next to `broker.js`, so it isn't subject to the 5 KB limit on Worker
+variables. Every policy change creates a new Worker version.
 
 ## Upgrading and pinning
 
@@ -141,4 +141,4 @@ Nothing is downloaded then.
   needs is declared here.
 - `tofu test` plans the module with mocked providers (no credentials needed) and
   checks the broker token binding, both URL modes, local artifacts, checksums, the
-  policy template and the policy size limit.
+  policy template and the policy module.

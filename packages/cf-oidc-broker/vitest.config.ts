@@ -3,8 +3,9 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [
+    // No main: the tests build brokers with createBroker, since src/index.ts
+    // imports a policy.json that isn't in the repo.
     cloudflareTest({
-      main: "./src/index.ts",
       miniflare: {
         compatibilityDate: "2026-08-15",
       },
