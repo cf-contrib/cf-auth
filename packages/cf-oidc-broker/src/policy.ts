@@ -21,7 +21,10 @@ const ACCOUNT_RESOURCE = /^com\.cloudflare\.api\.account\.([0-9a-f]{32})$/;
 /** R2's bucket name rules: 3-63 lowercase letters, digits and hyphens, starting and ending with a letter or digit. */
 const R2_BUCKET = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
 
-/** `ttlSeconds` range of R2 temporary credentials. Cloudflare documents only the maximum, 7 days. */
+/**
+ * `ttlSeconds` range of R2 temporary credentials. Cloudflare documents a 7-day maximum;
+ * the API accepts values down to 0, so the minimum is the broker's own.
+ */
 const R2_MIN_TTL = MIN_TTL;
 const R2_MAX_TTL = 7 * 24 * HOUR;
 
