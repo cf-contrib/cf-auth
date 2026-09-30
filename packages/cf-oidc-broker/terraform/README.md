@@ -29,8 +29,9 @@ by default deploys the `broker.js` of the release its `ref` points to.
 - The **broker token**, an account-owned API token with
   **Account API Tokens Write** (see the [broker's README](..#deploy)),
   stored in [Secrets Store](https://developers.cloudflare.com/secrets-store/) (open beta).
-  If any profile has an `r2` grant, the token also needs R2 access to the
-  buckets those grants name: it's the parent of their credentials (see
+  If any profile has an `r2` grant, the token also needs R2 **Admin Read &
+  Write** (the account-level **Workers R2 Storage Write** permission): it
+  creates those grants' credentials and is their parent (see
   [R2 grants](..#r2-grants)).
 - A separate API token for *deploying*, exported as `CLOUDFLARE_API_TOKEN`, with:
   - **Account → Workers Scripts: Edit**
@@ -136,7 +137,7 @@ Nothing is downloaded then.
 | `account_id` | yes | | Cloudflare account ID. The broker runs here and mints tokens for it. |
 | `hostname` | yes | | `<worker_name>.<subdomain>.workers.dev`, or a custom domain. |
 | `zone_id` | for a custom domain | `null` | Zone ID of the zone holding a custom-domain `hostname`. |
-| `broker_token_secret` | yes | | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the broker token. It needs R2 access to the buckets `r2` grants name. |
+| `broker_token_secret` | yes | | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the broker token. With `r2` grants, the token also needs R2 Admin Read & Write. |
 | `policy_file` | yes | | Policy YAML path, rendered as a template. |
 | `policy_vars` | no | `{}` | Extra template variables for the policy. |
 | `broker_file` | no | `null` | Local `broker.js` to deploy instead of a release. |

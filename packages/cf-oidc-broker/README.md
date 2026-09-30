@@ -37,7 +37,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 
 ## Deploy
 
-1. **Create the broker token.** In the Cloudflare dashboard, create an **account-owned** API token with **Account API Tokens Write**. If any profile has an [`r2` grant](#r2-grants), also give it R2 access to the buckets those grants name (see [R2 grants](#r2-grants)). It's the broker's only long-lived credential. This is the one manual step: automating it would need a token that can create tokens. Store it in [Secrets Store](https://developers.cloudflare.com/secrets-store/) so it never passes through your deploy tooling:
+1. **Create the broker token.** In the Cloudflare dashboard, create an **account-owned** API token with **Account API Tokens Write**. If any profile has an [`r2` grant](#r2-grants), also give it **Admin Read & Write** on R2 (the account-level **Workers R2 Storage Write** permission). It's the broker's only long-lived credential. This is the one manual step: automating it would need a token that can create tokens. Store it in [Secrets Store](https://developers.cloudflare.com/secrets-store/) so it never passes through your deploy tooling:
    ```sh
    wrangler secrets-store secret create <store-id> --name cf-auth-broker-token --scopes workers --remote
    ```
@@ -58,7 +58,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 | Binding | Type | Required | Description |
 |---|---|---|---|
 | `CF_OIDC_BROKER_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
-| `CF_OIDC_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 access to the buckets `r2` grants name. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
+| `CF_OIDC_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 Admin Read & Write (Workers R2 Storage Write) if any profile has an `r2` grant. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
 
 The hourly cron (`17 * * * *` in the examples) deletes expired `cf-oidc:*` tokens.
 
@@ -184,7 +184,7 @@ An `r2` grant gets the job [temporary R2 credentials](https://developers.cloudfl
 - **Claims** filling a placeholder must be non-empty and use only the characters GitHub allows in owner and repo names (`A-Z`, `a-z`, `0-9`, `.`, `_`, `-`, plus the one `/` in `repository`); IDs must be numeric. The filled-in prefix is checked again. Otherwise the request is a `403` (`invalid_r2_prefix`), before anything is minted.
 - **Without `prefixes`** the credentials cover the whole bucket.
 - **Lifetime:** as long as the token would last: the profile's `ttl`, capped at `max_ttl`, with the request's `ttl` still honoured. In a profile without `token`, set `ttl` and `max_ttl` in `r2`. The credentials **can't be revoked early**, so keep TTLs short.
-- **Parent token:** the broker token is the credentials' parent, and they can't exceed its permissions. Give it R2 access to every bucket a grant names: **Workers R2 Storage Bucket Item Write** on the bucket for `object-read-write` grants (**Read** is enough for `object-read-only`). Revoking or rolling the broker token cuts off every credential issued from it immediately, including those of jobs running at that moment. That's the emergency switch.
+- **Parent token:** the broker token calls `temp-access-credentials` and is the credentials' parent, which can't exceed its permissions. Calling the endpoint takes **Admin Read & Write** on R2 (the account-level **Workers R2 Storage Write** permission); object-level or bucket-scoped tokens are refused with a `403`, which the broker reports as `502` (`cloudflare_error` in the audit log). That's account-wide, but it doesn't widen what a leaked broker token can do: with Account API Tokens Write it could already mint itself a token with any R2 permission. The policy still only hands out `object-*` permissions. Revoking or rolling the broker token cuts off every credential issued from it immediately, including those of jobs running at that moment. That's the emergency switch.
 - **With both** `token` and `r2`, the broker mints the token first. If the credentials then can't be created, it deletes the token and replies `502`.
 
 > [!WARNING]

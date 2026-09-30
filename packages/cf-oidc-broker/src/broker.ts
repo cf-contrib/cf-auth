@@ -11,9 +11,10 @@ export interface Env {
   /** Account the broker token belongs to and tokens are minted in. */
   CF_OIDC_BROKER_ACCOUNT_ID: string;
   /**
-   * Account-owned token with "Account API Tokens Write", plus R2 permissions on the
-   * buckets `r2` grants name: it's also their credentials' parent. Must be a Secrets
-   * Store binding: a plain Worker secret is refused, not used.
+   * Account-owned token with "Account API Tokens Write", plus R2 Admin Read & Write
+   * ("Workers R2 Storage Write") for `r2` grants: it creates their credentials and is
+   * their parent. Must be a Secrets Store binding: a plain Worker secret is refused,
+   * not used.
    */
   CF_OIDC_BROKER_TOKEN: SecretsStoreSecret;
 }
