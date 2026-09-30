@@ -7,7 +7,7 @@ locals {
 
 # Worker script. It's reachable on exactly one URL, the OIDC audience: its
 # workers.dev URL, or the custom domain if hostname is one.
-resource "cloudflare_worker" "cf_auth" {
+resource "cloudflare_worker" "broker" {
   account_id = var.account_id
   name       = var.worker_name
 
@@ -33,9 +33,9 @@ locals {
 }
 
 # Upload a new version on every artifact, policy or binding change.
-resource "cloudflare_worker_version" "cf_auth" {
+resource "cloudflare_worker_version" "broker" {
   account_id         = var.account_id
-  worker_id          = cloudflare_worker.cf_auth.id
+  worker_id          = cloudflare_worker.broker.id
   compatibility_date = var.worker_compatibility_date
   main_module        = "broker.js"
 
@@ -78,35 +78,35 @@ resource "cloudflare_worker_version" "cf_auth" {
 }
 
 # Promote the new version to 100% of traffic.
-resource "cloudflare_workers_deployment" "cf_auth" {
+resource "cloudflare_workers_deployment" "broker" {
   account_id  = var.account_id
-  script_name = cloudflare_worker.cf_auth.name
+  script_name = cloudflare_worker.broker.name
   strategy    = "percentage"
 
   versions = [
     {
       percentage = 100
-      version_id = cloudflare_worker_version.cf_auth.id
+      version_id = cloudflare_worker_version.broker.id
     },
   ]
 }
 
-resource "cloudflare_workers_custom_domain" "cf_auth" {
+resource "cloudflare_workers_custom_domain" "broker" {
   count = local.custom_domain ? 1 : 0
 
   account_id = var.account_id
   zone_id    = var.zone_id
   hostname   = var.hostname
-  service    = cloudflare_worker.cf_auth.name
+  service    = cloudflare_worker.broker.name
 
-  depends_on = [cloudflare_workers_deployment.cf_auth]
+  depends_on = [cloudflare_workers_deployment.broker]
 }
 
 # Hourly cleanup of expired cf-oidc:* tokens.
-resource "cloudflare_workers_cron_trigger" "cf_auth" {
+resource "cloudflare_workers_cron_trigger" "broker" {
   account_id  = var.account_id
-  script_name = cloudflare_worker.cf_auth.name
+  script_name = cloudflare_worker.broker.name
   schedules   = [{ cron = "17 * * * *" }]
 
-  depends_on = [cloudflare_workers_deployment.cf_auth]
+  depends_on = [cloudflare_workers_deployment.broker]
 }

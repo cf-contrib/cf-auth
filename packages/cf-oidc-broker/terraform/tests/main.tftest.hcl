@@ -6,7 +6,7 @@ mock_provider "github" {}
 mock_provider "http" {}
 
 override_data {
-  target = data.github_release.cf_auth
+  target = data.github_release.broker
   values = {
     assets = [{
       name                 = "broker.js"
@@ -41,14 +41,14 @@ run "secrets_store_binding" {
 
   assert {
     condition = anytrue([
-      for b in cloudflare_worker_version.cf_auth.bindings :
+      for b in cloudflare_worker_version.broker.bindings :
       b.name == "CF_OIDC_BROKER_TOKEN" && b.type == "secrets_store_secret" && b.secret_name == "cf-auth-broker-token"
     ])
     error_message = "the broker token should be a Secrets Store binding"
   }
 
   assert {
-    condition     = length([for b in cloudflare_worker_version.cf_auth.bindings : b if b.type == "secret_text"]) == 0
+    condition     = length([for b in cloudflare_worker_version.broker.bindings : b if b.type == "secret_text"]) == 0
     error_message = "no secret_text binding should be created"
   }
 }
@@ -59,14 +59,14 @@ run "policy_is_templated" {
 
   assert {
     condition = anytrue([
-      for m in cloudflare_worker_version.cf_auth.modules :
+      for m in cloudflare_worker_version.broker.modules :
       m.name == "policy.json" && m.content_type == "text/plain" && strcontains(base64decode(m.content_base64), "com.cloudflare.api.account.0123456789abcdef0123456789abcdef")
     ])
     error_message = "the policy should be a policy.json text module with account_id filled in"
   }
 
   assert {
-    condition     = length([for b in cloudflare_worker_version.cf_auth.bindings : b if b.name == "CF_AUTH_BROKER_POLICY"]) == 0
+    condition     = length([for b in cloudflare_worker_version.broker.bindings : b if b.name == "CF_AUTH_BROKER_POLICY"]) == 0
     error_message = "the policy should not be a binding"
   }
 }
@@ -88,13 +88,13 @@ run "workers_dev" {
   command = plan
 
   assert {
-    condition     = length(cloudflare_workers_custom_domain.cf_auth) == 0 && cloudflare_worker.cf_auth.subdomain.enabled
+    condition     = length(cloudflare_workers_custom_domain.broker) == 0 && cloudflare_worker.broker.subdomain.enabled
     error_message = "a workers.dev deploy should have no custom domain"
   }
 
   assert {
-    condition     = output.broker_url == "https://cf-auth.example.workers.dev"
-    error_message = "broker_url should be the workers.dev URL"
+    condition     = output.url == "https://cf-auth.example.workers.dev"
+    error_message = "url should be the workers.dev URL"
   }
 
   assert {
@@ -112,13 +112,13 @@ run "custom_domain" {
   }
 
   assert {
-    condition     = length(cloudflare_workers_custom_domain.cf_auth) == 1 && !cloudflare_worker.cf_auth.subdomain.enabled
+    condition     = length(cloudflare_workers_custom_domain.broker) == 1 && !cloudflare_worker.broker.subdomain.enabled
     error_message = "a custom domain deploy should disable workers.dev"
   }
 
   assert {
-    condition     = output.broker_url == "https://cf-auth.example.com"
-    error_message = "broker_url should be the custom domain"
+    condition     = output.url == "https://cf-auth.example.com"
+    error_message = "url should be the custom domain"
   }
 }
 
@@ -131,7 +131,7 @@ run "workers_dev_follows_worker_name" {
   }
 
   assert {
-    condition     = output.broker_url == "https://auth.example.workers.dev"
+    condition     = output.url == "https://auth.example.workers.dev"
     error_message = "a workers.dev hostname matching worker_name should be accepted"
   }
 }
@@ -184,12 +184,12 @@ run "local_broker_file" {
   }
 
   assert {
-    condition     = length(data.github_release.cf_auth) == 0 && length(data.http.broker_js) == 0
+    condition     = length(data.github_release.broker) == 0 && length(data.http.broker_js) == 0
     error_message = "a local broker_file should skip the release download"
   }
 
   assert {
-    condition     = anytrue([for m in cloudflare_worker_version.cf_auth.modules : m.content_base64 == filebase64("tests/fixtures/broker.js")])
+    condition     = anytrue([for m in cloudflare_worker_version.broker.modules : m.content_base64 == filebase64("tests/fixtures/broker.js")])
     error_message = "the local broker_file should be uploaded"
   }
 
@@ -207,7 +207,7 @@ run "rejects_a_checksum_mismatch" {
     broker_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
   }
 
-  expect_failures = [cloudflare_worker_version.cf_auth]
+  expect_failures = [cloudflare_worker_version.broker]
 }
 
 run "policy_vars" {
