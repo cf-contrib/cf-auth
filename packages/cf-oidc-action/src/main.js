@@ -33,7 +33,7 @@ try {
     const { error } = /** @type {Partial<ErrorResponse>} */ (await response.json().catch(() => ({})));
     const hint = HINTS[response.status];
     throw new Error(
-      `cf-auth broker returned ${response.status}${error ? ` (${error})` : ""}${hint ? `: ${hint}` : ""}`,
+      `cf-oidc broker returned ${response.status}${error ? ` (${error})` : ""}${hint ? `: ${hint}` : ""}`,
     );
   }
 
@@ -41,7 +41,7 @@ try {
   // Everything below is derived from these; fail here rather than export "undefined".
   for (const field of /** @type {const} */ (["token", "token_id", "account_id"])) {
     if (typeof t[field] !== "string" || t[field] === "") {
-      throw new Error(`cf-auth broker returned an invalid response: missing ${field}`);
+      throw new Error(`cf-oidc broker returned an invalid response: missing ${field}`);
     }
   }
 
@@ -67,7 +67,7 @@ try {
     write("GITHUB_ENV", "AWS_DEFAULT_REGION", "auto");
   }
 
-  console.log(`cf-auth: minted token ${t.token_id} (profile ${t.profile}, expires ${t.expires_on})`);
+  console.log(`cf-oidc: minted token ${t.token_id} (profile ${t.profile}, expires ${t.expires_on})`);
 } catch (err) {
   fail(err);
 }

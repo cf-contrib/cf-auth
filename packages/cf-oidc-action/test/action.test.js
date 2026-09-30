@@ -86,7 +86,7 @@ describe("main", () => {
     expect(maskAt).toBeGreaterThanOrEqual(0);
     expect(out.some((l) => l.startsWith("::add-mask::stub-jwt."))).toBe(true);
     expect(r.stdout).toContain(
-      `cf-auth: minted token ${STUB_TOKEN_ID} (profile workers-deploy, expires 2026-09-28T12:15:00Z)`,
+      `cf-oidc: minted token ${STUB_TOKEN_ID} (profile workers-deploy, expires 2026-09-28T12:15:00Z)`,
     );
     // The token value itself only ever appears in the mask command.
     expect(out.filter((l) => l.includes(STUB_TOKEN)).length).toBe(1);
@@ -158,7 +158,7 @@ describe("main", () => {
       "INPUT_R2-CREDENTIALS": "true",
     });
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain(`::error::cf-auth broker returned an invalid response: missing ${field}`);
+    expect(r.stdout).toContain(`::error::cf-oidc broker returned an invalid response: missing ${field}`);
     expect(r.env).toEqual({});
     expect(r.state).toEqual({});
   });
@@ -185,7 +185,7 @@ describe("main", () => {
     stub = await startStub({ tokenStatus: 403 });
     const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain("::error::cf-auth broker returned 403 (forbidden): no profile allows this workflow");
+    expect(r.stdout).toContain("::error::cf-oidc broker returned 403 (forbidden): no profile allows this workflow");
     expect(r.env).toEqual({});
     expect(r.state).toEqual({});
   });
@@ -207,7 +207,7 @@ describe("post", () => {
       STATE_token_id: STUB_TOKEN_ID,
     });
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain(`cf-auth: revoked token ${STUB_TOKEN_ID}`);
+    expect(r.stdout).toContain(`cf-oidc: revoked token ${STUB_TOKEN_ID}`);
     expect(stub.calls).toEqual([
       { method: "POST", path: "/v1/revoke", authorization: `Bearer ${STUB_TOKEN}`, body: undefined },
     ]);
@@ -228,12 +228,12 @@ describe("post", () => {
       STATE_token_id: STUB_TOKEN_ID,
     });
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("::warning::cf-auth: revoking token stub-token-id returned 502; it expires on its own");
+    expect(r.stdout).toContain("::warning::cf-oidc: revoking token stub-token-id returned 502; it expires on its own");
   });
 
   it("warns instead of failing when the broker is unreachable", async () => {
     const r = await action("post.js", { "INPUT_BROKER-URL": "http://127.0.0.1:9", STATE_token: STUB_TOKEN });
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("::warning::cf-auth: revoking token");
+    expect(r.stdout).toContain("::warning::cf-oidc: revoking token");
   });
 });

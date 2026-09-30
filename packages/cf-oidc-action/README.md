@@ -63,7 +63,7 @@ A floating `v1` tag will follow each release from 1.0 on.
   - with `r2-credentials: true`, also exports S3-compatible R2 credentials (`AWS_*`) and masks the secret. The access key ID is the token ID, which isn't secret and is logged;
   - logs the token ID, profile and expiry (none of them secret), so a run can be matched to the broker's audit log:
     ```
-    cf-auth: minted token 3f2a… (profile workers-deploy, expires 2026-09-28T12:15:00Z)
+    cf-oidc: minted token 3f2a… (profile workers-deploy, expires 2026-09-28T12:15:00Z)
     ```
 - **Post step:** revokes the token. It runs even when the job fails. A failed revoke is a warning, not an error: the token expires on its own and the broker's cron deletes it.
 

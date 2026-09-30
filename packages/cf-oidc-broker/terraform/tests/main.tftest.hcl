@@ -29,7 +29,7 @@ override_data {
 }
 
 variables {
-  broker_token_secret = { store_id = "00000000000000000000000000000000", secret_name = "cf-auth-broker-token" }
+  broker_token_secret = { secret_store_id = "00000000000000000000000000000000", secret_name = "cf-auth-broker-token" }
   account_id          = "0123456789abcdef0123456789abcdef"
   hostname            = "cf-auth.example.workers.dev"
   policy_file         = "tests/fixtures/policy.yaml"
@@ -42,7 +42,7 @@ run "secrets_store_binding" {
   assert {
     condition = anytrue([
       for b in cloudflare_worker_version.cf_auth.bindings :
-      b.name == "CF_AUTH_BROKER_TOKEN" && b.type == "secrets_store_secret" && b.secret_name == "cf-auth-broker-token"
+      b.name == "CF_OIDC_BROKER_TOKEN" && b.type == "secrets_store_secret" && b.secret_name == "cf-auth-broker-token"
     ])
     error_message = "the broker token should be a Secrets Store binding"
   }

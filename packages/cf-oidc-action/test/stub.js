@@ -1,5 +1,5 @@
 // @ts-check
-// A stand-in for both the runner's OIDC endpoint and the cf-auth broker.
+// A stand-in for both the runner's OIDC endpoint and the broker.
 // Used by the action tests, and run standalone by CI's clean-checkout smoke test:
 //   node packages/cf-oidc-action/test/stub.js   (listens on $PORT, default 8787)
 import { createServer } from "node:http";

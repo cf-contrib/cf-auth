@@ -153,7 +153,7 @@ export class FakeCloudflare {
   private seq = 0;
 
   constructor() {
-    this.add({ name: "cf-auth broker token", value: BROKER_TOKEN });
+    this.add({ name: "cf-oidc broker token", value: BROKER_TOKEN });
   }
 
   add(t: Partial<StoredToken> & { name: string }): StoredToken {

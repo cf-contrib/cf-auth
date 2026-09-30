@@ -35,8 +35,8 @@ beforeEach(() => {
   cf = new FakeCloudflare();
   installFetch(issuer, cf);
   env = {
-    CF_AUTH_BROKER_ACCOUNT_ID: ACCOUNT_ID,
-    CF_AUTH_BROKER_TOKEN: { get: async () => BROKER_TOKEN },
+    CF_OIDC_BROKER_ACCOUNT_ID: ACCOUNT_ID,
+    CF_OIDC_BROKER_TOKEN: { get: async () => BROKER_TOKEN },
   };
   // policy.json as the Terraform module uploads it: JSON text.
   policyFile = JSON.stringify(testPolicy(ISSUER));
@@ -79,7 +79,7 @@ describe("POST /v1/token", () => {
     expect(body.token).toMatch(/^value-/);
 
     const created = cf.tokens.get(body.token_id);
-    expect(created?.name).toBe("cf-auth:example-org/api:1234567890:1");
+    expect(created?.name).toBe("cf-oidc:example-org/api:1234567890:1");
     expect(created?.policies).toEqual([
       {
         effect: "allow",
@@ -237,7 +237,7 @@ describe("POST /v1/token", () => {
   });
 
   it("500s when the policy names another account", async () => {
-    env.CF_AUTH_BROKER_ACCOUNT_ID = "ffffffffffffffffffffffffffffffff";
+    env.CF_OIDC_BROKER_ACCOUNT_ID = "ffffffffffffffffffffffffffffffff";
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "misconfigured" });
@@ -293,7 +293,7 @@ describe("broker token", () => {
 
   it("is read from Secrets Store on every use", async () => {
     const secret = store(async () => BROKER_TOKEN);
-    env.CF_AUTH_BROKER_TOKEN = secret;
+    env.CF_OIDC_BROKER_TOKEN = secret;
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
     expect(res.status).toBe(200);
     const { token } = (await res.json()) as TokenResponse;
@@ -303,7 +303,7 @@ describe("broker token", () => {
   });
 
   it("500s, failing closed, when the secret can't be read", async () => {
-    env.CF_AUTH_BROKER_TOKEN = store(async () => {
+    env.CF_OIDC_BROKER_TOKEN = store(async () => {
       throw new Error("secret not found");
     });
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
@@ -314,19 +314,19 @@ describe("broker token", () => {
   });
 
   it("reports an unreadable secret on /healthz", async () => {
-    env.CF_AUTH_BROKER_TOKEN = store(async () => {
+    env.CF_OIDC_BROKER_TOKEN = store(async () => {
       throw new Error("secret not found");
     });
     expect((await call("GET", "/healthz")).status).toBe(500);
   });
 
   it("refuses a plain Worker secret, failing closed", async () => {
-    env.CF_AUTH_BROKER_TOKEN = BROKER_TOKEN as unknown as SecretsStoreSecret;
+    env.CF_OIDC_BROKER_TOKEN = BROKER_TOKEN as unknown as SecretsStoreSecret;
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
     expect(res.status).toBe(500);
     expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({
       reason: "broker_token_unavailable",
-      detail: "CF_AUTH_BROKER_TOKEN must be a Secrets Store binding",
+      detail: "CF_OIDC_BROKER_TOKEN must be a Secrets Store binding",
     });
     expect(cf.tokens.size).toBe(1); // nothing minted
     expect((await call("GET", "/healthz")).status).toBe(500);
@@ -362,8 +362,8 @@ describe("scheduled cleanup", () => {
   it("deletes only expired cf-auth tokens", async () => {
     const past = new Date(Date.now() - 60_000).toISOString();
     const future = new Date(Date.now() + 60_000).toISOString();
-    const expired = cf.add({ name: "cf-auth:example-org/api:1:1", expires_on: past, status: "expired" });
-    const live = cf.add({ name: "cf-auth:example-org/api:2:1", expires_on: future });
+    const expired = cf.add({ name: "cf-oidc:example-org/api:1:1", expires_on: past, status: "expired" });
+    const live = cf.add({ name: "cf-oidc:example-org/api:2:1", expires_on: future });
     const foreign = cf.add({ name: "someone else's", expires_on: past, status: "expired" });
 
     const ctx = createExecutionContext();
@@ -381,6 +381,6 @@ describe("tokenName", () => {
   it("fits in 120 characters", () => {
     const name = tokenName(githubClaims({ repository: `example-org/${"x".repeat(200)}` }));
     expect(name.length).toBe(120);
-    expect(name).toMatch(/^cf-auth:example-org\/x+:1234567890:1$/);
+    expect(name).toMatch(/^cf-oidc:example-org\/x+:1234567890:1$/);
   });
 });

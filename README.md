@@ -52,7 +52,7 @@ sequenceDiagram
     Note over Job: 4. mask and export CLOUDFLARE_API_TOKEN<br/>later steps use it
     Job->>Broker: 5. POST /v1/revoke (post step)
     Broker->>CF: tokens.verify, tokens.get, tokens.delete
-    Note over Broker,CF: hourly cron deletes expired cf-auth:* tokens
+    Note over Broker,CF: hourly cron deletes expired cf-oidc:* tokens
 ```
 
 The only long-lived credential is the **broker token**: an account-owned token with just **Account API Tokens Write**. It lives in Cloudflare Secrets Store, bound to the Worker, so it never passes through Terraform or CI and never leaves the Worker.

@@ -48,7 +48,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 3. **Deploy** the released `broker.js` with the [Terraform module](terraform) (`//packages/cf-oidc-broker/terraform?ref=<version>`). It downloads the release (optionally pinned to a checksum), uploads your policy next to it, and sets up the bindings, the workers.dev URL (or an optional custom domain) and the cron. To build from source instead:
    ```sh
    cp src/policy.example.json src/policy.json   # then edit it; it isn't committed
-   wrangler deploy   # after setting CF_AUTH_BROKER_ACCOUNT_ID and [[secrets_store_secrets]] in wrangler.toml
+   wrangler deploy   # after setting CF_OIDC_BROKER_ACCOUNT_ID and [[secrets_store_secrets]] in wrangler.toml
    ```
 4. **Check** that `<broker-url>/healthz` returns `200` (`https://cf-auth.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or the broker token can't be read; the reasons are in Workers Logs.
 
@@ -56,10 +56,10 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 
 | Binding | Type | Required | Description |
 |---|---|---|---|
-| `CF_AUTH_BROKER_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
-| `CF_AUTH_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with only Account API Tokens Write. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
+| `CF_OIDC_BROKER_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
+| `CF_OIDC_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with only Account API Tokens Write. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
 
-The hourly cron (`17 * * * *` in the examples) deletes expired `cf-auth:*` tokens.
+The hourly cron (`17 * * * *` in the examples) deletes expired `cf-oidc:*` tokens.
 
 The policy isn't a binding. `broker.js` imports it from `policy.json`, a second
 file in the same Worker version, so it changes only with a deploy and rolls back
@@ -154,13 +154,13 @@ curl -H "Authorization: Bearer <token>" \
 | One zone | `com.cloudflare.api.account.zone.<zone_id>: "*"` |
 | Every zone in the account | `com.cloudflare.api.account.<account_id>: { com.cloudflare.api.account.zone.*: "*" }` |
 
-Keys must start with `com.cloudflare.`, and account keys must name `CF_AUTH_BROKER_ACCOUNT_ID`. Add a comment with the zone's name next to each zone ID so reviewers can tell them apart. With the Terraform module, write `${account_id}` and it's filled in from `var.account_id`.
+Keys must start with `com.cloudflare.`, and account keys must name `CF_OIDC_BROKER_ACCOUNT_ID`. Add a comment with the zone's name next to each zone ID so reviewers can tell them apart. With the Terraform module, write `${account_id}` and it's filled in from `var.account_id`.
 
 ### TTL and names
 
 - Durations look like `90s`, `15m`, `1h`, `1h30m`.
 - A requested `ttl` above the profile's `max_ttl` is clamped. Below `1m`, or unparseable, is a `400`.
-- Minted tokens are named `cf-auth:<repository>:<run_id>:<run_attempt>`, at most 120 characters.
+- Minted tokens are named `cf-oidc:<repository>:<run_id>:<run_attempt>`, at most 120 characters.
 
 ### Guardrails
 
@@ -177,7 +177,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/v1/token` | `Bearer <github-oidc-jwt>` | Mint a token. Body: `{ "profile"?, "ttl"? }`. Returns `{ token, token_id, account_id, expires_on, profile }`. |
-| `POST` | `/v1/revoke` | `Bearer <minted-token>` | Revoke a token. Holding it is the proof. Returns `204`, also when it's already gone, and `403` for tokens not named `cf-auth:*`. |
+| `POST` | `/v1/revoke` | `Bearer <minted-token>` | Revoke a token. Holding it is the proof. Returns `204`, also when it's already gone, and `403` for tokens not named `cf-oidc:*`. |
 | `GET` | `/healthz` | public | `200` if the policy and bindings are valid, else `500`. Never shows the policy. |
 
 **Errors:** `{ "error": "<code>" }` with one of these statuses:
@@ -223,7 +223,7 @@ Denials are `token.deny` with a `reason`:
 
 ## Limitations
 
-- **One account per broker.** Tokens are minted in `CF_AUTH_BROKER_ACCOUNT_ID` only. Deploy one broker per account.
+- **One account per broker.** Tokens are minted in `CF_OIDC_BROKER_ACCOUNT_ID` only. Deploy one broker per account.
 - **GitHub Actions only.** Other OIDC issuers (GitLab CI, Buildkite, …) aren't supported yet.
 - **No JWT replay cache.** A stolen JWT can be exchanged again until it expires. The custom audience and its short lifetime limit this.
 - **Resource IDs aren't checked up front.** Apart from the account check, a wrong zone ID is only caught when Cloudflare rejects the mint (`502`).

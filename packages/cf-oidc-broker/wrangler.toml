@@ -3,7 +3,7 @@
 #
 # The policy is src/policy.json, bundled into the Worker. It isn't committed:
 #   cp src/policy.example.json src/policy.json
-name = "cf-auth"
+name = "cf-oidc-broker"
 main = "src/index.ts"
 compatibility_date = "2026-08-15"
 
@@ -11,15 +11,15 @@ compatibility_date = "2026-08-15"
 enabled = true
 
 [triggers]
-crons = ["17 * * * *"] # hourly cleanup of expired cf-auth:* tokens
+crons = ["17 * * * *"] # hourly cleanup of expired cf-oidc:* tokens
 
 # The broker token must come from Secrets Store; a plain `wrangler secret` is
 # refused. For `wrangler dev`, create it in the local store:
 #   wrangler secrets-store secret create <store-id> --name cf-auth-broker-token --scopes workers
 [[secrets_store_secrets]]
-binding = "CF_AUTH_BROKER_TOKEN"
+binding = "CF_OIDC_BROKER_TOKEN"
 store_id = "00000000000000000000000000000000"
 secret_name = "cf-auth-broker-token"
 
 [vars]
-CF_AUTH_BROKER_ACCOUNT_ID = "00000000000000000000000000000000"
+CF_OIDC_BROKER_ACCOUNT_ID = "00000000000000000000000000000000"

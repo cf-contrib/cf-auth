@@ -11,7 +11,7 @@ module "cf_auth" {
 
   account_id          = var.account_id
   hostname            = "cf-auth.example.workers.dev"
-  broker_token_secret = { store_id = var.store_id, secret_name = "cf-auth-broker-token" }
+  broker_token_secret = { secret_store_id = var.secret_store_id, secret_name = "cf-auth-broker-token" }
   policy_file         = "${path.root}/policy.yaml"
 }
 
@@ -124,7 +124,7 @@ Nothing is downloaded then.
 | `account_id` | yes | | Cloudflare account ID. The broker runs here and mints tokens for it. |
 | `hostname` | yes | | `<worker_name>.<subdomain>.workers.dev`, or a custom domain. |
 | `zone_id` | for a custom domain | `null` | Zone ID of the zone holding a custom-domain `hostname`. |
-| `broker_token_secret` | yes | | `{ store_id, secret_name }` of the Secrets Store secret holding the broker token. Recommended. |
+| `broker_token_secret` | yes | | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the broker token. Recommended. |
 | `policy_file` | yes | | Policy YAML path, rendered as a template. |
 | `policy_vars` | no | `{}` | Extra template variables for the policy. |
 | `broker_file` | no | `null` | Local `broker.js` to deploy instead of a release. |

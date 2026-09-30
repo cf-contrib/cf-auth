@@ -31,8 +31,8 @@ variable "zone_id" {
 
 variable "broker_token_secret" {
   type = object({
-    store_id    = string
-    secret_name = string
+    secret_store_id = string
+    secret_name     = string
   })
   description = "Secrets Store secret holding the broker token (an account-owned token with only \"Account API Tokens Write\"). Terraform only references it; the value never enters state."
 }
