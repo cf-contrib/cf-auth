@@ -14,13 +14,13 @@ if (token) {
       signal: AbortSignal.timeout(30_000),
     });
     if (response.status === 204) {
-      console.log(`cf-auth: revoked token ${id}`);
+      console.log(`cf-oidc: revoked token ${id}`);
     } else {
-      warning(`cf-auth: revoking token ${id} returned ${response.status}; it expires on its own`);
+      warning(`cf-oidc: revoking token ${id} returned ${response.status}; it expires on its own`);
     }
   } catch (err) {
     warning(
-      `cf-auth: revoking token ${id} failed (${err instanceof Error ? err.message : err}); it expires on its own`,
+      `cf-oidc: revoking token ${id} failed (${err instanceof Error ? err.message : err}); it expires on its own`,
     );
   }
 }

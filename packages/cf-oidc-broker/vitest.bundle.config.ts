@@ -33,10 +33,10 @@ export default defineConfig({
         compatibilityDate: "2026-08-15",
         // The broker token comes from a real (local) Secrets Store binding, seeded by the test.
         secretsStoreSecrets: {
-          CF_AUTH_BROKER_TOKEN: { store_id: "test-store", secret_name: "cf-auth-broker-token" },
+          CF_OIDC_BROKER_TOKEN: { store_id: "test-store", secret_name: "cf-auth-broker-token" },
         },
         bindings: {
-          CF_AUTH_BROKER_ACCOUNT_ID: "0123456789abcdef0123456789abcdef",
+          CF_OIDC_BROKER_ACCOUNT_ID: "0123456789abcdef0123456789abcdef",
         },
       },
     }),

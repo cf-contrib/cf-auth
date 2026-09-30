@@ -42,7 +42,7 @@ run "secrets_store_binding" {
   assert {
     condition = anytrue([
       for b in cloudflare_worker_version.cf_auth.bindings :
-      b.name == "CF_AUTH_BROKER_TOKEN" && b.type == "secrets_store_secret" && b.secret_name == "cf-auth-broker-token"
+      b.name == "CF_OIDC_BROKER_TOKEN" && b.type == "secrets_store_secret" && b.secret_name == "cf-auth-broker-token"
     ])
     error_message = "the broker token should be a Secrets Store binding"
   }

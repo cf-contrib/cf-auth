@@ -63,13 +63,13 @@ resource "cloudflare_worker_version" "cf_auth" {
 
   bindings = [
     {
-      name = "CF_AUTH_BROKER_ACCOUNT_ID"
+      name = "CF_OIDC_BROKER_ACCOUNT_ID"
       type = "plain_text"
       text = var.account_id
     },
     {
       # Only ever from Secrets Store, so the token never enters Terraform state.
-      name        = "CF_AUTH_BROKER_TOKEN"
+      name        = "CF_OIDC_BROKER_TOKEN"
       type        = "secrets_store_secret"
       store_id    = var.broker_token_secret.secret_store_id
       secret_name = var.broker_token_secret.secret_name
@@ -102,7 +102,7 @@ resource "cloudflare_workers_custom_domain" "cf_auth" {
   depends_on = [cloudflare_workers_deployment.cf_auth]
 }
 
-# Hourly cleanup of expired cf-auth:* tokens.
+# Hourly cleanup of expired cf-oidc:* tokens.
 resource "cloudflare_workers_cron_trigger" "cf_auth" {
   account_id  = var.account_id
   script_name = cloudflare_worker.cf_auth.name

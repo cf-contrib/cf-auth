@@ -6,10 +6,10 @@ import type { Claims, Profile } from "./policy.js";
 import { resolvePolicies } from "./resolve.js";
 
 /** Every minted token's name starts with this. Revoke and cleanup never touch anything else. */
-export const TOKEN_PREFIX = "cf-auth:";
+export const TOKEN_PREFIX = "cf-oidc:";
 const NAME_MAX = 120;
 
-/** `cf-auth:<repo>:<run_id>:<attempt>`, truncating the repo so the name fits in 120 chars. */
+/** `cf-oidc:<repo>:<run_id>:<attempt>`, truncating the repo so the name fits in 120 chars. */
 export function tokenName(claims: Claims): string {
   const str = (key: string) => (typeof claims[key] === "string" ? (claims[key] as string) : "");
   const run = `:${str("run_id") || "0"}:${str("run_attempt") || "0"}`;
@@ -93,7 +93,7 @@ export async function revoke(cf: Cloudflare, accountId: string, presented: strin
   return id;
 }
 
-/** Deletes expired `cf-auth:` tokens. Returns how many were removed. */
+/** Deletes expired `cf-oidc:` tokens. Returns how many were removed. */
 export async function cleanup(cf: Cloudflare, accountId: string, now = Date.now()): Promise<number> {
   // Collect first: deleting while paginating would shift later pages and skip tokens.
   const expired: { id: string; name: string; expires_on: string }[] = [];
