@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: cf-contrib/cf-oidc-auth@v0.4.2 # x-release-please-version
         with:
-          broker-url: https://cf-auth.example.com
+          broker-url: https://cf-oidc-broker.example.com
           profile: workers-deploy
       - run: npx wrangler deploy
 ```
@@ -48,7 +48,7 @@ A floating `v1` tag will follow each release from 1.0 on.
 
 | Input | Required | Description |
 |---|---|---|
-| `broker-url` | yes | Broker base URL, e.g. `https://cf-auth.example.com`. Its origin is the OIDC audience and must equal `github.audience` in the policy. |
+| `broker-url` | yes | Broker base URL, e.g. `https://cf-oidc-broker.example.com`. Its origin is the OIDC audience and must equal `github.audience` in the policy. |
 | `profile` | no | Policy profile to request (not an AWS profile). Recommended when more than one profile could match. |
 | `ttl` | no | Requested lifetime such as `5m` or `1h`. Defaults to the profile's `ttl`, capped at its `max_ttl`. |
 | `r2-credentials` | no | `true` to also export S3-compatible R2 credentials derived from the token. Default `false`. See [R2 over the S3 API](#r2-over-the-s3-api). |
@@ -78,7 +78,7 @@ Apart from `r2-credentials`, none of this can be switched off. Exported values a
 ```yaml
       - uses: cf-contrib/cf-oidc-auth@v0.4.2 # x-release-please-version
         with:
-          broker-url: https://cf-auth.example.com
+          broker-url: https://cf-oidc-broker.example.com
           profile: workers-deploy
       - uses: cloudflare/wrangler-action@v3
         with:
@@ -91,7 +91,7 @@ Apart from `r2-credentials`, none of this can be switched off. Exported values a
 ```yaml
       - uses: cf-contrib/cf-oidc-auth@v0.4.2 # x-release-please-version
         with:
-          broker-url: https://cf-auth.example.com
+          broker-url: https://cf-oidc-broker.example.com
           profile: infra-cloudflare
           ttl: 30m
       - run: tofu apply -auto-approve # the cloudflare provider reads CLOUDFLARE_API_TOKEN
@@ -114,7 +114,7 @@ S3 tools need an access key pair, not an API token. R2 derives one from any toke
 ```yaml
       - uses: cf-contrib/cf-oidc-auth@v0.4.2 # x-release-please-version
         with:
-          broker-url: https://cf-auth.example.com
+          broker-url: https://cf-oidc-broker.example.com
           profile: r2-sync
           r2-credentials: true
       - run: aws s3 sync ./dist "s3://my-bucket/" --endpoint-url "$AWS_ENDPOINT_URL_S3"
@@ -170,7 +170,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: cf-contrib/cf-oidc-auth@v0.4.2 # x-release-please-version
-        with: { broker-url: https://cf-auth.example.com, profile: service-dns }
+        with: { broker-url: https://cf-oidc-broker.example.com, profile: service-dns }
       - run: ./scripts/update-dns.sh
 
   deploy:
@@ -181,7 +181,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: cf-contrib/cf-oidc-auth@v0.4.2 # x-release-please-version
-        with: { broker-url: https://cf-auth.example.com, profile: workers-deploy }
+        with: { broker-url: https://cf-oidc-broker.example.com, profile: workers-deploy }
       - run: npx wrangler deploy
 ```
 

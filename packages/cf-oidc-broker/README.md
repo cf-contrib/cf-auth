@@ -15,7 +15,7 @@
 version: 1
 
 github:
-  audience: https://cf-auth.example.com # the broker's URL
+  audience: https://cf-oidc-broker.example.com # the broker's URL
   owner_id: "100000001"                 # your org's numeric ID, applied to every profile
 
 profiles:
@@ -79,7 +79,7 @@ version: 1
 
 github:
   issuer: https://token.actions.githubusercontent.com # default. GHE: .../<enterprise>
-  audience: https://cf-auth.example.com               # REQUIRED: the broker's origin
+  audience: https://cf-oidc-broker.example.com        # REQUIRED: the broker's origin
   owner_id: "100000001"                               # REQUIRED: numeric org/user ID
 
 defaults:
