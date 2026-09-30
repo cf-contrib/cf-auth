@@ -51,7 +51,7 @@ const Duration = v.pipe(
 const Origin = v.pipe(
   v.string(),
   v.url(),
-  v.check((s) => new URL(s).origin === s, "must be a bare origin such as https://cf-auth.example.com"),
+  v.check((s) => new URL(s).origin === s, "must be a bare origin such as https://cf-oidc-broker.example.com"),
 );
 
 /** Cloudflare's native token `resources`, e.g. `com.cloudflare.api.account.zone.<zone_id>: "*"`. */

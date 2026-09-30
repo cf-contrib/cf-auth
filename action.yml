@@ -7,7 +7,7 @@ branding:
 inputs:
   broker-url:
     required: true
-    description: Broker base URL, e.g. https://cf-auth.example.com. Its origin is the OIDC audience.
+    description: Broker base URL, e.g. https://cf-oidc-broker.example.com. Its origin is the OIDC audience.
   profile:
     required: false
     description: Policy profile to request (not an AWS profile). Recommended when more than one profile could match.
