@@ -3,9 +3,9 @@
 
 /** Body of `POST /v1/token`. */
 export interface TokenRequest {
-  /** Rule to use. If omitted, exactly one rule must match the caller's claims. */
-  rule?: string | undefined;
-  /** Requested lifetime such as `10m` or `1h`. Capped at the rule's `max_ttl`. */
+  /** Profile to use. If omitted, exactly one profile must match the caller's claims. */
+  profile?: string | undefined;
+  /** Requested lifetime such as `10m` or `1h`. Capped at the profile's `max_ttl`. */
   ttl?: string | undefined;
 }
 
@@ -16,7 +16,7 @@ export interface TokenResponse {
   account_id: string;
   /** RFC 3339 timestamp, e.g. `2026-09-28T12:15:00Z`. */
   expires_on: string;
-  rule: string;
+  profile: string;
 }
 
 export type ErrorCode =

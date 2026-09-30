@@ -68,7 +68,7 @@ jobs:
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: stub-request-token
         with:
           broker-url: http://127.0.0.1:8787
-          rule: smoke
+          profile: smoke
           ttl: 5m
           r2-credentials: true
       - name: Check Exported Credentials

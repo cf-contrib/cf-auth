@@ -42,7 +42,7 @@ export interface TestPolicy {
   version: number;
   github: { issuer?: string; audience?: string; owner_id?: string };
   defaults?: { ttl?: string; max_ttl?: string };
-  rules: {
+  profiles: {
     name: string;
     match: Record<string, unknown>;
     token: {
@@ -59,7 +59,7 @@ export function testPolicy(issuer: string): TestPolicy {
     version: 1,
     github: { issuer, audience: AUDIENCE, owner_id: OWNER_ID },
     defaults: { ttl: "15m", max_ttl: "1h" },
-    rules: [
+    profiles: [
       {
         name: "infra-cloudflare",
         match: { repository_id: "200000002", ref: "refs/heads/main", environment: "prod" },

@@ -22,7 +22,7 @@ jobs:
       - uses: cf-contrib/cf-oidc-auth@v0.4.0 # x-release-please-version
         with:
           broker-url: https://cf-auth.example.com
-          rule: workers-deploy
+          profile: workers-deploy
       - run: npx wrangler deploy
 ```
 
@@ -49,8 +49,8 @@ A floating `v1` tag will follow each release from 1.0 on.
 | Input | Required | Description |
 |---|---|---|
 | `broker-url` | yes | Broker base URL, e.g. `https://cf-auth.example.com`. Its origin is the OIDC audience and must equal `github.audience` in the policy. |
-| `rule` | no | Rule to request. Recommended when more than one rule could match. |
-| `ttl` | no | Requested lifetime such as `5m` or `1h`. Defaults to the rule's `ttl`, capped at its `max_ttl`. |
+| `profile` | no | Policy profile to request (not an AWS profile). Recommended when more than one profile could match. |
+| `ttl` | no | Requested lifetime such as `5m` or `1h`. Defaults to the profile's `ttl`, capped at its `max_ttl`. |
 | `r2-credentials` | no | `true` to also export S3-compatible R2 credentials derived from the token. Default `false`. See [R2 over the S3 API](#r2-over-the-s3-api). |
 
 ## What it does
@@ -61,9 +61,9 @@ A floating `v1` tag will follow each release from 1.0 on.
   - masks the token and the OIDC token;
   - exports `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for the rest of the job;
   - with `r2-credentials: true`, also exports S3-compatible R2 credentials (`AWS_*`) and masks the secret. The access key ID is the token ID, which isn't secret and is logged;
-  - logs the token ID, rule and expiry (none of them secret), so a run can be matched to the broker's audit log:
+  - logs the token ID, profile and expiry (none of them secret), so a run can be matched to the broker's audit log:
     ```
-    cf-auth: minted token 3f2a… (rule workers-deploy, expires 2026-09-28T12:15:00Z)
+    cf-auth: minted token 3f2a… (profile workers-deploy, expires 2026-09-28T12:15:00Z)
     ```
 - **Post step:** revokes the token. It runs even when the job fails. A failed revoke is a warning, not an error: the token expires on its own and the broker's cron deletes it.
 
@@ -79,7 +79,7 @@ Apart from `r2-credentials`, none of this can be switched off. Exported values a
       - uses: cf-contrib/cf-oidc-auth@v0.4.0 # x-release-please-version
         with:
           broker-url: https://cf-auth.example.com
-          rule: workers-deploy
+          profile: workers-deploy
       - uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ env.CLOUDFLARE_API_TOKEN }}
@@ -92,7 +92,7 @@ Apart from `r2-credentials`, none of this can be switched off. Exported values a
       - uses: cf-contrib/cf-oidc-auth@v0.4.0 # x-release-please-version
         with:
           broker-url: https://cf-auth.example.com
-          rule: infra-cloudflare
+          profile: infra-cloudflare
           ttl: 30m
       - run: tofu apply -auto-approve # the cloudflare provider reads CLOUDFLARE_API_TOKEN
 ```
@@ -115,7 +115,7 @@ S3 tools need an access key pair, not an API token. R2 derives one from any toke
       - uses: cf-contrib/cf-oidc-auth@v0.4.0 # x-release-please-version
         with:
           broker-url: https://cf-auth.example.com
-          rule: r2-sync
+          profile: r2-sync
           r2-credentials: true
       - run: aws s3 sync ./dist "s3://my-bucket/" --endpoint-url "$AWS_ENDPOINT_URL_S3"
 ```
@@ -154,7 +154,7 @@ terraform {
 
 Notes:
 
-- **Permissions:** the rule must grant R2 permissions, e.g. `Workers R2 Storage Bucket Item Read`/`Write` on `com.cloudflare.edge.r2.bucket.<account_id>_default_<bucket>`. Without them the credentials are rejected.
+- **Permissions:** the profile must grant R2 permissions, e.g. `Workers R2 Storage Bucket Item Read`/`Write` on `com.cloudflare.edge.r2.bucket.<account_id>_default_<bucket>`. Without them the credentials are rejected.
 - **Lifetime:** the pair lives and dies with the token. The post step's revoke invalidates it too.
 - **Why it's opt-in:** it replaces any `AWS_*` credentials already set in the job. A job that also talks to AWS should get R2 access in a separate job.
 - **Jurisdictions:** buckets in a jurisdiction (`eu`, `fedramp`) use a different endpoint, e.g. `https://<account_id>.eu.r2.cloudflarestorage.com`. Set it in the tool's config, which takes precedence over `AWS_ENDPOINT_URL_S3`.
@@ -170,7 +170,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: cf-contrib/cf-oidc-auth@v0.4.0 # x-release-please-version
-        with: { broker-url: https://cf-auth.example.com, rule: service-dns }
+        with: { broker-url: https://cf-auth.example.com, profile: service-dns }
       - run: ./scripts/update-dns.sh
 
   deploy:
@@ -181,7 +181,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: cf-contrib/cf-oidc-auth@v0.4.0 # x-release-please-version
-        with: { broker-url: https://cf-auth.example.com, rule: workers-deploy }
+        with: { broker-url: https://cf-auth.example.com, profile: workers-deploy }
       - run: npx wrangler deploy
 ```
 
@@ -191,7 +191,7 @@ jobs:
 |---|---|
 | `OIDC unavailable: add permissions: id-token: write to the job` | The job can't request an OIDC token. Add the permission. Fork PRs on `pull_request` never get it. |
 | `broker returned 401 (unauthorized)` | The broker rejected the OIDC token, usually because `broker-url` doesn't match `github.audience` in the policy. |
-| `broker returned 403 (forbidden)` | No rule allows this workflow, or the named `rule` doesn't match. The broker's audit log (`token.deny`) has the reason. |
+| `broker returned 403 (forbidden)` | No profile allows this workflow, or the named `profile` doesn't match. The broker's audit log (`token.deny`) has the reason. |
 | `broker returned 500 (misconfigured)` | The broker's policy or bindings are invalid. Check `/healthz` and its logs. |
 | `broker-url must use https` | Plain `http` is only accepted for `localhost` and `127.0.0.1`. |
 
@@ -199,7 +199,7 @@ jobs:
 
 - **One token per job.** Every step in a job can read the runner, so a second scope in the same job wouldn't be isolated. Use two jobs.
 - **No outputs.** The values are in `env`; outputs would just be a second name for them.
-- **Masking isn't isolation.** The token is hidden in logs, but any step in the job, including third-party actions and PR code, can use it until the post step revokes it. Keep rules for prod behind `environment` protection.
+- **Masking isn't isolation.** The token is hidden in logs, but any step in the job, including third-party actions and PR code, can use it until the post step revokes it. Keep profiles for prod behind `environment` protection.
 - **Needs a `node24` runner.** The action runs straight from the tag's checkout, with no build step and nothing installed.
 
 ## License

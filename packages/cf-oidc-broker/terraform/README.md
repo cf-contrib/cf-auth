@@ -44,7 +44,7 @@ by default deploys the `broker.js` of the release its `ref` points to.
 wrangler secrets-store store list --remote     # note the store ID
 wrangler secrets-store secret create <store-id> --name cf-auth-broker-token --scopes workers --remote
 
-$EDITOR policy.yaml                            # owner_id, rules; see Policy below
+$EDITOR policy.yaml                            # owner_id, profiles; see Policy below
 
 export CLOUDFLARE_API_TOKEN=...                # deploy token, not the broker token
 tofu init
@@ -84,7 +84,7 @@ version: 1
 github:
   audience: ${broker_url}
   owner_id: "${owner_id}"          # policy_vars = { owner_id = data.github_organization.org.id }
-rules:
+profiles:
   - name: deploy
     match:
       repository_id: "${repo_id}"  # policy_vars = { repo_id = data.github_repository.app.repo_id }
@@ -99,7 +99,7 @@ The format is documented in the [broker's README](..#policy). A
 fuller sample is in [`tests/fixtures/policy.yaml`](tests/fixtures/policy.yaml).
 
 The rendered policy must fit in one Worker binding: Cloudflare allows 5 KB per
-variable, which is roughly 15–20 rules. The plan fails with the policy's size if
+variable, which is roughly 15–20 profiles. The plan fails with the policy's size if
 it's larger. Past that, run a broker per team or trust domain.
 
 ## Upgrading and pinning

@@ -221,7 +221,7 @@ run "policy_vars" {
   }
 
   assert {
-    condition     = jsondecode(local.policy_json).rules[0].match.repository_id == "200000002" && jsondecode(local.policy_json).github.owner_id == "100000001"
+    condition     = jsondecode(local.policy_json).profiles[0].match.repository_id == "200000002" && jsondecode(local.policy_json).github.owner_id == "100000001"
     error_message = "policy_vars should be filled into the policy"
   }
 }

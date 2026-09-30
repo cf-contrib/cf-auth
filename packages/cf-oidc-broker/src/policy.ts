@@ -69,7 +69,7 @@ const TokenPolicy = v.strictObject({
   resources: Resources,
 });
 
-const Rule = v.strictObject({
+const Profile = v.strictObject({
   name: v.pipe(v.string(), v.regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/, "must be 1-64 of [A-Za-z0-9_.-]")),
   match: v.optional(v.record(v.pipe(v.string(), v.regex(/^[a-z_]+$/, "must be a claim name")), ClaimValue), {}),
   token: v.strictObject({
@@ -93,13 +93,13 @@ const PolicySchema = v.strictObject({
     }),
     {},
   ),
-  rules: v.pipe(v.array(Rule), v.minLength(1)),
+  profiles: v.pipe(v.array(Profile), v.minLength(1)),
 });
 
 export type TokenPolicy = v.InferOutput<typeof TokenPolicy>;
 export type Resources = TokenPolicy["resources"];
 
-export interface Rule {
+export interface Profile {
   name: string;
   /** All keys must match (AND). Always includes `repository_owner_id`. */
   match: Record<string, string>;
@@ -110,7 +110,7 @@ export interface Rule {
 
 export interface Policy {
   github: { issuer: string; audience: string; owner_id: string };
-  rules: Rule[];
+  profiles: Profile[];
 }
 
 export class PolicyError extends Error {
@@ -149,7 +149,7 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
     );
   }
 
-  const { github, defaults, rules } = parsed.output;
+  const { github, defaults, profiles } = parsed.output;
   const issues: string[] = [];
 
   // Guardrail 5: custom audience, so JWTs minted for AWS/GCP can't be replayed here.
@@ -162,25 +162,25 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
   checkTTLs("defaults", defaultTTL, defaultMax, issues);
 
   const names = new Set<string>();
-  const out: Rule[] = rules.map((rule, i) => {
-    const at = `rules.${i} (${rule.name})`;
-    if (names.has(rule.name)) issues.push(`${at}: duplicate rule name`);
-    names.add(rule.name);
+  const out: Profile[] = profiles.map((profile, i) => {
+    const at = `profiles.${i} (${profile.name})`;
+    if (names.has(profile.name)) issues.push(`${at}: duplicate profile name`);
+    names.add(profile.name);
 
-    for (const [claim, value] of Object.entries(rule.match)) {
+    for (const [claim, value] of Object.entries(profile.match)) {
       // Guardrail 2: IDs are exact, never globbed.
       if (claim.endsWith("_id") && value.includes("*")) {
         issues.push(`${at}.match.${claim}: ID claims must be exact, globs are not allowed`);
       }
     }
 
-    // Guardrail 1: the owner pin applies to every rule and can't be overridden.
-    const owner = rule.match.repository_owner_id;
+    // Guardrail 1: the owner pin applies to every profile and can't be overridden.
+    const owner = profile.match.repository_owner_id;
     if (owner !== undefined && owner !== github.owner_id) {
       issues.push(`${at}.match.repository_owner_id: conflicts with github.owner_id`);
     }
 
-    rule.token.policies.forEach((p, j) => {
+    profile.token.policies.forEach((p, j) => {
       // Tokens are minted in one account; another account's ID is a copy-paste mistake.
       for (const key of Object.keys(p.resources)) {
         const id = ACCOUNT_RESOURCE.exec(key)?.[1];
@@ -199,21 +199,21 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
     });
 
     // Guardrail 4: TTL caps.
-    const max_ttl = rule.token.max_ttl ?? defaultMax;
-    const ttl = rule.token.ttl ?? Math.min(defaultTTL, max_ttl);
+    const max_ttl = profile.token.max_ttl ?? defaultMax;
+    const ttl = profile.token.ttl ?? Math.min(defaultTTL, max_ttl);
     checkTTLs(`${at}.token`, ttl, max_ttl, issues);
 
     return {
-      name: rule.name,
-      match: { ...rule.match, repository_owner_id: github.owner_id },
+      name: profile.name,
+      match: { ...profile.match, repository_owner_id: github.owner_id },
       ttl,
       max_ttl,
-      policies: rule.token.policies,
+      policies: profile.token.policies,
     };
   });
 
   if (issues.length > 0) throw new PolicyError(issues);
-  return { github, rules: out };
+  return { github, profiles: out };
 }
 
 function checkTTLs(at: string, ttl: number, max: number, issues: string[]) {
@@ -238,38 +238,38 @@ export function glob(pattern: string, value: string): boolean {
   return new RegExp(`^${re}$`, "s").test(value);
 }
 
-export function matches(rule: Rule, claims: Claims): boolean {
-  return Object.entries(rule.match).every(([claim, pattern]) => {
+export function matches(profile: Profile, claims: Claims): boolean {
+  return Object.entries(profile.match).every(([claim, pattern]) => {
     const value = claims[claim];
     if (typeof value !== "string") return false;
     return claim.endsWith("_id") ? value === pattern : glob(pattern, value);
   });
 }
 
-/** Picks the rule to mint with, or throws a `403` whose reason goes to the audit log. */
-export function selectRule(policy: Policy, claims: Claims, requested?: string): Rule {
+/** Picks the profile to mint with, or throws a `403` whose reason goes to the audit log. */
+export function selectProfile(policy: Policy, claims: Claims, requested?: string): Profile {
   if (requested !== undefined) {
-    const rule = policy.rules.find((r) => r.name === requested);
-    if (!rule || !matches(rule, claims)) {
-      throw new HttpError("forbidden", "rule_mismatch", rule ? undefined : `unknown rule ${requested}`);
+    const profile = policy.profiles.find((p) => p.name === requested);
+    if (!profile || !matches(profile, claims)) {
+      throw new HttpError("forbidden", "profile_mismatch", profile ? undefined : `unknown profile ${requested}`);
     }
-    return rule;
+    return profile;
   }
 
-  const candidates = policy.rules.filter((r) => matches(r, claims));
+  const candidates = policy.profiles.filter((p) => matches(p, claims));
   if (candidates.length === 0) throw new HttpError("forbidden", "no_match");
   if (candidates.length > 1) {
-    throw new HttpError("forbidden", "ambiguous", candidates.map((r) => r.name).join(","));
+    throw new HttpError("forbidden", "ambiguous", candidates.map((p) => p.name).join(","));
   }
-  return candidates[0] as Rule;
+  return candidates[0] as Profile;
 }
 
-/** Resolves the requested TTL against the rule. Requests above `max_ttl` are clamped, not refused. */
-export function clampTTL(requested: string | undefined, rule: Rule): number {
-  if (requested === undefined) return rule.ttl;
+/** Resolves the requested TTL against the profile. Requests above `max_ttl` are clamped, not refused. */
+export function clampTTL(requested: string | undefined, profile: Profile): number {
+  if (requested === undefined) return profile.ttl;
   const ttl = parseDuration(requested);
   if (ttl === undefined || ttl < MIN_TTL) {
     throw new HttpError("bad_request", "invalid_ttl", requested);
   }
-  return Math.min(ttl, rule.max_ttl);
+  return Math.min(ttl, profile.max_ttl);
 }

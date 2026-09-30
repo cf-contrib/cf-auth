@@ -3,7 +3,7 @@ version: 1
 github:
   audience: ${broker_url}
   owner_id: "${owner_id}"
-rules:
+profiles:
   - name: e2e
     match:
       repository_id: "${repository_id}"

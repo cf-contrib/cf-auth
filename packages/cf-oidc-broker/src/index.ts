@@ -3,7 +3,7 @@ import type { ErrorResponse, TokenRequest } from "./api.js";
 import { audit } from "./audit.js";
 import { HttpError } from "./errors.js";
 import { bearer, verifyGitHubJWT } from "./jwt.js";
-import { type Claims, clampTTL, loadPolicy, type Policy, PolicyError, selectRule } from "./policy.js";
+import { type Claims, clampTTL, loadPolicy, type Policy, PolicyError, selectProfile } from "./policy.js";
 import { cleanup, mint, revoke } from "./tokens.js";
 
 export interface Env {
@@ -34,7 +34,7 @@ export function config(env: Env): Policy {
     if (result instanceof PolicyError) {
       audit("policy.invalid", { issues: result.issues });
     } else {
-      audit("policy.loaded", { rules: result.rules.length });
+      audit("policy.loaded", { profiles: result.profiles.length });
     }
   }
   if (loaded.result instanceof PolicyError) throw loaded.result;
@@ -92,40 +92,40 @@ async function readTokenRequest(request: Request): Promise<TokenRequest> {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     throw new HttpError("bad_request", "invalid_body", "not an object");
   }
-  const { rule, ttl } = body as Record<string, unknown>;
-  if ((rule !== undefined && typeof rule !== "string") || (ttl !== undefined && typeof ttl !== "string")) {
-    throw new HttpError("bad_request", "invalid_body", "rule and ttl must be strings");
+  const { profile, ttl } = body as Record<string, unknown>;
+  if ((profile !== undefined && typeof profile !== "string") || (ttl !== undefined && typeof ttl !== "string")) {
+    throw new HttpError("bad_request", "invalid_body", "profile and ttl must be strings");
   }
-  // Both end up in the audit log; rule names are at most 64 characters anyway.
-  if ((rule?.length ?? 0) > 64 || (ttl?.length ?? 0) > 16) {
-    throw new HttpError("bad_request", "invalid_body", "rule or ttl too long");
+  // Both end up in the audit log; profile names are at most 64 characters anyway.
+  if ((profile?.length ?? 0) > 64 || (ttl?.length ?? 0) > 16) {
+    throw new HttpError("bad_request", "invalid_body", "profile or ttl too long");
   }
-  return { rule, ttl };
+  return { profile, ttl };
 }
 
 async function handleToken(request: Request, env: Env): Promise<Response> {
   let claims: Claims | undefined;
-  let rule: string | undefined;
+  let profile: string | undefined;
   try {
     const policy = config(env);
     claims = await verifyGitHubJWT(bearer(request), policy.github);
 
     const req = await readTokenRequest(request);
-    rule = req.rule;
-    const selected = selectRule(policy, claims, req.rule);
-    rule = selected.name;
+    profile = req.profile;
+    const selected = selectProfile(policy, claims, req.profile);
+    profile = selected.name;
     const ttl = clampTTL(req.ttl, selected);
 
     const cf = await brokerClient(env);
     const token = await mint(cf, env.CF_AUTH_BROKER_ACCOUNT_ID, selected, claims, ttl);
 
-    audit("token.mint", { rule: token.rule, claims, token_id: token.token_id, expires_on: token.expires_on });
+    audit("token.mint", { profile: token.profile, claims, token_id: token.token_id, expires_on: token.expires_on });
     return json(200, token);
   } catch (err) {
     if (err instanceof HttpError) {
-      audit("token.deny", { rule, claims, reason: err.reason, detail: err.detail });
+      audit("token.deny", { profile, claims, reason: err.reason, detail: err.detail });
     } else if (err instanceof CloudflareError) {
-      audit("token.deny", { rule, claims, reason: "cloudflare_error", detail: err.message });
+      audit("token.deny", { profile, claims, reason: "cloudflare_error", detail: err.message });
     }
     return failure(err);
   }

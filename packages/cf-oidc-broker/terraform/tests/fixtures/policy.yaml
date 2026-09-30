@@ -9,13 +9,13 @@ version: 1
 github:
   issuer: https://token.actions.githubusercontent.com
   audience: ${broker_url} # the broker's URL, filled in by Terraform
-  owner_id: "100000001" # REQUIRED: numeric org/user ID, applied to every rule
+  owner_id: "100000001" # REQUIRED: numeric org/user ID, applied to every profile
 
 defaults:
   ttl: 15m
   max_ttl: 1h
 
-rules:
+profiles:
   - name: workers-deploy
     match:
       repository_id: "200000002"
