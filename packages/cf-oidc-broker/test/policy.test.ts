@@ -355,11 +355,15 @@ describe("buckets", () => {
     expect(issues(p).join()).toMatch(/must have a token, buckets or both/);
   });
 
-  it("allows one bucket per profile for now", () => {
+  it("accepts several buckets, each once", () => {
     const p = withBucket({});
     const target = p.profiles[1] as unknown as { buckets: unknown[] };
-    target.buckets.push({ name: "org-artifacts", permission: "object-read-only" });
-    expect(issues(p).join()).toMatch(/buckets: only one bucket per profile is supported yet/);
+    target.buckets.push({ name: "org-artifacts", permission: "object-read-only", prefixes: ["{repository_id}/"] });
+    expect(loaded(p).buckets?.map((b) => b.name)).toEqual(["org-terraform-state", "org-artifacts"]);
+
+    target.buckets.push({ name: "org-terraform-state", permission: "object-read-only" });
+    expect(issues(p)).toEqual(["profiles.1 (workers-deploy).buckets.2.name: duplicate bucket org-terraform-state"]);
+
     target.buckets = [];
     expect(issues(p).join()).toMatch(/buckets: /);
   });

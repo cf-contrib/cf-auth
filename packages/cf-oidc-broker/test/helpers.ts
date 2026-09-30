@@ -156,6 +156,8 @@ export class FakeCloudflare {
   requests: { method: string; path: string; body?: unknown }[] = [];
   failCreate = false;
   failR2 = false;
+  /** Fails temp-access-credentials for this bucket only. */
+  failR2Bucket: string | undefined;
   private seq = 0;
 
   constructor() {
@@ -202,8 +204,10 @@ export class FakeCloudflare {
       return envelope({ ...rest, value });
     }
     if (req.method === "POST" && path === `${acct}/r2/temp-access-credentials`) {
-      if (this.failR2) return apiError(403, "Unauthorized to access requested resource");
-      const b = body as { parentAccessKeyId: string };
+      const b = body as { bucket: string; parentAccessKeyId: string };
+      if (this.failR2 || b.bucket === this.failR2Bucket) {
+        return apiError(403, "Unauthorized to access requested resource");
+      }
       return envelope({
         accessKeyId: b.parentAccessKeyId,
         secretAccessKey: "r2-secret-value",

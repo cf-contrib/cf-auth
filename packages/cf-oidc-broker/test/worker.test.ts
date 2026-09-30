@@ -368,6 +368,64 @@ describe("POST /v1/token with buckets", () => {
     expect(r2Requests()[0]?.body).toMatchObject({ ttlSeconds: 600 });
   });
 
+  it("issues credentials for each bucket, in the policy's order", async () => {
+    withProfiles({
+      name: "state-and-artifacts",
+      match: STATE,
+      buckets: [
+        { name: "org-terraform-state", permission: "object-read-write", prefixes: ["github.com/{repository}/"] },
+        { name: "org-artifacts", permission: "object-read-only" },
+      ],
+    });
+    const res = await call("POST", "/v1/token", { token: await stateRepo() });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TokenResponse;
+    expect(body.buckets?.map((b) => [b.name, b.prefixes])).toEqual([
+      ["org-terraform-state", ["github.com/example-org/state-app/"]],
+      ["org-artifacts", []],
+    ]);
+    expect(r2Requests().map((r) => r.body)).toEqual([
+      {
+        bucket: "org-terraform-state",
+        parentAccessKeyId: BROKER_TOKEN_ID,
+        permission: "object-read-write",
+        ttlSeconds: 900,
+        prefixes: ["github.com/example-org/state-app/"],
+      },
+      { bucket: "org-artifacts", parentAccessKeyId: BROKER_TOKEN_ID, permission: "object-read-only", ttlSeconds: 900 },
+    ]);
+    expect(
+      auditLines()
+        .filter((l) => l.event === "r2.issued")
+        .map((l) => l.bucket),
+    ).toEqual(["org-terraform-state", "org-artifacts"]);
+  });
+
+  it("deletes the token and 502s when a later bucket's credentials can't be created", async () => {
+    withProfiles({
+      name: "state-and-artifacts",
+      match: STATE,
+      token: {
+        policies: [
+          { permissions: ["Workers Scripts Write"], resources: { [`com.cloudflare.api.account.${ACCOUNT_ID}`]: "*" } },
+        ],
+      },
+      buckets: [
+        { name: "org-terraform-state", permission: "object-read-write" },
+        { name: "org-artifacts", permission: "object-read-only" },
+      ],
+    });
+    cf.failR2Bucket = "org-artifacts";
+    const res = await call("POST", "/v1/token", { token: await stateRepo() });
+    expect(res.status).toBe(502);
+    expect(cf.tokens.size).toBe(1); // only the broker token
+    expect(
+      auditLines()
+        .filter((l) => l.event === "r2.issued")
+        .map((l) => l.bucket),
+    ).toEqual(["org-terraform-state"]);
+  });
+
   it("deletes the token and 502s when the credentials can't be created", async () => {
     withProfiles({
       name: "state-and-deploy",
