@@ -7,7 +7,7 @@ locals {
 
 # Worker script. It's reachable on exactly one URL, the OIDC audience: its
 # workers.dev URL, or the custom domain if hostname is one.
-resource "cloudflare_worker" "broker" {
+resource "cloudflare_worker" "this" {
   account_id = var.account_id
   name       = var.worker_name
 
@@ -33,9 +33,9 @@ locals {
 }
 
 # Upload a new version on every artifact, policy or binding change.
-resource "cloudflare_worker_version" "broker" {
+resource "cloudflare_worker_version" "this" {
   account_id         = var.account_id
-  worker_id          = cloudflare_worker.broker.id
+  worker_id          = cloudflare_worker.this.id
   compatibility_date = var.worker_compatibility_date
   main_module        = "broker.js"
 
@@ -78,35 +78,35 @@ resource "cloudflare_worker_version" "broker" {
 }
 
 # Promote the new version to 100% of traffic.
-resource "cloudflare_workers_deployment" "broker" {
+resource "cloudflare_workers_deployment" "this" {
   account_id  = var.account_id
-  script_name = cloudflare_worker.broker.name
+  script_name = cloudflare_worker.this.name
   strategy    = "percentage"
 
   versions = [
     {
       percentage = 100
-      version_id = cloudflare_worker_version.broker.id
+      version_id = cloudflare_worker_version.this.id
     },
   ]
 }
 
-resource "cloudflare_workers_custom_domain" "broker" {
+resource "cloudflare_workers_custom_domain" "this" {
   count = local.custom_domain ? 1 : 0
 
   account_id = var.account_id
   zone_id    = var.zone_id
   hostname   = var.hostname
-  service    = cloudflare_worker.broker.name
+  service    = cloudflare_worker.this.name
 
-  depends_on = [cloudflare_workers_deployment.broker]
+  depends_on = [cloudflare_workers_deployment.this]
 }
 
 # Hourly cleanup of expired cf-oidc:* tokens.
-resource "cloudflare_workers_cron_trigger" "broker" {
+resource "cloudflare_workers_cron_trigger" "this" {
   account_id  = var.account_id
-  script_name = cloudflare_worker.broker.name
+  script_name = cloudflare_worker.this.name
   schedules   = [{ cron = "17 * * * *" }]
 
-  depends_on = [cloudflare_workers_deployment.broker]
+  depends_on = [cloudflare_workers_deployment.this]
 }
