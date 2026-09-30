@@ -294,58 +294,87 @@ describe("matching", () => {
   });
 });
 
-describe("r2 grant", () => {
-  const grant = (r2: Record<string, unknown>, token = false) => {
+describe("buckets", () => {
+  /** workers-deploy with one bucket, plus profile-level fields such as ttl, and without its token by default. */
+  const withBucket = (bucket: Record<string, unknown>, { token = false, ...profile }: Record<string, unknown> = {}) => {
     const p = policy();
-    const profile = p.profiles[1] as TestPolicy["profiles"][number];
-    if (!token) delete (profile as { token?: unknown }).token;
-    profile.r2 = { bucket: "org-terraform-state", permission: "object-read-write", ...r2 };
+    const target = p.profiles[1] as TestPolicy["profiles"][number];
+    if (!token) delete (target as { token?: unknown }).token;
+    Object.assign(target, profile, {
+      buckets: [{ name: "org-terraform-state", permission: "object-read-write", ...bucket }],
+    });
     return p;
   };
   const loaded = (p: TestPolicy) => loadPolicy(p).profiles[1] as Profile;
 
-  it("accepts a profile with only r2, using the default ttls", () => {
-    const profile = loaded(grant({ prefixes: ["github.com/{repository}/"] }));
+  it("accepts a profile with only buckets, using the default ttls", () => {
+    const profile = loaded(withBucket({ prefixes: ["github.com/{repository}/"] }));
     expect(profile.policies).toBeUndefined();
-    expect(profile.r2).toEqual({
-      bucket: "org-terraform-state",
-      permission: "object-read-write",
-      prefixes: ["github.com/{repository}/"],
-    });
+    expect(profile.buckets).toEqual([
+      { name: "org-terraform-state", permission: "object-read-write", prefixes: ["github.com/{repository}/"] },
+    ]);
     expect(profile.ttl).toBe(15 * 60_000);
     expect(profile.max_ttl).toBe(60 * 60_000);
   });
 
-  it("takes ttl and max_ttl from r2 when there's no token", () => {
-    const profile = loaded(grant({ ttl: "5m", max_ttl: "10m" }));
+  it("takes ttl and max_ttl from the profile", () => {
+    const profile = loaded(withBucket({}, { ttl: "5m", max_ttl: "10m" }));
     expect(profile.ttl).toBe(5 * 60_000);
     expect(profile.max_ttl).toBe(10 * 60_000);
-    expect(issues(grant({ ttl: "20m", max_ttl: "10m" })).join()).toMatch(/r2.ttl: must not exceed max_ttl/);
-    expect(issues(grant({ max_ttl: "25h" })).join()).toMatch(/r2.max_ttl: must be at most 24h/);
+    expect(issues(withBucket({}, { ttl: "20m", max_ttl: "10m" })).join()).toMatch(
+      /\(workers-deploy\)\.ttl: must not exceed max_ttl/,
+    );
+    expect(issues(withBucket({}, { max_ttl: "25h" })).join()).toMatch(
+      /\(workers-deploy\)\.max_ttl: must be at most 24h/,
+    );
   });
 
-  it("accepts a profile with both, lasting as long as the token", () => {
-    const profile = loaded(grant({}, true));
+  it("applies the profile's ttl to the token too", () => {
+    const p = policy();
+    Object.assign(p.profiles[1] as object, { ttl: "5m" });
+    expect(loaded(p).ttl).toBe(5 * 60_000);
+  });
+
+  it("still takes ttl from token, but not from both places", () => {
+    const p = policy();
+    (p.profiles[1] as TestPolicy["profiles"][number]).token.ttl = "5m";
+    expect(loaded(p).ttl).toBe(5 * 60_000);
+    Object.assign(p.profiles[1] as object, { max_ttl: "30m" });
+    expect(issues(p).join()).toMatch(/set ttl and max_ttl on the profile or on its token, not both/);
+  });
+
+  it("accepts a profile with a token and buckets", () => {
+    const profile = loaded(withBucket({}, { token: true }));
     expect(profile.policies).toHaveLength(1);
-    expect(profile.r2?.prefixes).toEqual([]);
-    expect(issues(grant({ ttl: "5m" }, true)).join()).toMatch(/r2: set ttl and max_ttl on token/);
+    expect(profile.buckets?.[0]?.prefixes).toEqual([]);
   });
 
-  it("requires a token, an r2 grant or both", () => {
+  it("requires a token, buckets or both", () => {
     const p = policy();
     delete (p.profiles[1] as { token?: unknown }).token;
-    expect(issues(p).join()).toMatch(/must have a token, an r2 grant or both/);
+    expect(issues(p).join()).toMatch(/must have a token, buckets or both/);
+  });
+
+  it("allows one bucket per profile for now", () => {
+    const p = withBucket({});
+    const target = p.profiles[1] as unknown as { buckets: unknown[] };
+    target.buckets.push({ name: "org-artifacts", permission: "object-read-only" });
+    expect(issues(p).join()).toMatch(/buckets: only one bucket per profile is supported yet/);
+    target.buckets = [];
+    expect(issues(p).join()).toMatch(/buckets: /);
   });
 
   it.each(["ab", "Org-State", "org_state", "-org-state", "org-state-", "x".repeat(64)])(
     "rejects the bucket name %j",
-    (bucket) => {
-      expect(issues(grant({ bucket })).join()).toMatch(/bucket: must be a valid R2 bucket name/);
+    (name) => {
+      expect(issues(withBucket({ name })).join()).toMatch(/buckets\.0\.name: must be a valid R2 bucket name/);
     },
   );
 
   it.each(["admin-read-write", "admin-read-only", "read-write"])("rejects the permission %s", (permission) => {
-    expect(issues(grant({ permission })).join()).toMatch(/permission: must be object-read-write or object-read-only/);
+    expect(issues(withBucket({ permission })).join()).toMatch(
+      /buckets\.0\.permission: must be object-read-write or object-read-only/,
+    );
   });
 
   it.each([
@@ -354,7 +383,7 @@ describe("r2 grant", () => {
     "{repository_owner}/shared/",
     "shared/",
   ])("accepts the prefix %j", (prefix) => {
-    expect(issues(grant({ prefixes: [prefix] }))).toEqual([]);
+    expect(issues(withBucket({ prefixes: [prefix] }))).toEqual([]);
   });
 
   it.each([
@@ -376,15 +405,15 @@ describe("r2 grant", () => {
     ["{repository_owner}{repository_id}/", /whole path segment/],
     ["github.com\t/{repository}/", /control characters/],
   ])("rejects the prefix %j", (prefix, message) => {
-    const found = issues(grant({ prefixes: [prefix] }));
+    const found = issues(withBucket({ prefixes: [prefix] }));
     expect(found).toHaveLength(1);
-    expect(found[0]).toMatch(/^profiles\.1 \(workers-deploy\)\.r2\.prefixes\.0: /);
+    expect(found[0]).toMatch(/^profiles\.1 \(workers-deploy\)\.buckets\.0\.prefixes\.0: /);
     expect(found[0]).toMatch(message);
   });
 
   describe("r2Prefixes", () => {
     const fill = (prefixes: string[], claims = githubClaims()) =>
-      r2Prefixes({ bucket: "org-terraform-state", permission: "object-read-write", prefixes }, claims);
+      r2Prefixes({ name: "org-terraform-state", permission: "object-read-write", prefixes }, claims);
 
     it("fills placeholders from the claims", () => {
       expect(

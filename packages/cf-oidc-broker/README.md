@@ -25,8 +25,8 @@ profiles:
       repository_id: "200000002"
       ref: refs/heads/main
       environment: prod
+    ttl: 15m
     token:
-      ttl: 15m
       policies:
         - permissions: ["Workers Scripts Write"]
           resources:
@@ -37,7 +37,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 
 ## Deploy
 
-1. **Create the broker token.** In the Cloudflare dashboard, create an **account-owned** API token with **Account API Tokens Write**. If any profile has an [`r2` grant](#r2-grants), also give it R2 permissions covering what those grants delegate (see [R2 grants](#r2-grants)). It's the broker's only long-lived credential. This is the one manual step: automating it would need a token that can create tokens. Store it in [Secrets Store](https://developers.cloudflare.com/secrets-store/) so it never passes through your deploy tooling:
+1. **Create the broker token.** In the Cloudflare dashboard, create an **account-owned** API token with **Account API Tokens Write**. If any profile has [`buckets`](#buckets), also give it R2 permissions covering what they delegate. It's the broker's only long-lived credential. This is the one manual step: automating it would need a token that can create tokens. Store it in [Secrets Store](https://developers.cloudflare.com/secrets-store/) so it never passes through your deploy tooling:
    ```sh
    wrangler secrets-store secret create <store-id> --name cf-auth-broker-token --scopes workers --remote
    ```
@@ -58,7 +58,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 | Binding | Type | Required | Description |
 |---|---|---|---|
 | `CF_OIDC_BROKER_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
-| `CF_OIDC_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 permissions covering what `r2` grants delegate. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
+| `CF_OIDC_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 permissions covering what profiles' `buckets` delegate. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
 
 The hourly cron (`17 * * * *` in the examples) deletes expired `cf-oidc:*` tokens.
 
@@ -113,8 +113,8 @@ profiles:
   - name: service-dns
     match:
       job_workflow_ref: "example-org/workflows/.github/workflows/deploy.yml@refs/heads/main"
+    ttl: 5m                             # for everything the profile hands out
     token:
-      ttl: 5m
       policies:
         - effect: allow                 # the default; "deny" carves out exceptions
           permissions: ["DNS Write"]
@@ -124,14 +124,13 @@ profiles:
   - name: terraform-state               # no token: only R2 credentials
     match:
       ref: refs/heads/main
-    r2:
-      bucket: org-terraform-state
-      permission: object-read-write
-      prefixes: ["{repository_owner_id}/{repository_id}/"]
-      ttl: 15m                          # only in a profile without token
+    buckets:
+      - name: org-terraform-state
+        permission: object-read-write
+        prefixes: ["{repository_owner_id}/{repository_id}/"]
 ```
 
-A profile has a `token`, an `r2` grant, or both.
+A profile has a `token`, `buckets`, or both.
 
 The broker validates the policy on the first request. If it's invalid, the broker fails closed and every request gets `500`.
 
@@ -168,35 +167,38 @@ curl -H "Authorization: Bearer <token>" \
 
 Keys must start with `com.cloudflare.`, and account keys must name `CF_OIDC_BROKER_ACCOUNT_ID`. Add a comment with the zone's name next to each zone ID so reviewers can tell them apart. With the Terraform module, write `${account_id}` and it's filled in from `var.account_id`.
 
-### R2 grants
+### Buckets
 
-An `r2` grant gets the job [temporary R2 credentials](https://developers.cloudflare.com/r2/api/s3/temporary-credentials/) for one bucket, optionally limited to key prefixes built from the job's claims. One shared bucket can then hold every repo's Terraform state, with each repo limited to its own prefix:
+Each entry in `buckets` gets the job [temporary R2 credentials](https://developers.cloudflare.com/r2/api/s3/temporary-credentials/) for that bucket, optionally limited to key prefixes built from the job's claims. One shared bucket can then hold every repo's Terraform state, with each repo limited to its own prefix:
 
 ```yaml
-    r2:
-      bucket: org-terraform-state         # a valid R2 bucket name
-      permission: object-read-write       # or object-read-only; admin levels aren't allowed
-      prefixes: ["github.com/{repository}/"]
+    buckets:
+      - name: org-terraform-state         # a valid R2 bucket name
+        permission: object-read-write     # or object-read-only; admin levels aren't allowed
+        prefixes: ["github.com/{repository}/"]
 ```
+
+- **One bucket per profile for now**, because the action can only export one set of `AWS_*` credentials.
 
 - **Placeholders** are `{claim}`, not `${claim}`, so Terraform's `templatefile` leaves them alone. Only `{repository}`, `{repository_owner}`, `{repository_id}` and `{repository_owner_id}` are allowed. They're filled in from the verified JWT, never from the request.
 - **Prefixes** must end in `/`, so `github.com/org/site/` doesn't also cover `github.com/org/site-old/`. They can't start with `/` or contain `*`, `..`, empty or `.` segments, or control characters, and each placeholder must be a whole path segment (`tfstate/{repository_id}/`, not `tfstate-{repository_id}/`), so two repos can never end up with the same prefix. These are checked when the policy loads.
 - **Claims** filling a placeholder must be non-empty and use only the characters GitHub allows in owner and repo names (`A-Z`, `a-z`, `0-9`, `.`, `_`, `-`, plus the one `/` in `repository`); IDs must be numeric. The filled-in prefix is checked again. Otherwise the request is a `403` (`invalid_r2_prefix`), before anything is minted.
 - **Without `prefixes`** the credentials cover the whole bucket.
-- **Lifetime:** as long as the token would last: the profile's `ttl`, capped at `max_ttl`, with the request's `ttl` still honoured. In a profile without `token`, set `ttl` and `max_ttl` in `r2`. The credentials **can't be revoked early**, so keep TTLs short.
-- **Parent token:** the broker token calls `temp-access-credentials` with its own ID as the parent, as in [Cloudflare's example](https://developers.cloudflare.com/r2/examples/authenticate-r2-temp-credentials/), and the credentials can't exceed its permissions. Give it **Workers R2 Storage Write** (R2's "Admin Read & Write"), which is known to work. Cloudflare asks for "at least the permissions you plan to delegate", so an R2 permission limited to the grants' buckets may be enough, but that hasn't been tried. Without an R2 permission the endpoint refuses the token with code `10000`, which the broker reports as `502` (`cloudflare_error` in the audit log). Admin Read & Write is account-wide, but it doesn't widen what a leaked broker token can do: with Account API Tokens Write it could already mint itself a token with any R2 permission. The policy still only hands out `object-*` permissions. Revoking or rolling the broker token cuts off every credential issued from it within seconds, including those of jobs running at that moment. That's the emergency switch.
-- **With both** `token` and `r2`, the broker mints the token first. If the credentials then can't be created, it deletes the token and replies `502`.
+- **Lifetime:** the profile's `ttl`, capped at its `max_ttl`, with the request's `ttl` still honoured. That's the same as the token's, in a profile with both. The credentials **can't be revoked early**, so keep TTLs short.
+- **Parent token:** the broker token calls `temp-access-credentials` with its own ID as the parent, as in [Cloudflare's example](https://developers.cloudflare.com/r2/examples/authenticate-r2-temp-credentials/), and the credentials can't exceed its permissions. Give it **Workers R2 Storage Write** (R2's "Admin Read & Write"), which is known to work. Cloudflare asks for "at least the permissions you plan to delegate", so an R2 permission limited to the profiles' buckets may be enough, but that hasn't been tried. Without an R2 permission the endpoint refuses the token with code `10000`, which the broker reports as `502` (`cloudflare_error` in the audit log). Admin Read & Write is account-wide, but it doesn't widen what a leaked broker token can do: with Account API Tokens Write it could already mint itself a token with any R2 permission. The policy still only hands out `object-*` permissions. Revoking or rolling the broker token cuts off every credential issued from it within seconds, including those of jobs running at that moment. That's the emergency switch.
+- **With both** `token` and `buckets`, the broker mints the token first. If the credentials then can't be created, it deletes the token and replies `502`.
 
 > [!WARNING]
-> **The policy decides when a job's `AWS_*` variables are replaced.** The action exports the credentials as `AWS_*` whenever the matched profile has an `r2` grant, including for workflows that don't set `profile`. Set `profile` for R2 in every workflow, and give a job that also talks to AWS its R2 access in a separate job.
+> **The policy decides when a job's `AWS_*` variables are replaced.** The action exports the credentials as `AWS_*` whenever the matched profile has `buckets`, including for workflows that don't set `profile`. Set `profile` for R2 in every workflow, and give a job that also talks to AWS its R2 access in a separate job.
 
 **Renamed and reused repo names.** A prefix built from `{repository}` moves when the repo is renamed, and a deleted repo's name can be taken by a new repo in the org, which would then get the old repo's state. `{repository_owner_id}/{repository_id}/` doesn't change on a rename and is never reused.
 
-**What a grant doesn't cover:** several buckets in one job, and admin operations such as creating or listing buckets. For those, grant R2 permissions in the profile's `token` and derive S3 credentials from `CLOUDFLARE_API_TOKEN` in a step: the access key ID is the token's ID, and the secret is the SHA-256 of the token value. Buckets in a jurisdiction (`eu`, `fedramp`) need a different endpoint than the one the broker returns.
+**What `buckets` doesn't cover yet:** several buckets in one job, and admin operations such as creating or listing buckets. For those, grant R2 permissions in the profile's `token` and derive S3 credentials from `CLOUDFLARE_API_TOKEN` in a step: the access key ID is the token's ID, and the secret is the SHA-256 of the token value. Buckets in a jurisdiction (`eu`, `fedramp`) need a different endpoint than the one the broker returns.
 
 ### TTL and names
 
 - Durations look like `90s`, `15m`, `1h`, `1h30m`.
+- `ttl` and `max_ttl` go on the profile, and apply to its token and buckets alike. `token.ttl` and `token.max_ttl`, where they used to go, still work, but a profile can't use both places.
 - A requested `ttl` above the profile's `max_ttl` is clamped. Below `1m`, or unparseable, is a `400`.
 - Minted tokens are named `cf-oidc:<repository>:<run_id>:<run_attempt>`, at most 120 characters.
 
@@ -214,7 +216,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/v1/token` | `Bearer <github-oidc-jwt>` | Mint a token, R2 credentials, or both. Body: `{ "profile"?, "ttl"? }`. Returns `{ token?, token_id?, account_id, expires_on, profile, r2? }`: `token` and `token_id` when the profile has a `token`, and `r2: { access_key_id, secret_access_key, session_token, bucket, prefixes, endpoint, expires_on }` when it has an `r2` grant. |
+| `POST` | `/v1/token` | `Bearer <github-oidc-jwt>` | Mint a token, R2 credentials, or both. Body: `{ "profile"?, "ttl"? }`. Returns `{ token?, token_id?, account_id, expires_on, profile, buckets? }`: `token` and `token_id` when the profile has a `token`, and `buckets: [{ name, access_key_id, secret_access_key, session_token, prefixes, endpoint, expires_on }]`, one entry per bucket, when it has `buckets`. |
 | `POST` | `/v1/revoke` | `Bearer <minted-token>` | Revoke a token. Holding it is the proof. Returns `204`, also when it's already gone, and `403` for tokens not named `cf-oidc:*`. |
 | `GET` | `/healthz` | public | `200` if the policy and bindings are valid, else `500`. Never shows the policy. |
 

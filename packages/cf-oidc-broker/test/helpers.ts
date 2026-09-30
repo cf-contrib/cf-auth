@@ -46,13 +46,15 @@ export interface TestPolicy {
   profiles: {
     name: string;
     match: Record<string, unknown>;
-    /** Always there in testPolicy's profiles; tests delete it to leave only `r2`. */
+    /** Always there in testPolicy's profiles; tests delete it to leave only `buckets`. */
     token: {
       ttl?: string;
       max_ttl?: string;
       policies: { effect?: string; permissions: string[]; resources: Record<string, unknown> }[];
     };
-    r2?: { bucket?: string; permission?: string; prefixes?: string[]; ttl?: string; max_ttl?: string };
+    ttl?: string;
+    max_ttl?: string;
+    buckets?: { name?: string; permission?: string; prefixes?: string[] }[];
   }[];
   [key: string]: unknown;
 }

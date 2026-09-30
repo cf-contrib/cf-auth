@@ -63,7 +63,7 @@ jobs:
         run: |
           echo "AWS_ACCESS_KEY_ID=stale-access-key-id" >> "$GITHUB_ENV"
           echo "AWS_SESSION_TOKEN=stale-session-token" >> "$GITHUB_ENV"
-      # The stub answers profile smoke-r2 as a profile with only an r2 grant.
+      # The stub answers profile smoke-r2 as a profile with only buckets.
       - name: Run cf-oidc-auth (r2 only)
         uses: ./
         env:

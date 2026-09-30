@@ -29,9 +29,9 @@ by default deploys the `broker.js` of the release its `ref` points to.
 - The **broker token**, an account-owned API token with
   **Account API Tokens Write** (see the [broker's README](..#deploy)),
   stored in [Secrets Store](https://developers.cloudflare.com/secrets-store/) (open beta).
-  If any profile has an `r2` grant, the token also needs R2 permissions
-  covering what those grants delegate: it creates their credentials and is
-  their parent (see [R2 grants](..#r2-grants)).
+  If any profile has `buckets`, the token also needs R2 permissions
+  covering what they delegate: it creates their credentials and is
+  their parent (see [Buckets](..#buckets)).
 - A separate API token for *deploying*, exported as `CLOUDFLARE_API_TOKEN`, with:
   - **Account → Workers Scripts: Edit**
   - **Account → Secrets Store: Edit**, to bind the broker token's secret
@@ -81,7 +81,7 @@ Either way the broker is reachable on exactly one URL, the `url` output, which i
 - `${account_id}`: use it for account resources.
 - Anything in `policy_vars`, e.g. repository IDs looked up with the `github` provider, so no IDs are hard-coded.
 
-`r2` prefixes use the broker's own `{claim}` placeholders, which `templatefile` leaves alone. Don't write `${repository}`: Terraform would try to fill it in and fail the plan.
+Bucket prefixes use the broker's own `{claim}` placeholders, which `templatefile` leaves alone. Don't write `${repository}`: Terraform would try to fill it in and fail the plan.
 
 ```yaml
 version: 1
@@ -101,10 +101,10 @@ profiles:
   - name: terraform-state          # every repo gets its own prefix in one shared bucket
     match:
       ref: refs/heads/main
-    r2:
-      bucket: org-terraform-state
-      permission: object-read-write
-      prefixes: ["{repository_owner_id}/{repository_id}/"]  # filled in by the broker, per job
+    buckets:
+      - name: org-terraform-state
+        permission: object-read-write
+        prefixes: ["{repository_owner_id}/{repository_id}/"]  # filled in by the broker, per job
 ```
 
 The format is documented in the [broker's README](..#policy). A
@@ -136,7 +136,7 @@ Nothing is downloaded then.
 | `account_id` | yes | | Cloudflare account ID. The broker runs here and mints tokens for it. |
 | `hostname` | yes | | `<worker_name>.<subdomain>.workers.dev`, or a custom domain. |
 | `zone_id` | for a custom domain | `null` | Zone ID of the zone holding a custom-domain `hostname`. |
-| `broker_token_secret` | yes | | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the broker token. With `r2` grants, the token also needs R2 permissions covering what they delegate. |
+| `broker_token_secret` | yes | | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the broker token. With `buckets`, the token also needs R2 permissions covering what they delegate. |
 | `policy_file` | yes | | Policy YAML path, rendered as a template. |
 | `policy_vars` | no | `{}` | Extra template variables for the policy. |
 | `broker_file` | no | `null` | Local `broker.js` to deploy instead of a release. |
@@ -153,4 +153,4 @@ Nothing is downloaded then.
   needs is declared here.
 - `tofu test` plans the module with mocked providers (no credentials needed) and
   checks the broker token binding, both URL modes, local artifacts, checksums, the
-  policy template (including `r2` prefix placeholders) and the policy module.
+  policy template (including bucket prefix placeholders) and the policy module.

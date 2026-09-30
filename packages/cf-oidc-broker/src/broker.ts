@@ -1,5 +1,5 @@
 import Cloudflare, { CloudflareError } from "cloudflare";
-import type { ErrorResponse, R2Credentials, TokenRequest, TokenResponse } from "./api.js";
+import type { BucketCredentials, ErrorResponse, TokenRequest, TokenResponse } from "./api.js";
 import { audit } from "./audit.js";
 import { HttpError } from "./errors.js";
 import { bearer, verifyGitHubJWT } from "./jwt.js";
@@ -12,7 +12,7 @@ export interface Env {
   CF_OIDC_BROKER_ACCOUNT_ID: string;
   /**
    * Account-owned token with "Account API Tokens Write", plus R2 permissions covering
-   * what `r2` grants delegate: it creates their credentials and is their parent. Must be a Secrets Store binding: a plain Worker secret is refused,
+   * what profiles' `buckets` delegate: it creates their credentials and is their parent. Must be a Secrets Store binding: a plain Worker secret is refused,
    * not used.
    */
   CF_OIDC_BROKER_TOKEN: SecretsStoreSecret;
@@ -116,7 +116,8 @@ async function handleToken(request: Request, env: Env, raw: unknown): Promise<Re
     profile = selected.name;
     const ttl = clampTTL(req.ttl, selected);
     // Filled in before anything is minted, so an unusable claim leaves nothing behind.
-    const prefixes = selected.r2 ? r2Prefixes(selected.r2, claims) : [];
+    const verified = claims;
+    const buckets = (selected.buckets ?? []).map((bucket) => ({ bucket, prefixes: r2Prefixes(bucket, verified) }));
 
     const cf = await brokerClient(env);
     const accountId = env.CF_OIDC_BROKER_ACCOUNT_ID;
@@ -126,33 +127,36 @@ async function handleToken(request: Request, env: Env, raw: unknown): Promise<Re
       audit("token.mint", { profile, claims, token_id: token.token_id, expires_on: token.expires_on });
     }
 
-    let r2: R2Credentials | undefined;
-    if (selected.r2) {
+    const issued: BucketCredentials[] = [];
+    for (const { bucket, prefixes } of buckets) {
+      let creds: BucketCredentials;
       try {
-        r2 = await issueR2(cf, accountId, selected.r2, prefixes, ttl);
+        creds = await issueR2(cf, accountId, bucket, prefixes, ttl);
       } catch (err) {
-        // Half a grant isn't handed out.
+        // Half a profile isn't handed out. Credentials already issued can't be revoked,
+        // but nobody has them.
         if (token) await discard(cf, accountId, token.token_id);
         throw err;
       }
       audit("r2.issued", {
         profile,
         claims,
-        bucket: r2.bucket,
-        prefixes: r2.prefixes,
-        permission: selected.r2.permission,
-        expires_on: r2.expires_on,
+        bucket: creds.name,
+        prefixes: creds.prefixes,
+        permission: bucket.permission,
+        expires_on: creds.expires_on,
       });
+      issued.push(creds);
     }
 
-    const expires_on = token?.expires_on ?? r2?.expires_on;
-    if (expires_on === undefined) throw new Error(`profile ${profile} has neither a token nor an r2 grant`);
+    const expires_on = token?.expires_on ?? issued[0]?.expires_on;
+    if (expires_on === undefined) throw new Error(`profile ${profile} has neither a token nor buckets`);
     return json(200, {
       ...token,
       account_id: accountId,
       expires_on,
       profile: selected.name,
-      ...(r2 ? { r2 } : {}),
+      ...(issued.length > 0 ? { buckets: issued } : {}),
     } satisfies TokenResponse);
   } catch (err) {
     if (err instanceof HttpError) {

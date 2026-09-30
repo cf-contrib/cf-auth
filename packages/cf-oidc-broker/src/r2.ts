@@ -1,7 +1,7 @@
 import type Cloudflare from "cloudflare";
-import type { R2Credentials } from "./api.js";
+import type { BucketCredentials } from "./api.js";
 import { HttpError } from "./errors.js";
-import type { R2Grant } from "./policy.js";
+import type { Bucket } from "./policy.js";
 import { rfc3339 } from "./tokens.js";
 
 // The broker token's ID, which is its R2 access key ID. Kept per isolate and keyed by
@@ -24,24 +24,24 @@ async function parentKeyId(cf: Cloudflare, accountId: string): Promise<string> {
 }
 
 /**
- * Creates temporary S3 credentials for the grant's bucket, limited to `prefixes`
- * (already filled in), with the broker token as the parent.
+ * Creates temporary S3 credentials for a bucket, limited to `prefixes` (already
+ * filled in), with the broker token as the parent.
  */
 export async function issueR2(
   cf: Cloudflare,
   accountId: string,
-  grant: R2Grant,
+  bucket: Bucket,
   prefixes: string[],
   ttl: number,
-): Promise<R2Credentials> {
+): Promise<BucketCredentials> {
   const parentAccessKeyId = await parentKeyId(cf, accountId);
   const expires_on = rfc3339(Date.now() + ttl);
 
   const creds = await cf.r2.temporaryCredentials.create({
     account_id: accountId,
-    bucket: grant.bucket,
+    bucket: bucket.name,
     parentAccessKeyId,
-    permission: grant.permission,
+    permission: bucket.permission,
     ttlSeconds: Math.floor(ttl / 1000),
     ...(prefixes.length > 0 ? { prefixes } : {}),
   });
@@ -50,10 +50,10 @@ export async function issueR2(
   }
 
   return {
+    name: bucket.name,
     access_key_id: creds.accessKeyId,
     secret_access_key: creds.secretAccessKey,
     session_token: creds.sessionToken,
-    bucket: grant.bucket,
     prefixes,
     endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
     expires_on,
