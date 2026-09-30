@@ -71,7 +71,7 @@ resource "cloudflare_worker_version" "cf_auth" {
       # Only ever from Secrets Store, so the token never enters Terraform state.
       name        = "CF_AUTH_BROKER_TOKEN"
       type        = "secrets_store_secret"
-      store_id    = var.broker_token_secret.store_id
+      store_id    = var.broker_token_secret.secret_store_id
       secret_name = var.broker_token_secret.secret_name
     },
   ]

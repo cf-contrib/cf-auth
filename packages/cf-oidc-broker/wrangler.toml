@@ -3,7 +3,7 @@
 #
 # The policy is src/policy.json, bundled into the Worker. It isn't committed:
 #   cp src/policy.example.json src/policy.json
-name = "cf-auth"
+name = "cf-oidc-broker"
 main = "src/index.ts"
 compatibility_date = "2026-08-15"
 
