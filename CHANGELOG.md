@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.0](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.4.2...v0.5.0) (2026-09-30)
+
+
+### Features
+
+* grant R2 access with a buckets list, and ttl on the profile ([#25](https://github.com/cf-contrib/cf-oidc-auth/issues/25)) ([07ed1fd](https://github.com/cf-contrib/cf-oidc-auth/commit/07ed1fd87b284b9001ffe070b415037b62de2c16))
+* prefix-scoped R2 temporary credentials in profiles ([#23](https://github.com/cf-contrib/cf-oidc-auth/issues/23)) ([3d293fa](https://github.com/cf-contrib/cf-oidc-auth/commit/3d293fa1eb91473ea30535937fe7c59595ca00c5)), closes [#22](https://github.com/cf-contrib/cf-oidc-auth/issues/22)
+* several buckets per profile, exported as AWS profiles ([#27](https://github.com/cf-contrib/cf-oidc-auth/issues/27)) ([82ec113](https://github.com/cf-contrib/cf-oidc-auth/commit/82ec113a87abed3cfd8143cc10db735d1037e21a)), closes [#26](https://github.com/cf-contrib/cf-oidc-auth/issues/26)
+
 ## [0.4.2](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.4.1...v0.4.2) (2026-09-30)
 
 
