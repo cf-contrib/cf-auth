@@ -2,7 +2,8 @@
 
 > The Worker half of [cf-oidc-auth](../..): verifies a GitHub Actions OIDC token,
 > matches it against your policy, and mints a short-lived Cloudflare API token
-> with exactly that profile's permissions.
+> with exactly that profile's permissions, R2 credentials limited to the repo's
+> key prefix, or both.
 
 [![CI](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
@@ -36,7 +37,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 
 ## Deploy
 
-1. **Create the broker token.** In the Cloudflare dashboard, create an **account-owned** API token with only **Account API Tokens Write**. It's the broker's only long-lived credential. This is the one manual step: automating it would need a token that can create tokens. Store it in [Secrets Store](https://developers.cloudflare.com/secrets-store/) so it never passes through your deploy tooling:
+1. **Create the broker token.** In the Cloudflare dashboard, create an **account-owned** API token with **Account API Tokens Write**. If any profile has an [`r2` grant](#r2-grants), also give it R2 permissions covering what those grants delegate (see [R2 grants](#r2-grants)). It's the broker's only long-lived credential. This is the one manual step: automating it would need a token that can create tokens. Store it in [Secrets Store](https://developers.cloudflare.com/secrets-store/) so it never passes through your deploy tooling:
    ```sh
    wrangler secrets-store secret create <store-id> --name cf-auth-broker-token --scopes workers --remote
    ```
@@ -57,7 +58,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 | Binding | Type | Required | Description |
 |---|---|---|---|
 | `CF_OIDC_BROKER_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
-| `CF_OIDC_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with only Account API Tokens Write. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
+| `CF_OIDC_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 permissions covering what `r2` grants delegate. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
 
 The hourly cron (`17 * * * *` in the examples) deletes expired `cf-oidc:*` tokens.
 
@@ -119,7 +120,18 @@ profiles:
           permissions: ["DNS Write"]
           resources:
             com.cloudflare.api.account.zone.fedcba9876543210fedcba9876543210: "*"
+
+  - name: terraform-state               # no token: only R2 credentials
+    match:
+      ref: refs/heads/main
+    r2:
+      bucket: org-terraform-state
+      permission: object-read-write
+      prefixes: ["{repository_owner_id}/{repository_id}/"]
+      ttl: 15m                          # only in a profile without token
 ```
+
+A profile has a `token`, an `r2` grant, or both.
 
 The broker validates the policy on the first request. If it's invalid, the broker fails closed and every request gets `500`.
 
@@ -156,6 +168,32 @@ curl -H "Authorization: Bearer <token>" \
 
 Keys must start with `com.cloudflare.`, and account keys must name `CF_OIDC_BROKER_ACCOUNT_ID`. Add a comment with the zone's name next to each zone ID so reviewers can tell them apart. With the Terraform module, write `${account_id}` and it's filled in from `var.account_id`.
 
+### R2 grants
+
+An `r2` grant gets the job [temporary R2 credentials](https://developers.cloudflare.com/r2/api/s3/temporary-credentials/) for one bucket, optionally limited to key prefixes built from the job's claims. One shared bucket can then hold every repo's Terraform state, with each repo limited to its own prefix:
+
+```yaml
+    r2:
+      bucket: org-terraform-state         # a valid R2 bucket name
+      permission: object-read-write       # or object-read-only; admin levels aren't allowed
+      prefixes: ["github.com/{repository}/"]
+```
+
+- **Placeholders** are `{claim}`, not `${claim}`, so Terraform's `templatefile` leaves them alone. Only `{repository}`, `{repository_owner}`, `{repository_id}` and `{repository_owner_id}` are allowed. They're filled in from the verified JWT, never from the request.
+- **Prefixes** must end in `/`, so `github.com/org/site/` doesn't also cover `github.com/org/site-old/`. They can't start with `/` or contain `*`, `..`, empty or `.` segments, or control characters, and each placeholder must be a whole path segment (`tfstate/{repository_id}/`, not `tfstate-{repository_id}/`), so two repos can never end up with the same prefix. These are checked when the policy loads.
+- **Claims** filling a placeholder must be non-empty and use only the characters GitHub allows in owner and repo names (`A-Z`, `a-z`, `0-9`, `.`, `_`, `-`, plus the one `/` in `repository`); IDs must be numeric. The filled-in prefix is checked again. Otherwise the request is a `403` (`invalid_r2_prefix`), before anything is minted.
+- **Without `prefixes`** the credentials cover the whole bucket.
+- **Lifetime:** as long as the token would last: the profile's `ttl`, capped at `max_ttl`, with the request's `ttl` still honoured. In a profile without `token`, set `ttl` and `max_ttl` in `r2`. The credentials **can't be revoked early**, so keep TTLs short.
+- **Parent token:** the broker token calls `temp-access-credentials` with its own ID as the parent, as in [Cloudflare's example](https://developers.cloudflare.com/r2/examples/authenticate-r2-temp-credentials/), and the credentials can't exceed its permissions. Give it **Workers R2 Storage Write** (R2's "Admin Read & Write"), which is known to work. Cloudflare asks for "at least the permissions you plan to delegate", so an R2 permission limited to the grants' buckets may be enough, but that hasn't been tried. Without an R2 permission the endpoint refuses the token with code `10000`, which the broker reports as `502` (`cloudflare_error` in the audit log). Admin Read & Write is account-wide, but it doesn't widen what a leaked broker token can do: with Account API Tokens Write it could already mint itself a token with any R2 permission. The policy still only hands out `object-*` permissions. Revoking or rolling the broker token cuts off every credential issued from it within seconds, including those of jobs running at that moment. That's the emergency switch.
+- **With both** `token` and `r2`, the broker mints the token first. If the credentials then can't be created, it deletes the token and replies `502`.
+
+> [!WARNING]
+> **The policy decides when a job's `AWS_*` variables are replaced.** The action exports the credentials as `AWS_*` whenever the matched profile has an `r2` grant, including for workflows that don't set `profile`. Set `profile` for R2 in every workflow, and give a job that also talks to AWS its R2 access in a separate job.
+
+**Renamed and reused repo names.** A prefix built from `{repository}` moves when the repo is renamed, and a deleted repo's name can be taken by a new repo in the org, which would then get the old repo's state. `{repository_owner_id}/{repository_id}/` doesn't change on a rename and is never reused.
+
+**What a grant doesn't cover:** several buckets in one job, and admin operations such as creating or listing buckets. For those, grant R2 permissions in the profile's `token` and derive S3 credentials from `CLOUDFLARE_API_TOKEN` in a step: the access key ID is the token's ID, and the secret is the SHA-256 of the token value. Buckets in a jurisdiction (`eu`, `fedramp`) need a different endpoint than the one the broker returns.
+
 ### TTL and names
 
 - Durations look like `90s`, `15m`, `1h`, `1h30m`.
@@ -176,7 +214,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/v1/token` | `Bearer <github-oidc-jwt>` | Mint a token. Body: `{ "profile"?, "ttl"? }`. Returns `{ token, token_id, account_id, expires_on, profile }`. |
+| `POST` | `/v1/token` | `Bearer <github-oidc-jwt>` | Mint a token, R2 credentials, or both. Body: `{ "profile"?, "ttl"? }`. Returns `{ token?, token_id?, account_id, expires_on, profile, r2? }`: `token` and `token_id` when the profile has a `token`, and `r2: { access_key_id, secret_access_key, session_token, bucket, prefixes, endpoint, expires_on }` when it has an `r2` grant. |
 | `POST` | `/v1/revoke` | `Bearer <minted-token>` | Revoke a token. Holding it is the proof. Returns `204`, also when it's already gone, and `403` for tokens not named `cf-oidc:*`. |
 | `GET` | `/healthz` | public | `200` if the policy and bindings are valid, else `500`. Never shows the policy. |
 
@@ -201,16 +239,24 @@ Bodies are deliberately generic; the reason goes to the audit log.
 | Deleted repo or org re-registered by an attacker | Pin numeric IDs, not names |
 | Malicious PR code gets a prod token | Match `ref: refs/heads/main` and `environment: prod`, with required reviewers on the environment. Fork PRs don't get `id-token: write` on `pull_request`. Don't write profiles that match `event_name: pull_request_target`. |
 | Stolen minted token | 15m default TTL, revoked at job end, expired tokens deleted hourly |
+| Stolen R2 credentials | Limited to one bucket and the repo's prefixes, and short-lived. They can't be revoked one by one; rolling the broker token revokes all of them |
+| One repo reaches another's R2 keys | Prefixes must end in `/`, placeholders fill whole segments from verified claims with a fixed character set, and both the template and the result are checked. Prefer ID-based prefixes |
 | Stolen JWT replayed | Short JWT lifetime and a custom audience |
 | Broker token exfiltrated | Kept in Secrets Store, so it isn't in Terraform state or CI. Only code running in the Worker can read it. Restrict who can deploy Workers in the broker's account, rotate the broker token, and consider a dedicated account per trust domain. |
 | Token flooding | Only workflows the policy allows can mint. Tokens are short-lived, revoked at job end, and cleaned up hourly. There's no rate limit yet (see [Limitations](#limitations)). |
 
 ### Audit log
 
-Every mint, denial and revoke emits one JSON line to Workers Logs. Token values and JWTs are never logged:
+Every mint, denial and revoke emits one JSON line to Workers Logs. Token values, R2 secrets and JWTs are never logged:
 
 ```json
 {"event":"token.mint","profile":"workers-deploy","repository":"example-org/api","repository_id":"200000003","ref":"refs/heads/main","environment":"prod","run_id":"1234567890","run_attempt":"1","actor_id":"300000004","token_id":"<token-id>","expires_on":"2026-09-28T12:15:00Z"}
+```
+
+R2 credentials are `r2.issued`, with the bucket, the filled-in prefixes and the permission:
+
+```json
+{"event":"r2.issued","profile":"terraform-state","repository":"example-org/api","repository_id":"200000003","ref":"refs/heads/main","run_id":"1234567890","run_attempt":"1","actor_id":"300000004","bucket":"org-terraform-state","prefixes":["100000001/200000003/"],"permission":"object-read-write","expires_on":"2026-09-28T12:15:00Z"}
 ```
 
 When an isolate first loads the policy, it logs `policy.loaded` with the profile count, e.g. `{"event":"policy.loaded","profiles":3}`. Check this line after deploying.
@@ -218,7 +264,7 @@ When an isolate first loads the policy, it logs `policy.loaded` with the profile
 Denials are `token.deny` with a `reason`:
 
 - **Request problems:** `invalid_jwt`, `invalid_body`, `invalid_ttl`
-- **Policy didn't allow it:** `no_match`, `ambiguous`, `profile_mismatch`
+- **Policy didn't allow it:** `no_match`, `ambiguous`, `profile_mismatch`, `invalid_r2_prefix`
 - **Configuration or upstream errors:** `broker_token_unavailable`, `unknown_permission`, `ambiguous_permission`, `jwks_unavailable`, `cloudflare_error`
 
 ## Limitations
@@ -229,6 +275,7 @@ Denials are `token.deny` with a `reason`:
 - **Resource IDs aren't checked up front.** Apart from the account check, a wrong zone ID is only caught when Cloudflare rejects the mint (`502`).
 - **Permission names can change.** Cloudflare can rename a permission group. Profiles using the old name fail closed (`500`) until the policy is updated, and the one-hour cache can delay a fix by up to an hour per isolate.
 - **Secrets Store is required, and in open beta.** The broker token is only accepted from Secrets Store, so a plain Worker secret can't end up in Terraform state or deploy tooling. Accounts without Secrets Store can't run the broker yet.
+- **R2 credentials can't be revoked early.** They last their TTL; only rolling the broker token cuts them all off. One bucket per grant, and only buckets outside a jurisdiction.
 - **No rate limit.** A workflow the policy allows can mint as often as it runs. Each token expires within minutes, is revoked at job end and cleaned up hourly, but a compromised workflow could still create many tokens at once. Cloudflare's rate-limit binding was tried and didn't enforce a 30-per-minute limit against ~85 requests a minute, so it was left out. An exact per-repository limit (e.g. a Durable Object) may come later.
 
 ## Development

@@ -1,8 +1,7 @@
 import Cloudflare, { AuthenticationError, BadRequestError, NotFoundError, PermissionDeniedError } from "cloudflare";
-import type { TokenResponse } from "./api.js";
 import { audit } from "./audit.js";
 import { HttpError } from "./errors.js";
-import type { Claims, Profile } from "./policy.js";
+import type { Claims, TokenPolicy } from "./policy.js";
 import { resolvePolicies } from "./resolve.js";
 
 /** Every minted token's name starts with this. Revoke and cleanup never touch anything else. */
@@ -22,32 +21,42 @@ export function rfc3339(ms: number): string {
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
+export interface MintedToken {
+  token: string;
+  token_id: string;
+  expires_on: string;
+}
+
 /** Mints a token. Not retried: a create that failed midway leaves an orphan the cron job removes. */
 export async function mint(
   cf: Cloudflare,
   accountId: string,
-  profile: Profile,
+  policies: TokenPolicy[],
   claims: Claims,
   ttl: number,
-): Promise<TokenResponse> {
-  const policies = await resolvePolicies(cf, accountId, profile.policies);
+): Promise<MintedToken> {
+  const resolved = await resolvePolicies(cf, accountId, policies);
   const expires_on = rfc3339(Date.now() + ttl);
 
   const token = await cf.accounts.tokens.create(
-    { account_id: accountId, name: tokenName(claims), policies, expires_on },
+    { account_id: accountId, name: tokenName(claims), policies: resolved, expires_on },
     { maxRetries: 0 },
   );
   if (!token.id || !token.value) {
     throw new HttpError("upstream_error", "cloudflare_error", "tokens.create returned no token");
   }
 
-  return {
-    token: token.value,
-    token_id: token.id,
-    account_id: accountId,
-    expires_on: token.expires_on ?? expires_on,
-    profile: profile.name,
-  };
+  return { token: token.value, token_id: token.id, expires_on: token.expires_on ?? expires_on };
+}
+
+/** Deletes a token that was minted but won't be handed out. Best effort: the cron job is the fallback. */
+export async function discard(cf: Cloudflare, accountId: string, id: string): Promise<void> {
+  try {
+    await cf.accounts.tokens.delete(id, { account_id: accountId });
+    audit("token.revoke", { token_id: id, reason: "discarded" });
+  } catch (err) {
+    audit("token.revoke", { token_id: id, reason: "discard_failed", detail: String(err) });
+  }
 }
 
 /** The API's answer for a token it doesn't recognize (invalid, expired, deleted, other account). */

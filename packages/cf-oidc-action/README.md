@@ -1,7 +1,8 @@
 # cf-oidc-auth action
 
 > The GitHub Action half of [cf-oidc-auth](../..): exchange the job's OIDC token for
-> a short-lived Cloudflare API token, export it, and revoke it when the job ends.
+> a short-lived Cloudflare API token and/or R2 credentials, export them, and revoke
+> the token when the job ends.
 
 [![CI](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
@@ -51,7 +52,6 @@ A floating `v1` tag will follow each release from 1.0 on.
 | `broker-url` | yes | Broker base URL, e.g. `https://cf-oidc-broker.example.com`. Its origin is the OIDC audience and must equal `github.audience` in the policy. |
 | `profile` | no | Policy profile to request (not an AWS profile). Recommended when more than one profile could match. |
 | `ttl` | no | Requested lifetime such as `5m` or `1h`. Defaults to the profile's `ttl`, capped at its `max_ttl`. |
-| `r2-credentials` | no | `true` to also export S3-compatible R2 credentials derived from the token. Default `false`. See [R2 over the S3 API](#r2-over-the-s3-api). |
 
 ## What it does
 
@@ -59,15 +59,16 @@ A floating `v1` tag will follow each release from 1.0 on.
   - requests an OIDC token for the broker's origin, retrying brief runner failures;
   - asks the broker for a Cloudflare token (not retried, because minting isn't idempotent);
   - masks the token and the OIDC token;
-  - exports `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for the rest of the job;
-  - with `r2-credentials: true`, also exports S3-compatible R2 credentials (`AWS_*`) and masks the secret. The access key ID is the token ID, which isn't secret and is logged;
+  - exports `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for the rest of the job. For a profile with only an `r2` grant there's no token, and only `CLOUDFLARE_ACCOUNT_ID` is exported;
+  - when the profile has an `r2` grant, also exports [S3 credentials](#r2-over-the-s3-api) (`AWS_*`) and masks the secret and the session token;
   - logs the token ID, profile and expiry (none of them secret), so a run can be matched to the broker's audit log:
     ```
     cf-oidc: minted token 3f2a… (profile workers-deploy, expires 2026-09-28T12:15:00Z)
+    cf-oidc: issued R2 credentials for bucket org-terraform-state under 100000001/200000003/ (profile terraform-state, expires 2026-09-28T12:15:00Z)
     ```
-- **Post step:** revokes the token. It runs even when the job fails. A failed revoke is a warning, not an error: the token expires on its own and the broker's cron deletes it.
+- **Post step:** revokes the token, if there is one. It runs even when the job fails. A failed revoke is a warning, not an error: the token expires on its own and the broker's cron deletes it. R2 credentials can't be revoked; the post step logs when they expire.
 
-Apart from `r2-credentials`, none of this can be switched off. Exported values are also in the `env` context, so actions that take credentials as inputs can use `${{ env.CLOUDFLARE_API_TOKEN }}`.
+None of this can be switched off: what's exported is decided by the profile. Exported values are also in the `env` context, so actions that take credentials as inputs can use `${{ env.CLOUDFLARE_API_TOKEN }}`.
 
 ## Examples
 
@@ -99,65 +100,20 @@ Apart from `r2-credentials`, none of this can be switched off. Exported values a
 
 ### R2 over the S3 API
 
-S3 tools need an access key pair, not an API token. R2 derives one from any token with R2 permissions: the access key ID is the token's ID, and the secret is the SHA-256 of its value. With `r2-credentials: true` the action exports that pair along with the account's R2 endpoint:
+When the matched profile has an [`r2` grant](../cf-oidc-broker#r2-grants), the broker returns temporary R2 credentials for one bucket, limited to the grant's key prefixes. The action exports them for S3 tools:
 
 | Variable | Value |
 |---|---|
-| `AWS_ACCESS_KEY_ID` | the token's ID (not secret, not masked) |
-| `AWS_SECRET_ACCESS_KEY` | SHA-256 (hex) of the token, masked |
-| `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN` | empty, clearing any left by an earlier AWS step |
+| `AWS_ACCESS_KEY_ID` | the access key ID (not secret, not masked) |
+| `AWS_SECRET_ACCESS_KEY` | the secret access key, masked |
+| `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN` | the session token, masked. botocore still reads the legacy name |
 | `AWS_ENDPOINT_URL_S3` | `https://<account_id>.r2.cloudflarestorage.com` |
 | `AWS_REGION`, `AWS_DEFAULT_REGION` | `auto` |
+| `CLOUDFLARE_R2_BUCKET` | the grant's bucket |
+| `CLOUDFLARE_R2_PREFIX` | the filled-in prefix, e.g. `100000001/200000003/`. Only when the grant has exactly one |
 
-**AWS CLI and SDKs** read all of these. `AWS_ENDPOINT_URL_S3` needs a version with service-specific endpoint support (added in 2023). With an older one, pass the endpoint yourself:
-
-```yaml
-      - uses: cf-contrib/cf-oidc-auth@v0.4.2 # x-release-please-version
-        with:
-          broker-url: https://cf-oidc-broker.example.com
-          profile: r2-sync
-          r2-credentials: true
-      - run: aws s3 sync ./dist "s3://my-bucket/" --endpoint-url "$AWS_ENDPOINT_URL_S3"
-```
-
-**OpenTofu / Terraform `s3` backend** takes the credentials from the environment, but R2 isn't AWS, so the backend's AWS-only checks must be switched off:
-
-```hcl
-terraform {
-  backend "s3" {
-    bucket = "tofu-state"
-    key    = "prod/terraform.tfstate"
-    region = "auto"
-
-    endpoints = { s3 = "https://<account_id>.r2.cloudflarestorage.com" }
-
-    skip_credentials_validation = true
-    skip_region_validation      = true
-    skip_requesting_account_id  = true
-    skip_metadata_api_check     = true
-    skip_s3_checksum            = true
-    use_path_style              = true
-  }
-}
-```
-
-**rclone** doesn't read `AWS_ENDPOINT_URL_S3`. Point it at R2 and tell it to use the environment's keys:
-
-```yaml
-      - run: rclone copy ./dist r2:my-bucket
-        env:
-          RCLONE_CONFIG_R2_TYPE: s3
-          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
-          RCLONE_CONFIG_R2_ENV_AUTH: "true"
-          RCLONE_CONFIG_R2_ENDPOINT: ${{ env.AWS_ENDPOINT_URL_S3 }}
-```
-
-Notes:
-
-- **Permissions:** the profile must grant R2 permissions, e.g. `Workers R2 Storage Bucket Item Read`/`Write` on `com.cloudflare.edge.r2.bucket.<account_id>_default_<bucket>`. Without them the credentials are rejected.
-- **Lifetime:** the pair lives and dies with the token. The post step's revoke invalidates it too.
-- **Why it's opt-in:** it replaces any `AWS_*` credentials already set in the job. A job that also talks to AWS should get R2 access in a separate job.
-- **Jurisdictions:** buckets in a jurisdiction (`eu`, `fedramp`) use a different endpoint, e.g. `https://<account_id>.eu.r2.cloudflarestorage.com`. Set it in the tool's config, which takes precedence over `AWS_ENDPOINT_URL_S3`.
+- **The policy decides when `AWS_*` is replaced.** These overwrite any `AWS_*` credentials already set in the job, for every workflow matching a profile with an `r2` grant, including one that doesn't set `profile`. Always set `profile` for R2, and give a job that also talks to AWS its R2 access in a separate job.
+- **No revocation.** The credentials last as long as the profile's `ttl` (or the requested `ttl`, capped at `max_ttl`), so keep it short.
 
 ### Two scopes: two jobs
 
@@ -192,11 +148,14 @@ jobs:
 | `OIDC unavailable: add permissions: id-token: write to the job` | The job can't request an OIDC token. Add the permission. Fork PRs on `pull_request` never get it. |
 | `broker returned 401 (unauthorized)` | The broker rejected the OIDC token, usually because `broker-url` doesn't match `github.audience` in the policy. |
 | `broker returned 403 (forbidden)` | No profile allows this workflow, or the named `profile` doesn't match. The broker's audit log (`token.deny`) has the reason. |
+| `broker returned 502 (upstream_error)` | The Cloudflare API refused a call; the audit log has the message. For a profile with an `r2` grant, it's usually a broker token without enough R2 permissions on the grant's bucket. |
 | `broker returned 500 (misconfigured)` | The broker's policy or bindings are invalid. Check `/healthz` and its logs. |
 | `broker-url must use https` | Plain `http` is only accepted for `localhost` and `127.0.0.1`. |
+| `AccessDenied` from S3 on some keys | The credentials only cover the grant's prefixes: keep every key under `$CLOUDFLARE_R2_PREFIX`. |
 
 ## Limitations
 
+- **R2 credentials can't be revoked.** They expire at the end of their TTL.
 - **One token per job.** Every step in a job can read the runner, so a second scope in the same job wouldn't be isolated. Use two jobs.
 - **No outputs.** The values are in `env`; outputs would just be a second name for them.
 - **Masking isn't isolation.** The token is hidden in logs, but any step in the job, including third-party actions and PR code, can use it until the post step revokes it. Keep profiles for prod behind `environment` protection.

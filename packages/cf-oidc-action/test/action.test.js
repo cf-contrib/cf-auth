@@ -2,13 +2,20 @@
 // Runs main.js and post.js as the runner would: separate Node processes, with
 // INPUT_*, GITHUB_ENV, GITHUB_STATE and the OIDC request variables set.
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { REQUEST_TOKEN, STUB_ACCOUNT_ID, STUB_TOKEN, STUB_TOKEN_ID, startStub } from "./stub.js";
+import {
+  REQUEST_TOKEN,
+  STUB_ACCOUNT_ID,
+  STUB_R2,
+  STUB_R2_PROFILE,
+  STUB_TOKEN,
+  STUB_TOKEN_ID,
+  startStub,
+} from "./stub.js";
 
 const run = promisify(execFile);
 const SRC = new URL("../src/", import.meta.url);
@@ -111,52 +118,81 @@ describe("main", () => {
     expect(stub.calls.find((c) => c.path === "/v1/token")?.body).toEqual({});
   });
 
-  it("exports S3-compatible R2 credentials derived from the token when asked", async () => {
+  const R2_ENV = {
+    AWS_ACCESS_KEY_ID: STUB_R2.access_key_id,
+    AWS_SECRET_ACCESS_KEY: STUB_R2.secret_access_key,
+    AWS_SESSION_TOKEN: STUB_R2.session_token,
+    AWS_SECURITY_TOKEN: STUB_R2.session_token,
+    AWS_ENDPOINT_URL_S3: `https://${STUB_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    AWS_REGION: "auto",
+    AWS_DEFAULT_REGION: "auto",
+    CLOUDFLARE_R2_BUCKET: STUB_R2.bucket,
+  };
+
+  it("exports R2 credentials, and no API token, for a profile with only r2", async () => {
     stub = await startStub();
     const r = await action("main.js", {
       ...oidcEnv(stub.url),
       "INPUT_BROKER-URL": stub.url,
-      "INPUT_R2-CREDENTIALS": "true",
+      INPUT_PROFILE: STUB_R2_PROFILE,
     });
 
-    const secret = createHash("sha256").update(STUB_TOKEN).digest("hex");
+    expect(r.code).toBe(0);
+    expect(r.env).toEqual({
+      CLOUDFLARE_ACCOUNT_ID: STUB_ACCOUNT_ID,
+      ...R2_ENV,
+      CLOUDFLARE_R2_PREFIX: "github.com/example-org/app/",
+    });
+    expect(r.state).toEqual({ r2_expires_on: STUB_R2.expires_on });
+    expect(r.stdout).toContain(
+      "cf-oidc: issued R2 credentials for bucket org-terraform-state under github.com/example-org/app/ (profile smoke-r2, expires 2026-09-28T12:15:00Z)",
+    );
+    expect(r.stdout).not.toContain("minted token");
+    // The secrets only ever appear in the mask commands.
+    const out = r.stdout.split("\n");
+    for (const secret of [STUB_R2.secret_access_key, STUB_R2.session_token]) {
+      expect(out.filter((l) => l.includes(secret))).toEqual([`::add-mask::${secret}`]);
+    }
+  });
+
+  it("exports both for a profile with a token and r2", async () => {
+    stub = await startStub({ tokenFields: { r2: STUB_R2 } });
+    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
     expect(r.code).toBe(0);
     expect(r.env).toEqual({
       CLOUDFLARE_API_TOKEN: STUB_TOKEN,
       CLOUDFLARE_ACCOUNT_ID: STUB_ACCOUNT_ID,
-      AWS_ACCESS_KEY_ID: STUB_TOKEN_ID,
-      AWS_SECRET_ACCESS_KEY: secret,
-      AWS_SESSION_TOKEN: "",
-      AWS_SECURITY_TOKEN: "",
-      AWS_ENDPOINT_URL_S3: `https://${STUB_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-      AWS_REGION: "auto",
-      AWS_DEFAULT_REGION: "auto",
+      ...R2_ENV,
+      CLOUDFLARE_R2_PREFIX: "github.com/example-org/app/",
     });
-    // The secret only ever appears in the mask command.
-    const out = r.stdout.split("\n");
-    expect(out.filter((l) => l.includes(secret))).toEqual([`::add-mask::${secret}`]);
+    expect(r.state).toEqual({ token: STUB_TOKEN, token_id: STUB_TOKEN_ID, r2_expires_on: STUB_R2.expires_on });
   });
 
-  it("rejects a non-boolean r2-credentials before minting", async () => {
+  it.each([[[]], [["a/", "b/"]]])("exports no CLOUDFLARE_R2_PREFIX for prefixes %j", async (prefixes) => {
+    stub = await startStub({ tokenFields: { r2: { ...STUB_R2, prefixes } } });
+    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    expect(r.code).toBe(0);
+    expect(r.env).toMatchObject(R2_ENV);
+    expect(r.env).not.toHaveProperty("CLOUDFLARE_R2_PREFIX");
+  });
+
+  it("exports no AWS variables when the profile has no r2 grant", async () => {
     stub = await startStub();
-    const r = await action("main.js", {
-      ...oidcEnv(stub.url),
-      "INPUT_BROKER-URL": stub.url,
-      "INPUT_R2-CREDENTIALS": "yes",
-    });
-    expect(r.code).toBe(1);
-    expect(r.stdout).toContain("::error::Input r2-credentials must be true or false, got: yes");
-    expect(stub.calls).toEqual([]);
-    expect(r.env).toEqual({});
+    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    expect(Object.keys(r.env).some((k) => k.startsWith("AWS_") || k.startsWith("CLOUDFLARE_R2_"))).toBe(false);
   });
 
-  it.each(["token", "token_id", "account_id"])("fails clearly when the broker response lacks %s", async (field) => {
-    stub = await startStub({ tokenFields: { [field]: undefined } });
-    const r = await action("main.js", {
-      ...oidcEnv(stub.url),
-      "INPUT_BROKER-URL": stub.url,
-      "INPUT_R2-CREDENTIALS": "true",
-    });
+  it.each([
+    ["token", { token: undefined }],
+    ["token_id", { token_id: undefined }],
+    ["account_id", { account_id: undefined }],
+    ["token and r2", { token: undefined, token_id: undefined }],
+    ["r2.session_token", { r2: { ...STUB_R2, session_token: undefined } }],
+    ["r2.secret_access_key", { r2: { ...STUB_R2, secret_access_key: "" } }],
+    ["r2.prefixes", { r2: { ...STUB_R2, prefixes: undefined } }],
+  ])("fails clearly when the broker response lacks %s", async (field, tokenFields) => {
+    stub = await startStub({ tokenFields });
+    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
     expect(r.code).toBe(1);
     expect(r.stdout).toContain(`::error::cf-oidc broker returned an invalid response: missing ${field}`);
     expect(r.env).toEqual({});
@@ -211,6 +247,28 @@ describe("post", () => {
     expect(stub.calls).toEqual([
       { method: "POST", path: "/v1/revoke", authorization: `Bearer ${STUB_TOKEN}`, body: undefined },
     ]);
+  });
+
+  it("only logs when the R2 credentials expire for a profile with only r2", async () => {
+    stub = await startStub();
+    const r = await action("post.js", { "INPUT_BROKER-URL": stub.url, STATE_r2_expires_on: STUB_R2.expires_on });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain(
+      "cf-oidc: R2 temporary credentials can't be revoked; they expire at 2026-09-28T12:15:00Z",
+    );
+    expect(stub.calls).toEqual([]);
+  });
+
+  it("logs the R2 expiry and revokes the token for a profile with both", async () => {
+    stub = await startStub();
+    const r = await action("post.js", {
+      "INPUT_BROKER-URL": stub.url,
+      STATE_token: STUB_TOKEN,
+      STATE_token_id: STUB_TOKEN_ID,
+      STATE_r2_expires_on: STUB_R2.expires_on,
+    });
+    expect(r.stdout).toContain("they expire at 2026-09-28T12:15:00Z");
+    expect(r.stdout).toContain(`cf-oidc: revoked token ${STUB_TOKEN_ID}`);
   });
 
   it("does nothing when main didn't mint", async () => {

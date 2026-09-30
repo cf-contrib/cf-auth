@@ -4,18 +4,26 @@ import { createExecutionContext, createScheduledController, waitOnExecutionConte
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TokenResponse } from "../src/api.js";
 import { createBroker, type Env } from "../src/broker.js";
+import { clearParent } from "../src/r2.js";
 import { clearCache } from "../src/resolve.js";
 import { tokenName } from "../src/tokens.js";
 import {
   ACCOUNT_ID,
   BROKER_TOKEN,
+  BROKER_TOKEN_ID,
   createIssuer,
   FakeCloudflare,
   githubClaims,
   installFetch,
+  type TestPolicy,
   testPolicy,
   ZONE_ID,
 } from "./helpers.js";
+
+type TestProfile = TestPolicy["profiles"][number];
+
+/** A response for a profile with a token. */
+type WithToken = TokenResponse & { token: string; token_id: string };
 
 // A unique issuer keeps this file's JWKS out of any other file's per-isolate cache.
 const ISSUER = `https://token.actions.githubusercontent.com/worker-test-${crypto.randomUUID()}`;
@@ -32,6 +40,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   clearCache();
+  clearParent();
   cf = new FakeCloudflare();
   installFetch(issuer, cf);
   env = {
@@ -73,7 +82,7 @@ describe("POST /v1/token", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
 
-    const body = (await res.json()) as TokenResponse;
+    const body = (await res.json()) as WithToken;
     expect(body.profile).toBe("workers-deploy");
     expect(body.account_id).toBe(ACCOUNT_ID);
     expect(body.token).toMatch(/^value-/);
@@ -98,7 +107,7 @@ describe("POST /v1/token", () => {
   it("uses the single matching profile when none is named", async () => {
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
     expect(res.status).toBe(200);
-    expect(((await res.json()) as TokenResponse).profile).toBe("workers-deploy");
+    expect(((await res.json()) as WithToken).profile).toBe("workers-deploy");
   });
 
   it("resolves permission names to IDs and passes resources through", async () => {
@@ -108,7 +117,7 @@ describe("POST /v1/token", () => {
       body: { profile: "infra-cloudflare" },
     });
     expect(res.status).toBe(200);
-    const { token_id } = (await res.json()) as TokenResponse;
+    const { token_id } = (await res.json()) as WithToken;
     expect(cf.tokens.get(token_id)?.policies).toEqual([
       {
         effect: "allow",
@@ -120,13 +129,13 @@ describe("POST /v1/token", () => {
 
   it("clamps the requested ttl to max_ttl", async () => {
     const res = await call("POST", "/v1/token", { token: await issuer.sign(), body: { ttl: "12h" } });
-    const { expires_on } = (await res.json()) as TokenResponse;
+    const { expires_on } = (await res.json()) as WithToken;
     expect(Date.parse(expires_on) - Date.now()).toBeLessThanOrEqual(60 * 60_000 + 1000);
   });
 
   it("writes an audit line without secrets", async () => {
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
-    const { token, token_id } = (await res.json()) as TokenResponse;
+    const { token, token_id } = (await res.json()) as WithToken;
     const mint = auditLines().find((l) => l.event === "token.mint");
     expect(mint).toMatchObject({
       profile: "workers-deploy",
@@ -215,7 +224,7 @@ describe("POST /v1/token", () => {
     (policy.profiles[1]?.token.policies[0] as { permissions: string[] }).permissions = ["Load Balancers Write"];
     policyFile = JSON.stringify(policy);
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
-    const { token_id } = (await res.json()) as TokenResponse;
+    const { token_id } = (await res.json()) as WithToken;
     expect(cf.tokens.get(token_id)?.policies[0]).toMatchObject({
       permission_groups: [{ id: "pg-lb-write-account" }],
     });
@@ -230,7 +239,7 @@ describe("POST /v1/token", () => {
       token: await issuer.sign(claims),
       body: { profile: "infra-cloudflare" },
     });
-    const { token_id } = (await res.json()) as TokenResponse;
+    const { token_id } = (await res.json()) as WithToken;
     expect(cf.tokens.get(token_id)?.policies[0]).toMatchObject({
       permission_groups: [{ id: "pg-lb-write-zone" }],
     });
@@ -251,10 +260,202 @@ describe("POST /v1/token", () => {
   });
 });
 
+describe("POST /v1/token with an r2 grant", () => {
+  const STATE = { repository: "example-org/state-*", environment: "state" };
+
+  /** Adds profiles for the state environment, which no other test profile matches. */
+  function withProfiles(...profiles: (Omit<TestProfile, "token"> & Partial<Pick<TestProfile, "token">>)[]) {
+    const policy = testPolicy(ISSUER);
+    policy.profiles.push(...(profiles as TestProfile[]));
+    policyFile = JSON.stringify(policy);
+  }
+
+  const stateRepo = (repo = "state-app", overrides: Record<string, unknown> = {}) =>
+    issuer.sign(githubClaims({ repository: `example-org/${repo}`, environment: "state", ...overrides }));
+
+  const r2Requests = () => cf.requests.filter((r) => r.path.endsWith("/r2/temp-access-credentials"));
+
+  it("issues prefix-limited credentials for a profile with only r2", async () => {
+    withProfiles({
+      name: "terraform-state",
+      match: STATE,
+      r2: { bucket: "org-terraform-state", permission: "object-read-write", prefixes: ["github.com/{repository}/"] },
+    });
+    const before = Date.now();
+    const res = await call("POST", "/v1/token", { token: await stateRepo(), body: { profile: "terraform-state" } });
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as TokenResponse;
+    expect(body).toEqual({
+      account_id: ACCOUNT_ID,
+      expires_on: body.r2?.expires_on,
+      profile: "terraform-state",
+      r2: {
+        access_key_id: BROKER_TOKEN_ID,
+        secret_access_key: "r2-secret-value",
+        session_token: "r2-session-token-value",
+        bucket: "org-terraform-state",
+        prefixes: ["github.com/example-org/state-app/"],
+        endpoint: `https://${ACCOUNT_ID}.r2.cloudflarestorage.com`,
+        expires_on: expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/),
+      },
+    });
+    const ttl = Date.parse(body.expires_on) - before;
+    expect(ttl).toBeGreaterThan(14 * 60_000);
+    expect(ttl).toBeLessThanOrEqual(15 * 60_000 + 1000);
+
+    expect(r2Requests()).toEqual([
+      {
+        method: "POST",
+        path: `/accounts/${ACCOUNT_ID}/r2/temp-access-credentials`,
+        body: {
+          bucket: "org-terraform-state",
+          parentAccessKeyId: BROKER_TOKEN_ID,
+          permission: "object-read-write",
+          ttlSeconds: 900,
+          prefixes: ["github.com/example-org/state-app/"],
+        },
+      },
+    ]);
+    expect(cf.tokens.size).toBe(1); // no API token minted
+  });
+
+  it("covers the whole bucket without prefixes, and honours the requested ttl", async () => {
+    withProfiles({
+      name: "terraform-state",
+      match: STATE,
+      r2: { bucket: "org-terraform-state", permission: "object-read-only", max_ttl: "30m" },
+    });
+    const res = await call("POST", "/v1/token", { token: await stateRepo(), body: { ttl: "2h" } });
+    const body = (await res.json()) as TokenResponse;
+    expect(body.r2?.prefixes).toEqual([]);
+    expect(r2Requests()[0]?.body).toEqual({
+      bucket: "org-terraform-state",
+      parentAccessKeyId: BROKER_TOKEN_ID,
+      permission: "object-read-only",
+      ttlSeconds: 1800,
+    });
+  });
+
+  it("mints a token and credentials that expire together for a profile with both", async () => {
+    withProfiles({
+      name: "state-and-deploy",
+      match: STATE,
+      token: {
+        ttl: "10m",
+        policies: [
+          {
+            permissions: ["Workers Scripts Write"],
+            resources: { [`com.cloudflare.api.account.${ACCOUNT_ID}`]: "*" },
+          },
+        ],
+      },
+      r2: { bucket: "org-terraform-state", permission: "object-read-write", prefixes: ["{repository_id}/"] },
+    });
+    const res = await call("POST", "/v1/token", { token: await stateRepo() });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as WithToken;
+    expect(cf.tokens.has(body.token_id)).toBe(true);
+    expect(body.r2?.prefixes).toEqual(["200000003/"]);
+    expect(Math.abs(Date.parse(body.r2?.expires_on ?? "") - Date.parse(body.expires_on))).toBeLessThanOrEqual(1000);
+    expect(r2Requests()[0]?.body).toMatchObject({ ttlSeconds: 600 });
+  });
+
+  it("deletes the token and 502s when the credentials can't be created", async () => {
+    withProfiles({
+      name: "state-and-deploy",
+      match: STATE,
+      token: {
+        policies: [
+          { permissions: ["Workers Scripts Write"], resources: { [`com.cloudflare.api.account.${ACCOUNT_ID}`]: "*" } },
+        ],
+      },
+      r2: { bucket: "org-terraform-state", permission: "object-read-write" },
+    });
+    cf.failR2 = true;
+    const res = await call("POST", "/v1/token", { token: await stateRepo() });
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "upstream_error" });
+    expect(cf.tokens.size).toBe(1); // only the broker token: the minted one was deleted
+    expect(auditLines().find((l) => l.event === "token.revoke")).toMatchObject({ reason: "discarded" });
+    expect(auditLines().some((l) => l.event === "r2.issued")).toBe(false);
+  });
+
+  it("403s without calling Cloudflare when a claim can't be used in the prefix", async () => {
+    withProfiles({
+      name: "terraform-state",
+      match: STATE,
+      r2: { bucket: "org-terraform-state", permission: "object-read-write", prefixes: ["{repository_owner}/"] },
+    });
+    const res = await call("POST", "/v1/token", {
+      token: await stateRepo("state-app", { repository_owner: "../example-org" }),
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "forbidden" });
+    expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({
+      profile: "terraform-state",
+      reason: "invalid_r2_prefix",
+    });
+    expect(cf.requests).toEqual([]);
+  });
+
+  it("writes an r2.issued audit line without secrets", async () => {
+    withProfiles({
+      name: "terraform-state",
+      match: STATE,
+      r2: { bucket: "org-terraform-state", permission: "object-read-write", prefixes: ["github.com/{repository}/"] },
+    });
+    const res = await call("POST", "/v1/token", { token: await stateRepo() });
+    const { r2 } = (await res.json()) as TokenResponse;
+    expect(auditLines().find((l) => l.event === "r2.issued")).toEqual({
+      event: "r2.issued",
+      profile: "terraform-state",
+      repository: "example-org/state-app",
+      repository_id: "200000003",
+      ref: "refs/heads/main",
+      environment: "state",
+      event_name: "push",
+      workflow_ref: "example-org/api/.github/workflows/deploy.yml@refs/heads/main",
+      job_workflow_ref: "example-org/api/.github/workflows/deploy.yml@refs/heads/main",
+      run_id: "1234567890",
+      run_attempt: "1",
+      actor_id: "300000004",
+      bucket: "org-terraform-state",
+      prefixes: ["github.com/example-org/state-app/"],
+      permission: "object-read-write",
+      expires_on: r2?.expires_on,
+    });
+    expect(logs.join("\n")).not.toContain("r2-secret-value");
+    expect(logs.join("\n")).not.toContain("r2-session-token-value");
+  });
+
+  it("looks up the parent access key ID once, and again after the broker token rotates", async () => {
+    withProfiles({
+      name: "terraform-state",
+      match: STATE,
+      r2: { bucket: "org-terraform-state", permission: "object-read-write" },
+    });
+    const verifies = () => cf.requests.filter((r) => r.path.endsWith("/tokens/verify")).length;
+    await call("POST", "/v1/token", { token: await stateRepo() });
+    await call("POST", "/v1/token", { token: await stateRepo() });
+    expect(verifies()).toBe(1);
+
+    const rotated = cf.add({
+      id: "tok-rotated",
+      name: "cf-oidc broker token (rotated)",
+      value: "rotated-broker-token",
+    });
+    env.CF_OIDC_BROKER_TOKEN = { get: async () => rotated.value };
+    // The fake only accepts the original broker token for everything but verify, so stop here.
+    await call("POST", "/v1/token", { token: await stateRepo() });
+    expect(verifies()).toBe(2);
+  });
+});
+
 describe("POST /v1/revoke", () => {
-  async function minted(): Promise<TokenResponse> {
+  async function minted(): Promise<WithToken> {
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
-    return (await res.json()) as TokenResponse;
+    return (await res.json()) as WithToken;
   }
 
   it("deletes a cf-auth token", async () => {
@@ -296,7 +497,7 @@ describe("broker token", () => {
     env.CF_OIDC_BROKER_TOKEN = secret;
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
     expect(res.status).toBe(200);
-    const { token } = (await res.json()) as TokenResponse;
+    const { token } = (await res.json()) as WithToken;
     expect((await call("POST", "/v1/revoke", { token })).status).toBe(204);
     // Read on every use, so a rotated secret takes effect without a redeploy.
     expect(secret.get).toHaveBeenCalledTimes(2);

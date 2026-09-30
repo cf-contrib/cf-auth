@@ -19,6 +19,7 @@ export type AuditEvent =
   | "token.deny"
   | "token.revoke"
   | "token.cleanup"
+  | "r2.issued"
   | "policy.loaded"
   | "policy.invalid";
 
@@ -34,7 +35,7 @@ export interface AuditFields {
 
 /**
  * Emits one structured line to Workers Logs. Callers must never pass token
- * values or raw JWTs.
+ * values, R2 secrets or raw JWTs.
  */
 export function audit(event: AuditEvent, { claims, ...fields }: AuditFields = {}) {
   const line: Record<string, unknown> = { event };

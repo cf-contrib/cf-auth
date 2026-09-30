@@ -59,9 +59,33 @@ jobs:
           node packages/cf-oidc-action/test/stub.js > "$RUNNER_TEMP/stub.log" 2>&1 &
           for _ in $(seq 20); do grep -q listening "$RUNNER_TEMP/stub.log" && exit 0; sleep 0.5; done
           cat "$RUNNER_TEMP/stub.log"; exit 1
-      - name: Leave a Stale AWS Session Token
-        run: echo "AWS_SESSION_TOKEN=stale-session-token" >> "$GITHUB_ENV"
-      - name: Run cf-oidc-auth
+      - name: Leave Stale AWS Credentials
+        run: |
+          echo "AWS_ACCESS_KEY_ID=stale-access-key-id" >> "$GITHUB_ENV"
+          echo "AWS_SESSION_TOKEN=stale-session-token" >> "$GITHUB_ENV"
+      # The stub answers profile smoke-r2 as a profile with only an r2 grant.
+      - name: Run cf-oidc-auth (r2 only)
+        uses: ./
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:8787/oidc?api-version=2.0
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: stub-request-token
+        with:
+          broker-url: http://127.0.0.1:8787
+          profile: smoke-r2
+      - name: Check Exported R2 Credentials
+        run: |
+          test -z "$CLOUDFLARE_API_TOKEN"   # r2 only: no API token
+          test "$CLOUDFLARE_ACCOUNT_ID" = 0123456789abcdef0123456789abcdef
+          test "$AWS_ACCESS_KEY_ID" = stub-r2-access-key-id   # replaces the stale one
+          test "$AWS_SECRET_ACCESS_KEY" = stub-r2-secret-access-key
+          test "$AWS_SESSION_TOKEN" = stub-r2-session-token
+          test "$AWS_SECURITY_TOKEN" = stub-r2-session-token
+          test "$AWS_ENDPOINT_URL_S3" = https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com
+          test "$AWS_REGION" = auto
+          test "$AWS_DEFAULT_REGION" = auto
+          test "$CLOUDFLARE_R2_BUCKET" = org-terraform-state
+          test "$CLOUDFLARE_R2_PREFIX" = github.com/example-org/app/
+      - name: Run cf-oidc-auth (token)
         uses: ./
         env:
           ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:8787/oidc?api-version=2.0
@@ -70,19 +94,11 @@ jobs:
           broker-url: http://127.0.0.1:8787
           profile: smoke
           ttl: 5m
-          r2-credentials: true
-      - name: Check Exported Credentials
+      - name: Check Exported Token
         run: |
           test "$CLOUDFLARE_API_TOKEN" = stub-cloudflare-token
           test "$CLOUDFLARE_ACCOUNT_ID" = 0123456789abcdef0123456789abcdef
           test "${{ env.CLOUDFLARE_ACCOUNT_ID }}" = 0123456789abcdef0123456789abcdef
-          test "$AWS_ACCESS_KEY_ID" = stub-token-id
-          test "$AWS_SECRET_ACCESS_KEY" = "$(printf %s stub-cloudflare-token | sha256sum | cut -d' ' -f1)"
-          test "$AWS_ENDPOINT_URL_S3" = https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com
-          test "$AWS_REGION" = auto
-          test "$AWS_DEFAULT_REGION" = auto
-          test -z "$AWS_SESSION_TOKEN"     # the stale one set before cf-oidc-auth is cleared
-          test -z "$AWS_SECURITY_TOKEN"
 
   release:
     needs: [test, smoke]

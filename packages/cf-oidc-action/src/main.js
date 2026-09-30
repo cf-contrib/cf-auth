@@ -2,8 +2,7 @@
 /** @typedef {import("../../cf-oidc-broker/src/api.js").TokenRequest} TokenRequest */
 /** @typedef {import("../../cf-oidc-broker/src/api.js").TokenResponse} TokenResponse */
 /** @typedef {import("../../cf-oidc-broker/src/api.js").ErrorResponse} ErrorResponse */
-import { createHash } from "node:crypto";
-import { booleanInput, brokerURL, fail, idToken, input, mask, write } from "./runner.js";
+import { brokerURL, fail, idToken, input, mask, write } from "./runner.js";
 
 /** Hints for the statuses a misconfigured workflow or policy usually produces. */
 const HINTS = /** @type {Record<number, string>} */ ({
@@ -12,10 +11,21 @@ const HINTS = /** @type {Record<number, string>} */ ({
   500: "the broker is misconfigured; check its /healthz and logs",
 });
 
+/**
+ * Fails unless every field is a non-empty string, rather than export "undefined".
+ * @param {object} obj @param {readonly string[]} fields @param {string} [at]
+ */
+function requireStrings(obj, fields, at = "") {
+  for (const field of fields) {
+    const value = /** @type {Record<string, unknown>} */ (obj)[field];
+    if (typeof value !== "string" || value === "") {
+      throw new Error(`cf-oidc broker returned an invalid response: missing ${at}${field}`);
+    }
+  }
+}
+
 try {
   const broker = brokerURL(input("broker-url"));
-  // Parsed before minting, so a typo doesn't leave a token behind.
-  const r2 = booleanInput("r2-credentials");
   const jwt = await idToken(broker.origin);
   mask(jwt);
 
@@ -38,36 +48,53 @@ try {
   }
 
   const t = /** @type {TokenResponse} */ (await response.json());
-  // Everything below is derived from these; fail here rather than export "undefined".
-  for (const field of /** @type {const} */ (["token", "token_id", "account_id"])) {
-    if (typeof t[field] !== "string" || t[field] === "") {
-      throw new Error(`cf-oidc broker returned an invalid response: missing ${field}`);
+  requireStrings(t, ["account_id"]);
+  // A profile with only an r2 grant has no token.
+  if (t.token !== undefined || t.token_id !== undefined) requireStrings(t, ["token", "token_id"]);
+  if (t.r2 !== undefined) {
+    requireStrings(
+      t.r2,
+      ["access_key_id", "secret_access_key", "session_token", "bucket", "endpoint", "expires_on"],
+      "r2.",
+    );
+    if (!Array.isArray(t.r2.prefixes)) {
+      throw new Error("cf-oidc broker returned an invalid response: missing r2.prefixes");
     }
   }
-
-  mask(t.token);
-  write("GITHUB_ENV", "CLOUDFLARE_API_TOKEN", t.token);
-  write("GITHUB_ENV", "CLOUDFLARE_ACCOUNT_ID", t.account_id);
-  write("GITHUB_STATE", "token", t.token); // read by post.js as STATE_token
-  write("GITHUB_STATE", "token_id", t.token_id);
-
-  if (r2) {
-    // R2 accepts any token with R2 permissions as S3 credentials: the token ID is the
-    // access key and the SHA-256 of its value the secret. Revoking the token revokes both.
-    const secret = createHash("sha256").update(t.token).digest("hex");
-    mask(secret);
-    write("GITHUB_ENV", "AWS_ACCESS_KEY_ID", t.token_id);
-    write("GITHUB_ENV", "AWS_SECRET_ACCESS_KEY", secret);
-    // A session token left by an earlier AWS step would be sent along and break every
-    // request. Empty means unset to the AWS CLI and SDKs; botocore also reads the legacy name.
-    write("GITHUB_ENV", "AWS_SESSION_TOKEN", "");
-    write("GITHUB_ENV", "AWS_SECURITY_TOKEN", "");
-    write("GITHUB_ENV", "AWS_ENDPOINT_URL_S3", `https://${t.account_id}.r2.cloudflarestorage.com`);
-    write("GITHUB_ENV", "AWS_REGION", "auto");
-    write("GITHUB_ENV", "AWS_DEFAULT_REGION", "auto");
+  if (t.token === undefined && t.r2 === undefined) {
+    throw new Error("cf-oidc broker returned an invalid response: missing token and r2");
   }
 
-  console.log(`cf-oidc: minted token ${t.token_id} (profile ${t.profile}, expires ${t.expires_on})`);
+  write("GITHUB_ENV", "CLOUDFLARE_ACCOUNT_ID", t.account_id);
+  if (t.token !== undefined && t.token_id !== undefined) {
+    mask(t.token);
+    write("GITHUB_ENV", "CLOUDFLARE_API_TOKEN", t.token);
+    write("GITHUB_STATE", "token", t.token); // read by post.js as STATE_token
+    write("GITHUB_STATE", "token_id", t.token_id);
+    console.log(`cf-oidc: minted token ${t.token_id} (profile ${t.profile}, expires ${t.expires_on})`);
+  }
+
+  if (t.r2 !== undefined) {
+    const r2 = t.r2;
+    mask(r2.secret_access_key);
+    mask(r2.session_token);
+    // These replace any AWS credentials an earlier step left in the job.
+    write("GITHUB_ENV", "AWS_ACCESS_KEY_ID", r2.access_key_id);
+    write("GITHUB_ENV", "AWS_SECRET_ACCESS_KEY", r2.secret_access_key);
+    // botocore still reads the legacy name.
+    write("GITHUB_ENV", "AWS_SESSION_TOKEN", r2.session_token);
+    write("GITHUB_ENV", "AWS_SECURITY_TOKEN", r2.session_token);
+    write("GITHUB_ENV", "AWS_ENDPOINT_URL_S3", r2.endpoint);
+    write("GITHUB_ENV", "AWS_REGION", "auto");
+    write("GITHUB_ENV", "AWS_DEFAULT_REGION", "auto");
+    write("GITHUB_ENV", "CLOUDFLARE_R2_BUCKET", r2.bucket);
+    if (r2.prefixes.length === 1) write("GITHUB_ENV", "CLOUDFLARE_R2_PREFIX", /** @type {string} */ (r2.prefixes[0]));
+    write("GITHUB_STATE", "r2_expires_on", r2.expires_on);
+    const scope = r2.prefixes.length > 0 ? ` under ${r2.prefixes.join(", ")}` : "";
+    console.log(
+      `cf-oidc: issued R2 credentials for bucket ${r2.bucket}${scope} (profile ${t.profile}, expires ${r2.expires_on})`,
+    );
+  }
 } catch (err) {
   fail(err);
 }

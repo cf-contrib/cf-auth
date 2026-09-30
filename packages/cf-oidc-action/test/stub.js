@@ -8,6 +8,17 @@ export const REQUEST_TOKEN = "stub-request-token";
 export const STUB_TOKEN = "stub-cloudflare-token";
 export const STUB_TOKEN_ID = "stub-token-id";
 export const STUB_ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
+export const STUB_R2 = {
+  access_key_id: "stub-r2-access-key-id",
+  secret_access_key: "stub-r2-secret-access-key",
+  session_token: "stub-r2-session-token",
+  bucket: "org-terraform-state",
+  prefixes: ["github.com/example-org/app/"],
+  endpoint: `https://${STUB_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  expires_on: "2026-09-28T12:15:00Z",
+};
+/** A profile the stub answers as one with only an r2 grant: no token, just STUB_R2. */
+export const STUB_R2_PROFILE = "smoke-r2";
 
 /**
  * @typedef {{ method: string, path: string, authorization?: string, body?: unknown }} Call
@@ -49,11 +60,14 @@ export function startStub({
     if (req.method === "POST" && url.pathname === "/v1/token") {
       if (!req.headers.authorization?.startsWith("Bearer stub-jwt.")) return send(401, { error: "unauthorized" });
       if (tokenStatus !== 200) return send(tokenStatus, { error: "forbidden" });
+      const common = { account_id: STUB_ACCOUNT_ID, expires_on: "2026-09-28T12:15:00Z" };
+      if (body?.profile === STUB_R2_PROFILE) {
+        return send(200, { ...common, profile: STUB_R2_PROFILE, r2: STUB_R2, ...tokenFields });
+      }
       return send(200, {
         token: STUB_TOKEN,
         token_id: STUB_TOKEN_ID,
-        account_id: STUB_ACCOUNT_ID,
-        expires_on: "2026-09-28T12:15:00Z",
+        ...common,
         profile: body?.profile ?? "default",
         ...tokenFields,
       });
