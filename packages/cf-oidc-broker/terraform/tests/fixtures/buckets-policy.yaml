@@ -1,4 +1,4 @@
-# Profiles with r2 grants, for tests/main.tftest.hcl. {claim} placeholders are the
+# Profiles with buckets, for tests/main.tftest.hcl. {claim} placeholders are the
 # broker's, filled in from each job's claims; $${…} is Terraform's.
 version: 1
 github:
@@ -8,11 +8,11 @@ profiles:
   - name: terraform-state
     match:
       ref: refs/heads/main
-    r2:
-      bucket: org-terraform-state
-      permission: object-read-write
-      prefixes: ["github.com/{repository}/"]
-      ttl: 30m
+    ttl: 30m
+    buckets:
+      - name: org-terraform-state
+        permission: object-read-write
+        prefixes: ["github.com/{repository}/"]
   - name: deploy-with-state
     match:
       repository_id: "200000002"
@@ -22,7 +22,7 @@ profiles:
         - permissions: ["Workers Scripts Write"]
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
-    r2:
-      bucket: org-terraform-state
-      permission: object-read-write
-      prefixes: ["{repository_owner_id}/{repository_id}/"]
+    buckets:
+      - name: org-terraform-state
+        permission: object-read-write
+        prefixes: ["{repository_owner_id}/{repository_id}/"]

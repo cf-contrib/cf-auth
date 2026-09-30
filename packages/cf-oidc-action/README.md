@@ -59,8 +59,8 @@ A floating `v1` tag will follow each release from 1.0 on.
   - requests an OIDC token for the broker's origin, retrying brief runner failures;
   - asks the broker for a Cloudflare token (not retried, because minting isn't idempotent);
   - masks the token and the OIDC token;
-  - exports `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for the rest of the job. For a profile with only an `r2` grant there's no token, and only `CLOUDFLARE_ACCOUNT_ID` is exported;
-  - when the profile has an `r2` grant, also exports [S3 credentials](#r2-over-the-s3-api) (`AWS_*`) and masks the secret and the session token;
+  - exports `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for the rest of the job. For a profile with only `buckets` there's no token, and only `CLOUDFLARE_ACCOUNT_ID` is exported;
+  - when the profile has `buckets`, also exports [S3 credentials](#r2-over-the-s3-api) (`AWS_*`) and masks the secret and the session token;
   - logs the token ID, profile and expiry (none of them secret), so a run can be matched to the broker's audit log:
     ```
     cf-oidc: minted token 3f2a… (profile workers-deploy, expires 2026-09-28T12:15:00Z)
@@ -100,7 +100,7 @@ None of this can be switched off: what's exported is decided by the profile. Exp
 
 ### R2 over the S3 API
 
-When the matched profile has an [`r2` grant](../cf-oidc-broker#r2-grants), the broker returns temporary R2 credentials for one bucket, limited to the grant's key prefixes. The action exports them for S3 tools:
+When the matched profile has [`buckets`](../cf-oidc-broker#buckets), the broker returns temporary R2 credentials for the bucket, limited to its key prefixes. The action exports them for S3 tools:
 
 | Variable | Value |
 |---|---|
@@ -109,10 +109,10 @@ When the matched profile has an [`r2` grant](../cf-oidc-broker#r2-grants), the b
 | `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN` | the session token, masked. botocore still reads the legacy name |
 | `AWS_ENDPOINT_URL_S3` | `https://<account_id>.r2.cloudflarestorage.com` |
 | `AWS_REGION`, `AWS_DEFAULT_REGION` | `auto` |
-| `CLOUDFLARE_R2_BUCKET` | the grant's bucket |
-| `CLOUDFLARE_R2_PREFIX` | the filled-in prefix, e.g. `100000001/200000003/`. Only when the grant has exactly one |
+| `CLOUDFLARE_R2_BUCKET` | the bucket's name |
+| `CLOUDFLARE_R2_PREFIX` | the filled-in prefix, e.g. `100000001/200000003/`. Only when the bucket has exactly one |
 
-- **The policy decides when `AWS_*` is replaced.** These overwrite any `AWS_*` credentials already set in the job, for every workflow matching a profile with an `r2` grant, including one that doesn't set `profile`. Always set `profile` for R2, and give a job that also talks to AWS its R2 access in a separate job.
+- **The policy decides when `AWS_*` is replaced.** These overwrite any `AWS_*` credentials already set in the job, for every workflow matching a profile with `buckets`, including one that doesn't set `profile`. Always set `profile` for R2, and give a job that also talks to AWS its R2 access in a separate job.
 - **No revocation.** The credentials last as long as the profile's `ttl` (or the requested `ttl`, capped at `max_ttl`), so keep it short.
 
 ### Two scopes: two jobs
@@ -148,10 +148,10 @@ jobs:
 | `OIDC unavailable: add permissions: id-token: write to the job` | The job can't request an OIDC token. Add the permission. Fork PRs on `pull_request` never get it. |
 | `broker returned 401 (unauthorized)` | The broker rejected the OIDC token, usually because `broker-url` doesn't match `github.audience` in the policy. |
 | `broker returned 403 (forbidden)` | No profile allows this workflow, or the named `profile` doesn't match. The broker's audit log (`token.deny`) has the reason. |
-| `broker returned 502 (upstream_error)` | The Cloudflare API refused a call; the audit log has the message. For a profile with an `r2` grant, it's usually a broker token without enough R2 permissions on the grant's bucket. |
+| `broker returned 502 (upstream_error)` | The Cloudflare API refused a call; the audit log has the message. For a profile with `buckets`, it's usually a broker token without enough R2 permissions on the bucket. |
 | `broker returned 500 (misconfigured)` | The broker's policy or bindings are invalid. Check `/healthz` and its logs. |
 | `broker-url must use https` | Plain `http` is only accepted for `localhost` and `127.0.0.1`. |
-| `AccessDenied` from S3 on some keys | The credentials only cover the grant's prefixes: keep every key under `$CLOUDFLARE_R2_PREFIX`. |
+| `AccessDenied` from S3 on some keys | The credentials only cover the bucket's prefixes: keep every key under `$CLOUDFLARE_R2_PREFIX`. |
 
 ## Limitations
 

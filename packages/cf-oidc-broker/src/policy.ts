@@ -29,7 +29,7 @@ const R2_MIN_TTL = MIN_TTL;
 const R2_MAX_TTL = 7 * 24 * HOUR;
 
 /**
- * Claims an `r2` prefix can be built from, and what a value must look like to be used:
+ * Claims a bucket prefix can be built from, and what a value must look like to be used:
  * the characters GitHub allows in owner and repo names, or a numeric ID.
  */
 const PREFIX_CLAIMS = {
@@ -94,26 +94,30 @@ const TokenPolicy = v.strictObject({
   resources: Resources,
 });
 
-const R2Grant = v.strictObject({
-  bucket: v.pipe(v.string(), v.regex(R2_BUCKET, "must be a valid R2 bucket name")),
+const Bucket = v.strictObject({
+  name: v.pipe(v.string(), v.regex(R2_BUCKET, "must be a valid R2 bucket name")),
   permission: v.picklist(["object-read-write", "object-read-only"], "must be object-read-write or object-read-only"),
   prefixes: v.optional(v.array(v.string()), []),
-  // Only for a profile without `token`; otherwise the credentials last as long as the token.
-  ttl: v.optional(Duration),
-  max_ttl: v.optional(Duration),
 });
 
 const Profile = v.strictObject({
   name: v.pipe(v.string(), v.regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/, "must be 1-64 of [A-Za-z0-9_.-]")),
   match: v.optional(v.record(v.pipe(v.string(), v.regex(/^[a-z_]+$/, "must be a claim name")), ClaimValue), {}),
+  // For everything the profile hands out: the token and the buckets' credentials.
+  ttl: v.optional(Duration),
+  max_ttl: v.optional(Duration),
   token: v.optional(
     v.strictObject({
+      // Where ttl and max_ttl went before they moved up to the profile. Still accepted.
       ttl: v.optional(Duration),
       max_ttl: v.optional(Duration),
       policies: v.pipe(v.array(TokenPolicy), v.minLength(1)),
     }),
   ),
-  r2: v.optional(R2Grant),
+  // Each bucket gets its own credentials, which the action can only export one set of yet.
+  buckets: v.optional(
+    v.pipe(v.array(Bucket), v.minLength(1), v.maxLength(1, "only one bucket per profile is supported yet")),
+  ),
 });
 
 const PolicySchema = v.strictObject({
@@ -136,8 +140,8 @@ const PolicySchema = v.strictObject({
 export type TokenPolicy = v.InferOutput<typeof TokenPolicy>;
 export type Resources = TokenPolicy["resources"];
 
-export interface R2Grant {
-  bucket: string;
+export interface Bucket {
+  name: string;
   permission: "object-read-write" | "object-read-only";
   /** Templates with `{claim}` placeholders, filled in by `r2Prefixes`. Empty means the whole bucket. */
   prefixes: string[];
@@ -149,9 +153,9 @@ export interface Profile {
   match: Record<string, string>;
   ttl: number;
   max_ttl: number;
-  /** The token's policies. Absent for a profile with only an `r2` grant. */
+  /** The token's policies. Absent for a profile with only `buckets`. */
   policies?: TokenPolicy[];
-  r2?: R2Grant;
+  buckets?: Bucket[];
 }
 
 export interface Policy {
@@ -226,8 +230,8 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       issues.push(`${at}.match.repository_owner_id: conflicts with github.owner_id`);
     }
 
-    const { token, r2 } = profile;
-    if (!token && !r2) issues.push(`${at}: must have a token, an r2 grant or both`);
+    const { token, buckets } = profile;
+    if (!token && !buckets) issues.push(`${at}: must have a token, buckets or both`);
 
     token?.policies.forEach((p, j) => {
       // Tokens are minted in one account; another account's ID is a copy-paste mistake.
@@ -247,23 +251,24 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       }
     });
 
-    if (r2) {
-      if (token && (r2.ttl !== undefined || r2.max_ttl !== undefined)) {
-        issues.push(`${at}.r2: set ttl and max_ttl on token; the credentials last as long as the token`);
-      }
-      r2.prefixes.forEach((prefix, k) => {
+    buckets?.forEach((bucket, j) => {
+      bucket.prefixes.forEach((prefix, k) => {
         const problem = templateProblem(prefix);
-        if (problem) issues.push(`${at}.r2.prefixes.${k}: ${problem}`);
+        if (problem) issues.push(`${at}.buckets.${j}.prefixes.${k}: ${problem}`);
       });
-    }
+    });
 
     // Guardrail 4: TTL caps.
-    const lifetime: { ttl?: number | undefined; max_ttl?: number | undefined } = token ?? r2 ?? {};
-    const max_ttl = lifetime.max_ttl ?? defaultMax;
-    const ttl = lifetime.ttl ?? Math.min(defaultTTL, max_ttl);
-    checkTTLs(`${at}.${token ? "token" : "r2"}`, ttl, max_ttl, issues);
-    if (r2 && (ttl < R2_MIN_TTL || max_ttl > R2_MAX_TTL)) {
-      issues.push(`${at}.r2: ttl and max_ttl must be within the 1m to 7 days R2 credentials accept`);
+    const legacy = token?.ttl !== undefined || token?.max_ttl !== undefined;
+    if (legacy && (profile.ttl !== undefined || profile.max_ttl !== undefined)) {
+      issues.push(`${at}: set ttl and max_ttl on the profile or on its token, not both`);
+    }
+    const lifetime = legacy ? token : profile;
+    const max_ttl = lifetime?.max_ttl ?? defaultMax;
+    const ttl = lifetime?.ttl ?? Math.min(defaultTTL, max_ttl);
+    checkTTLs(legacy ? `${at}.token` : at, ttl, max_ttl, issues);
+    if (buckets && (ttl < R2_MIN_TTL || max_ttl > R2_MAX_TTL)) {
+      issues.push(`${at}: ttl and max_ttl must be within the 1m to 7 days R2 credentials accept`);
     }
 
     return {
@@ -272,7 +277,7 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       ttl,
       max_ttl,
       ...(token ? { policies: token.policies } : {}),
-      ...(r2 ? { r2: { bucket: r2.bucket, permission: r2.permission, prefixes: r2.prefixes } } : {}),
+      ...(buckets ? { buckets } : {}),
     };
   });
 
@@ -332,11 +337,11 @@ function templateProblem(template: string): string | undefined {
 }
 
 /**
- * Fills in a grant's prefix templates from the verified JWT's claims, or throws a
+ * Fills in a bucket's prefix templates from the verified JWT's claims, or throws a
  * `403` if a claim is missing or can't safely be used in a key.
  */
-export function r2Prefixes(grant: R2Grant, claims: Claims): string[] {
-  return grant.prefixes.map((template) => {
+export function r2Prefixes(bucket: Bucket, claims: Claims): string[] {
+  return bucket.prefixes.map((template) => {
     const prefix = template.replace(PLACEHOLDER, (_, name: PrefixClaim) => {
       const value = claims[name];
       if (typeof value !== "string" || !PREFIX_CLAIMS[name].test(value)) {

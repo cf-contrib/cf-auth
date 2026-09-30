@@ -260,7 +260,7 @@ describe("POST /v1/token", () => {
   });
 });
 
-describe("POST /v1/token with an r2 grant", () => {
+describe("POST /v1/token with buckets", () => {
   const STATE = { repository: "example-org/state-*", environment: "state" };
 
   /** Adds profiles for the state environment, which no other test profile matches. */
@@ -275,11 +275,13 @@ describe("POST /v1/token with an r2 grant", () => {
 
   const r2Requests = () => cf.requests.filter((r) => r.path.endsWith("/r2/temp-access-credentials"));
 
-  it("issues prefix-limited credentials for a profile with only r2", async () => {
+  it("issues prefix-limited credentials for a profile with only buckets", async () => {
     withProfiles({
       name: "terraform-state",
       match: STATE,
-      r2: { bucket: "org-terraform-state", permission: "object-read-write", prefixes: ["github.com/{repository}/"] },
+      buckets: [
+        { name: "org-terraform-state", permission: "object-read-write", prefixes: ["github.com/{repository}/"] },
+      ],
     });
     const before = Date.now();
     const res = await call("POST", "/v1/token", { token: await stateRepo(), body: { profile: "terraform-state" } });
@@ -288,17 +290,19 @@ describe("POST /v1/token with an r2 grant", () => {
     const body = (await res.json()) as TokenResponse;
     expect(body).toEqual({
       account_id: ACCOUNT_ID,
-      expires_on: body.r2?.expires_on,
+      expires_on: body.buckets?.[0]?.expires_on,
       profile: "terraform-state",
-      r2: {
-        access_key_id: BROKER_TOKEN_ID,
-        secret_access_key: "r2-secret-value",
-        session_token: "r2-session-token-value",
-        bucket: "org-terraform-state",
-        prefixes: ["github.com/example-org/state-app/"],
-        endpoint: `https://${ACCOUNT_ID}.r2.cloudflarestorage.com`,
-        expires_on: expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/),
-      },
+      buckets: [
+        {
+          name: "org-terraform-state",
+          access_key_id: BROKER_TOKEN_ID,
+          secret_access_key: "r2-secret-value",
+          session_token: "r2-session-token-value",
+          prefixes: ["github.com/example-org/state-app/"],
+          endpoint: `https://${ACCOUNT_ID}.r2.cloudflarestorage.com`,
+          expires_on: expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/),
+        },
+      ],
     });
     const ttl = Date.parse(body.expires_on) - before;
     expect(ttl).toBeGreaterThan(14 * 60_000);
@@ -324,11 +328,12 @@ describe("POST /v1/token with an r2 grant", () => {
     withProfiles({
       name: "terraform-state",
       match: STATE,
-      r2: { bucket: "org-terraform-state", permission: "object-read-only", max_ttl: "30m" },
+      max_ttl: "30m",
+      buckets: [{ name: "org-terraform-state", permission: "object-read-only" }],
     });
     const res = await call("POST", "/v1/token", { token: await stateRepo(), body: { ttl: "2h" } });
     const body = (await res.json()) as TokenResponse;
-    expect(body.r2?.prefixes).toEqual([]);
+    expect(body.buckets?.[0]?.prefixes).toEqual([]);
     expect(r2Requests()[0]?.body).toEqual({
       bucket: "org-terraform-state",
       parentAccessKeyId: BROKER_TOKEN_ID,
@@ -341,8 +346,8 @@ describe("POST /v1/token with an r2 grant", () => {
     withProfiles({
       name: "state-and-deploy",
       match: STATE,
+      ttl: "10m",
       token: {
-        ttl: "10m",
         policies: [
           {
             permissions: ["Workers Scripts Write"],
@@ -350,14 +355,16 @@ describe("POST /v1/token with an r2 grant", () => {
           },
         ],
       },
-      r2: { bucket: "org-terraform-state", permission: "object-read-write", prefixes: ["{repository_id}/"] },
+      buckets: [{ name: "org-terraform-state", permission: "object-read-write", prefixes: ["{repository_id}/"] }],
     });
     const res = await call("POST", "/v1/token", { token: await stateRepo() });
     expect(res.status).toBe(200);
     const body = (await res.json()) as WithToken;
     expect(cf.tokens.has(body.token_id)).toBe(true);
-    expect(body.r2?.prefixes).toEqual(["200000003/"]);
-    expect(Math.abs(Date.parse(body.r2?.expires_on ?? "") - Date.parse(body.expires_on))).toBeLessThanOrEqual(1000);
+    expect(body.buckets?.[0]?.prefixes).toEqual(["200000003/"]);
+    expect(Math.abs(Date.parse(body.buckets?.[0]?.expires_on ?? "") - Date.parse(body.expires_on))).toBeLessThanOrEqual(
+      1000,
+    );
     expect(r2Requests()[0]?.body).toMatchObject({ ttlSeconds: 600 });
   });
 
@@ -370,7 +377,7 @@ describe("POST /v1/token with an r2 grant", () => {
           { permissions: ["Workers Scripts Write"], resources: { [`com.cloudflare.api.account.${ACCOUNT_ID}`]: "*" } },
         ],
       },
-      r2: { bucket: "org-terraform-state", permission: "object-read-write" },
+      buckets: [{ name: "org-terraform-state", permission: "object-read-write" }],
     });
     cf.failR2 = true;
     const res = await call("POST", "/v1/token", { token: await stateRepo() });
@@ -385,7 +392,7 @@ describe("POST /v1/token with an r2 grant", () => {
     withProfiles({
       name: "terraform-state",
       match: STATE,
-      r2: { bucket: "org-terraform-state", permission: "object-read-write", prefixes: ["{repository_owner}/"] },
+      buckets: [{ name: "org-terraform-state", permission: "object-read-write", prefixes: ["{repository_owner}/"] }],
     });
     const res = await call("POST", "/v1/token", {
       token: await stateRepo("state-app", { repository_owner: "../example-org" }),
@@ -403,10 +410,12 @@ describe("POST /v1/token with an r2 grant", () => {
     withProfiles({
       name: "terraform-state",
       match: STATE,
-      r2: { bucket: "org-terraform-state", permission: "object-read-write", prefixes: ["github.com/{repository}/"] },
+      buckets: [
+        { name: "org-terraform-state", permission: "object-read-write", prefixes: ["github.com/{repository}/"] },
+      ],
     });
     const res = await call("POST", "/v1/token", { token: await stateRepo() });
-    const { r2 } = (await res.json()) as TokenResponse;
+    const { buckets } = (await res.json()) as TokenResponse;
     expect(auditLines().find((l) => l.event === "r2.issued")).toEqual({
       event: "r2.issued",
       profile: "terraform-state",
@@ -423,7 +432,7 @@ describe("POST /v1/token with an r2 grant", () => {
       bucket: "org-terraform-state",
       prefixes: ["github.com/example-org/state-app/"],
       permission: "object-read-write",
-      expires_on: r2?.expires_on,
+      expires_on: buckets?.[0]?.expires_on,
     });
     expect(logs.join("\n")).not.toContain("r2-secret-value");
     expect(logs.join("\n")).not.toContain("r2-session-token-value");
@@ -433,7 +442,7 @@ describe("POST /v1/token with an r2 grant", () => {
     withProfiles({
       name: "terraform-state",
       match: STATE,
-      r2: { bucket: "org-terraform-state", permission: "object-read-write" },
+      buckets: [{ name: "org-terraform-state", permission: "object-read-write" }],
     });
     const verifies = () => cf.requests.filter((r) => r.path.endsWith("/tokens/verify")).length;
     await call("POST", "/v1/token", { token: await stateRepo() });
