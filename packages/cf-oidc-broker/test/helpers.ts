@@ -6,6 +6,7 @@ export const ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
 export const OWNER_ID = "100000001";
 export const AUDIENCE = "https://cf-auth.example.com";
 export const BROKER_TOKEN = "broker-token-value";
+export const BROKER_TOKEN_ID = "tok-broker";
 export const ZONE_ID = "fedcba9876543210fedcba9876543210";
 
 export const PERMISSION_GROUPS = [
@@ -45,11 +46,13 @@ export interface TestPolicy {
   profiles: {
     name: string;
     match: Record<string, unknown>;
+    /** Always there in testPolicy's profiles; tests delete it to leave only `r2`. */
     token: {
       ttl?: string;
       max_ttl?: string;
       policies: { effect?: string; permissions: string[]; resources: Record<string, unknown> }[];
     };
+    r2?: { bucket?: string; permission?: string; prefixes?: string[]; ttl?: string; max_ttl?: string };
   }[];
   [key: string]: unknown;
 }
@@ -145,15 +148,16 @@ function apiError(status: number, message: string) {
   return Response.json({ success: false, errors: [{ code: 1000, message }], messages: [], result: null }, { status });
 }
 
-/** In-memory Cloudflare account tokens API and permission groups. */
+/** In-memory Cloudflare account tokens API, permission groups and R2 temporary credentials. */
 export class FakeCloudflare {
   tokens = new Map<string, StoredToken>();
   requests: { method: string; path: string; body?: unknown }[] = [];
   failCreate = false;
+  failR2 = false;
   private seq = 0;
 
   constructor() {
-    this.add({ name: "cf-oidc broker token", value: BROKER_TOKEN });
+    this.add({ id: BROKER_TOKEN_ID, name: "cf-oidc broker token", value: BROKER_TOKEN });
   }
 
   add(t: Partial<StoredToken> & { name: string }): StoredToken {
@@ -194,6 +198,15 @@ export class FakeCloudflare {
       });
       const { value, ...rest } = token;
       return envelope({ ...rest, value });
+    }
+    if (req.method === "POST" && path === `${acct}/r2/temp-access-credentials`) {
+      if (this.failR2) return apiError(403, "Unauthorized to access requested resource");
+      const b = body as { parentAccessKeyId: string };
+      return envelope({
+        accessKeyId: b.parentAccessKeyId,
+        secretAccessKey: "r2-secret-value",
+        sessionToken: "r2-session-token-value",
+      });
     }
     if (req.method === "GET" && path === `${acct}/tokens`) {
       const page = Number(url.searchParams.get("page") ?? "1");

@@ -11,12 +11,29 @@ export interface TokenRequest {
 
 /** `200` response of `POST /v1/token`. */
 export interface TokenResponse {
-  token: string;
-  token_id: string;
+  /** Absent for a profile with only an `r2` grant, like `token_id`. */
+  token?: string;
+  token_id?: string;
   account_id: string;
   /** RFC 3339 timestamp, e.g. `2026-09-28T12:15:00Z`. */
   expires_on: string;
   profile: string;
+  /** Present when the profile has an `r2` grant. */
+  r2?: R2Credentials;
+}
+
+/** S3 credentials for one R2 bucket, limited to `prefixes`. They can't be revoked; they expire. */
+export interface R2Credentials {
+  access_key_id: string;
+  secret_access_key: string;
+  session_token: string;
+  bucket: string;
+  /** Filled in from the caller's claims. Empty means the whole bucket. */
+  prefixes: string[];
+  /** `https://<account_id>.r2.cloudflarestorage.com` */
+  endpoint: string;
+  /** RFC 3339 timestamp. */
+  expires_on: string;
 }
 
 export type ErrorCode =

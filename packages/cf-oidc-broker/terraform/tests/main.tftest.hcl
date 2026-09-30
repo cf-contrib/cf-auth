@@ -1,6 +1,6 @@
 # Plans the module with mocked providers: no credentials or network needed.
-# Covers the broker token binding, URL modes, local artifacts, the policy template and
-# the policy module.
+# Covers the broker token binding, URL modes, local artifacts, the policy template,
+# r2 prefix placeholders and the policy module.
 mock_provider "cloudflare" {}
 mock_provider "github" {}
 mock_provider "http" {}
@@ -221,5 +221,29 @@ run "policy_vars" {
   assert {
     condition     = jsondecode(local.policy_json).profiles[0].match.repository_id == "200000002" && jsondecode(local.policy_json).github.owner_id == "100000001"
     error_message = "policy_vars should be filled into the policy"
+  }
+}
+
+run "r2_prefix_placeholders" {
+  command = plan
+
+  variables {
+    policy_file = "tests/fixtures/r2-policy.yaml"
+  }
+
+  # templatefile fills in $${…} but must leave the broker's {claim} placeholders alone.
+  assert {
+    condition     = jsondecode(local.policy_json).profiles[0].r2.prefixes == ["github.com/{repository}/"]
+    error_message = "{repository} should reach the broker unchanged"
+  }
+
+  assert {
+    condition     = jsondecode(local.policy_json).profiles[1].r2.prefixes == ["{repository_owner_id}/{repository_id}/"]
+    error_message = "{repository_owner_id} and {repository_id} should reach the broker unchanged"
+  }
+
+  assert {
+    condition     = jsondecode(local.policy_json).profiles[1].token.policies[0].resources["com.cloudflare.api.account.0123456789abcdef0123456789abcdef"] == "*"
+    error_message = "$${account_id} should still be filled in next to an r2 grant"
   }
 }

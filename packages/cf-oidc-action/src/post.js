@@ -4,6 +4,11 @@ import { brokerURL, input, state, warning } from "./runner.js";
 
 const token = state("token");
 const id = state("token_id");
+const r2ExpiresOn = state("r2_expires_on");
+
+if (r2ExpiresOn) {
+  console.log(`cf-oidc: R2 temporary credentials can't be revoked; they expire at ${r2ExpiresOn}`);
+}
 
 if (token) {
   try {

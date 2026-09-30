@@ -7,10 +7,12 @@ import {
   loadPolicy,
   matches,
   type PolicyError,
+  type Profile,
   parseDuration,
+  r2Prefixes,
   selectProfile,
 } from "../src/policy.js";
-import { ACCOUNT_ID, githubClaims, OWNER_ID, testPolicy } from "./helpers.js";
+import { ACCOUNT_ID, githubClaims, OWNER_ID, type TestPolicy, testPolicy } from "./helpers.js";
 
 const policy = () => testPolicy(DEFAULT_ISSUER);
 
@@ -74,7 +76,7 @@ describe("loadPolicy", () => {
     const deploy = p.profiles.find((r) => r.name === "workers-deploy");
     expect(deploy?.ttl).toBe(15 * 60_000);
     expect(deploy?.max_ttl).toBe(60 * 60_000);
-    expect(deploy?.policies[0]?.effect).toBe("allow");
+    expect(deploy?.policies?.[0]?.effect).toBe("allow");
   });
 
   it("adds the owner pin to every profile", () => {
@@ -289,5 +291,142 @@ describe("matching", () => {
     expect(clampTTL("10h", r)).toBe(60 * 60_000);
     expect(denial(() => clampTTL("forever", r))).toBe("invalid_ttl");
     expect(denial(() => clampTTL("30s", r))).toBe("invalid_ttl");
+  });
+});
+
+describe("r2 grant", () => {
+  const grant = (r2: Record<string, unknown>, token = false) => {
+    const p = policy();
+    const profile = p.profiles[1] as TestPolicy["profiles"][number];
+    if (!token) delete (profile as { token?: unknown }).token;
+    profile.r2 = { bucket: "org-terraform-state", permission: "object-read-write", ...r2 };
+    return p;
+  };
+  const loaded = (p: TestPolicy) => loadPolicy(p).profiles[1] as Profile;
+
+  it("accepts a profile with only r2, using the default ttls", () => {
+    const profile = loaded(grant({ prefixes: ["github.com/{repository}/"] }));
+    expect(profile.policies).toBeUndefined();
+    expect(profile.r2).toEqual({
+      bucket: "org-terraform-state",
+      permission: "object-read-write",
+      prefixes: ["github.com/{repository}/"],
+    });
+    expect(profile.ttl).toBe(15 * 60_000);
+    expect(profile.max_ttl).toBe(60 * 60_000);
+  });
+
+  it("takes ttl and max_ttl from r2 when there's no token", () => {
+    const profile = loaded(grant({ ttl: "5m", max_ttl: "10m" }));
+    expect(profile.ttl).toBe(5 * 60_000);
+    expect(profile.max_ttl).toBe(10 * 60_000);
+    expect(issues(grant({ ttl: "20m", max_ttl: "10m" })).join()).toMatch(/r2.ttl: must not exceed max_ttl/);
+    expect(issues(grant({ max_ttl: "25h" })).join()).toMatch(/r2.max_ttl: must be at most 24h/);
+  });
+
+  it("accepts a profile with both, lasting as long as the token", () => {
+    const profile = loaded(grant({}, true));
+    expect(profile.policies).toHaveLength(1);
+    expect(profile.r2?.prefixes).toEqual([]);
+    expect(issues(grant({ ttl: "5m" }, true)).join()).toMatch(/r2: set ttl and max_ttl on token/);
+  });
+
+  it("requires a token, an r2 grant or both", () => {
+    const p = policy();
+    delete (p.profiles[1] as { token?: unknown }).token;
+    expect(issues(p).join()).toMatch(/must have a token, an r2 grant or both/);
+  });
+
+  it.each(["ab", "Org-State", "org_state", "-org-state", "org-state-", "x".repeat(64)])(
+    "rejects the bucket name %j",
+    (bucket) => {
+      expect(issues(grant({ bucket })).join()).toMatch(/bucket: must be a valid R2 bucket name/);
+    },
+  );
+
+  it.each(["admin-read-write", "admin-read-only", "read-write"])("rejects the permission %s", (permission) => {
+    expect(issues(grant({ permission })).join()).toMatch(/permission: must be object-read-write or object-read-only/);
+  });
+
+  it.each([
+    "github.com/{repository}/",
+    "{repository_owner_id}/{repository_id}/",
+    "{repository_owner}/shared/",
+    "shared/",
+  ])("accepts the prefix %j", (prefix) => {
+    expect(issues(grant({ prefixes: [prefix] }))).toEqual([]);
+  });
+
+  it.each([
+    ["github.com/{repository}", /must end with \//],
+    ["/github.com/{repository}/", /must not start with \//],
+    ["github.com/*/", /must not contain \*/],
+    ["github.com/../{repository}/", /must not contain \.\./],
+    ["github.com//{repository}/", /empty or \. path segments/],
+    ["./{repository}/", /empty or \. path segments/],
+    ["/", /must not start with \//],
+    ["", /must end with \//],
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the mistake under test
+    ["github.com/${repository}/", /not \$\{claim\}/],
+    ["github.com/{ref}/", /unknown placeholder \{ref\}/],
+    ["github.com/{}/", /unknown placeholder \{\}/],
+    ["github.com/{repository/", /unmatched/],
+    ["github.com/repository}/", /unmatched/],
+    ["state-{repository_id}/", /whole path segment/],
+    ["{repository_owner}{repository_id}/", /whole path segment/],
+    ["github.com\t/{repository}/", /control characters/],
+  ])("rejects the prefix %j", (prefix, message) => {
+    const found = issues(grant({ prefixes: [prefix] }));
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(/^profiles\.1 \(workers-deploy\)\.r2\.prefixes\.0: /);
+    expect(found[0]).toMatch(message);
+  });
+
+  describe("r2Prefixes", () => {
+    const fill = (prefixes: string[], claims = githubClaims()) =>
+      r2Prefixes({ bucket: "org-terraform-state", permission: "object-read-write", prefixes }, claims);
+
+    it("fills placeholders from the claims", () => {
+      expect(
+        fill(["github.com/{repository}/", "{repository_owner_id}/{repository_id}/", "{repository_owner}/"]),
+      ).toEqual(["github.com/example-org/api/", `${OWNER_ID}/200000003/`, "example-org/"]);
+      expect(fill([])).toEqual([]);
+    });
+
+    it("keeps a repo whose name starts with another's out of it", () => {
+      const [site] = fill(["github.com/{repository}/"], githubClaims({ repository: "example-org/site" }));
+      const [old] = fill(["github.com/{repository}/"], githubClaims({ repository: "example-org/site-old" }));
+      expect(old?.startsWith(site as string)).toBe(false);
+      expect(`${old}terraform.tfstate`.startsWith(site as string)).toBe(false);
+    });
+
+    it.each([
+      ["missing", { repository: undefined }],
+      ["empty", { repository: "" }],
+      ["a number", { repository: 42 }],
+      ["without an owner", { repository: "api" }],
+      ["with two slashes", { repository: "example-org/api/../other" }],
+      ["a leading slash", { repository: "/example-org/api" }],
+      ["a space", { repository: "example-org/my api" }],
+      ["a percent escape", { repository: "example-org/%2e%2e" }],
+      ["a backslash", { repository: "example-org\\api" }],
+      ["a non-ASCII character", { repository: "example-org/аpi" }],
+      ["a newline", { repository: "example-org/api\n" }],
+      ["a *", { repository: "example-org/*" }],
+    ])("403s when repository is %s", (_, overrides) => {
+      expect(denial(() => fill(["github.com/{repository}/"], githubClaims(overrides)))).toBe("invalid_r2_prefix");
+    });
+
+    it.each([
+      ["..", { repository: "example-org/.." }],
+      [". as the repo", { repository: "example-org/." }],
+      [".. as the owner", { repository_owner: ".." }],
+      ["a slash in the owner", { repository_owner: "example-org/api" }],
+      ["a non-numeric ID", { repository_id: "200000003a" }],
+      ["an empty ID", { repository_owner_id: "" }],
+    ])("403s on %s", (_, overrides) => {
+      const templates = ["github.com/{repository}/", "{repository_owner}/", "{repository_owner_id}/{repository_id}/"];
+      expect(denial(() => fill(templates, githubClaims(overrides)))).toBe("invalid_r2_prefix");
+    });
   });
 });

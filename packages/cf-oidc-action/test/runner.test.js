@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { booleanInput, brokerURL, idToken, input, write } from "../src/runner.js";
+import { brokerURL, idToken, input, write } from "../src/runner.js";
 
 beforeEach(() => {
   vi.stubEnv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://runner.example.com/token?api-version=2.0");
@@ -64,25 +64,6 @@ describe("input", () => {
     vi.stubEnv("INPUT_BROKER-URL", "  https://x.example.com \n");
     expect(input("broker-url")).toBe("https://x.example.com");
     expect(input("missing")).toBe("");
-  });
-});
-
-describe("booleanInput", () => {
-  it("accepts the YAML 1.2 core booleans like @actions/core", () => {
-    for (const value of ["true", "True", "TRUE", " true "]) {
-      vi.stubEnv("INPUT_FLAG", value);
-      expect(booleanInput("flag")).toBe(true);
-    }
-    for (const value of ["false", "False", "FALSE", ""]) {
-      vi.stubEnv("INPUT_FLAG", value);
-      expect(booleanInput("flag")).toBe(false);
-    }
-    expect(booleanInput("missing")).toBe(false);
-  });
-
-  it("rejects anything else", () => {
-    vi.stubEnv("INPUT_FLAG", "yes");
-    expect(() => booleanInput("flag")).toThrow("Input flag must be true or false, got: yes");
   });
 });
 

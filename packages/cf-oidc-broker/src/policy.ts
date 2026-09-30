@@ -18,6 +18,28 @@ const TOKEN_MANAGEMENT = /api tokens/i;
 /** An account-level resource key; zone keys (`...account.zone.<id>`) don't match. */
 const ACCOUNT_RESOURCE = /^com\.cloudflare\.api\.account\.([0-9a-f]{32})$/;
 
+/** R2's bucket name rules: 3-63 lowercase letters, digits and hyphens, starting and ending with a letter or digit. */
+const R2_BUCKET = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
+
+/** `ttlSeconds` range of R2 temporary credentials. Cloudflare documents only the maximum, 7 days. */
+const R2_MIN_TTL = MIN_TTL;
+const R2_MAX_TTL = 7 * 24 * HOUR;
+
+/**
+ * Claims an `r2` prefix can be built from, and what a value must look like to be used:
+ * the characters GitHub allows in owner and repo names, or a numeric ID.
+ */
+const PREFIX_CLAIMS = {
+  repository: /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/,
+  repository_owner: /^[A-Za-z0-9._-]+$/,
+  repository_id: /^\d+$/,
+  repository_owner_id: /^\d+$/,
+} as const;
+type PrefixClaim = keyof typeof PREFIX_CLAIMS;
+
+/** A `{claim}` placeholder. Not `${claim}`, which Terraform's templatefile would try to fill in. */
+const PLACEHOLDER = /\{([^{}]*)\}/g;
+
 /** Host of GitHub's default OIDC audience (`https://github.com/<owner>`), which other clouds' JWTs carry. */
 const GITHUB_DEFAULT_AUDIENCE_HOST = "github.com";
 
@@ -69,14 +91,26 @@ const TokenPolicy = v.strictObject({
   resources: Resources,
 });
 
+const R2Grant = v.strictObject({
+  bucket: v.pipe(v.string(), v.regex(R2_BUCKET, "must be a valid R2 bucket name")),
+  permission: v.picklist(["object-read-write", "object-read-only"], "must be object-read-write or object-read-only"),
+  prefixes: v.optional(v.array(v.string()), []),
+  // Only for a profile without `token`; otherwise the credentials last as long as the token.
+  ttl: v.optional(Duration),
+  max_ttl: v.optional(Duration),
+});
+
 const Profile = v.strictObject({
   name: v.pipe(v.string(), v.regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/, "must be 1-64 of [A-Za-z0-9_.-]")),
   match: v.optional(v.record(v.pipe(v.string(), v.regex(/^[a-z_]+$/, "must be a claim name")), ClaimValue), {}),
-  token: v.strictObject({
-    ttl: v.optional(Duration),
-    max_ttl: v.optional(Duration),
-    policies: v.pipe(v.array(TokenPolicy), v.minLength(1)),
-  }),
+  token: v.optional(
+    v.strictObject({
+      ttl: v.optional(Duration),
+      max_ttl: v.optional(Duration),
+      policies: v.pipe(v.array(TokenPolicy), v.minLength(1)),
+    }),
+  ),
+  r2: v.optional(R2Grant),
 });
 
 const PolicySchema = v.strictObject({
@@ -99,13 +133,22 @@ const PolicySchema = v.strictObject({
 export type TokenPolicy = v.InferOutput<typeof TokenPolicy>;
 export type Resources = TokenPolicy["resources"];
 
+export interface R2Grant {
+  bucket: string;
+  permission: "object-read-write" | "object-read-only";
+  /** Templates with `{claim}` placeholders, filled in by `r2Prefixes`. Empty means the whole bucket. */
+  prefixes: string[];
+}
+
 export interface Profile {
   name: string;
   /** All keys must match (AND). Always includes `repository_owner_id`. */
   match: Record<string, string>;
   ttl: number;
   max_ttl: number;
-  policies: TokenPolicy[];
+  /** The token's policies. Absent for a profile with only an `r2` grant. */
+  policies?: TokenPolicy[];
+  r2?: R2Grant;
 }
 
 export interface Policy {
@@ -180,7 +223,10 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       issues.push(`${at}.match.repository_owner_id: conflicts with github.owner_id`);
     }
 
-    profile.token.policies.forEach((p, j) => {
+    const { token, r2 } = profile;
+    if (!token && !r2) issues.push(`${at}: must have a token, an r2 grant or both`);
+
+    token?.policies.forEach((p, j) => {
       // Tokens are minted in one account; another account's ID is a copy-paste mistake.
       for (const key of Object.keys(p.resources)) {
         const id = ACCOUNT_RESOURCE.exec(key)?.[1];
@@ -198,17 +244,32 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       }
     });
 
+    if (r2) {
+      if (token && (r2.ttl !== undefined || r2.max_ttl !== undefined)) {
+        issues.push(`${at}.r2: set ttl and max_ttl on token; the credentials last as long as the token`);
+      }
+      r2.prefixes.forEach((prefix, k) => {
+        const problem = templateProblem(prefix);
+        if (problem) issues.push(`${at}.r2.prefixes.${k}: ${problem}`);
+      });
+    }
+
     // Guardrail 4: TTL caps.
-    const max_ttl = profile.token.max_ttl ?? defaultMax;
-    const ttl = profile.token.ttl ?? Math.min(defaultTTL, max_ttl);
-    checkTTLs(`${at}.token`, ttl, max_ttl, issues);
+    const lifetime: { ttl?: number | undefined; max_ttl?: number | undefined } = token ?? r2 ?? {};
+    const max_ttl = lifetime.max_ttl ?? defaultMax;
+    const ttl = lifetime.ttl ?? Math.min(defaultTTL, max_ttl);
+    checkTTLs(`${at}.${token ? "token" : "r2"}`, ttl, max_ttl, issues);
+    if (r2 && (ttl < R2_MIN_TTL || max_ttl > R2_MAX_TTL)) {
+      issues.push(`${at}.r2: ttl and max_ttl must be within the 1m to 7 days R2 credentials accept`);
+    }
 
     return {
       name: profile.name,
       match: { ...profile.match, repository_owner_id: github.owner_id },
       ttl,
       max_ttl,
-      policies: profile.token.policies,
+      ...(token ? { policies: token.policies } : {}),
+      ...(r2 ? { r2: { bucket: r2.bucket, permission: r2.permission, prefixes: r2.prefixes } } : {}),
     };
   });
 
@@ -220,6 +281,70 @@ function checkTTLs(at: string, ttl: number, max: number, issues: string[]) {
   if (max > MAX_TTL) issues.push(`${at}.max_ttl: must be at most 24h`);
   if (ttl < MIN_TTL) issues.push(`${at}.ttl: must be at least 1m`);
   if (ttl > max) issues.push(`${at}.ttl: must not exceed max_ttl`);
+}
+
+// ---------------------------------------------------------------------------
+// R2 prefixes
+// ---------------------------------------------------------------------------
+
+// The prefix is the only thing keeping one repo out of another's keys, so these
+// checks run on the template when the policy loads and again on every filled-in prefix.
+
+/** Checks a filled-in prefix. Returns what's wrong with it, if anything. */
+function prefixProblem(prefix: string): string | undefined {
+  if (prefix.startsWith("/")) return "must not start with /";
+  // Without it, github.com/org/site would also cover github.com/org/site-old/.
+  if (!prefix.endsWith("/")) return "must end with /";
+  if (prefix.includes("*")) return "must not contain *";
+  if (prefix.includes("..")) return "must not contain ..";
+  if (/\p{Cc}/u.test(prefix)) return "must not contain control characters";
+  if (
+    prefix
+      .slice(0, -1)
+      .split("/")
+      .some((segment) => segment === "" || segment === ".")
+  ) {
+    return "must not contain empty or . path segments";
+  }
+  return undefined;
+}
+
+/** Checks a prefix template from the policy. */
+function templateProblem(template: string): string | undefined {
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: names the syntax to avoid
+  if (template.includes("${")) return "use {claim} placeholders, not ${claim}";
+  for (const [placeholder, name = ""] of template.matchAll(PLACEHOLDER)) {
+    if (!Object.hasOwn(PREFIX_CLAIMS, name)) {
+      return `unknown placeholder ${placeholder}; use one of ${Object.keys(PREFIX_CLAIMS).join(", ")}`;
+    }
+  }
+  if (/[{}]/.test(template.replace(PLACEHOLDER, ""))) return "has an unmatched { or }";
+  // A placeholder must fill whole path segments. Otherwise two repos could get the same
+  // prefix: {repository_owner}{repository_id} is "a1"+"23" and "a"+"123" alike.
+  const segments = template.split("/");
+  if (segments.some((s) => s.includes("{") && !/^\{[^{}]*\}$/.test(s))) {
+    return "a placeholder must be a whole path segment, e.g. github.com/{repository}/";
+  }
+  return prefixProblem(template.replace(PLACEHOLDER, "x"));
+}
+
+/**
+ * Fills in a grant's prefix templates from the verified JWT's claims, or throws a
+ * `403` if a claim is missing or can't safely be used in a key.
+ */
+export function r2Prefixes(grant: R2Grant, claims: Claims): string[] {
+  return grant.prefixes.map((template) => {
+    const prefix = template.replace(PLACEHOLDER, (_, name: PrefixClaim) => {
+      const value = claims[name];
+      if (typeof value !== "string" || !PREFIX_CLAIMS[name].test(value)) {
+        throw new HttpError("forbidden", "invalid_r2_prefix", `${name} claim is missing or not usable in a prefix`);
+      }
+      return value;
+    });
+    const problem = prefixProblem(prefix);
+    if (problem) throw new HttpError("forbidden", "invalid_r2_prefix", `${prefix}: ${problem}`);
+    return prefix;
+  });
 }
 
 // ---------------------------------------------------------------------------

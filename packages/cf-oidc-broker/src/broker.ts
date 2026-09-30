@@ -1,16 +1,18 @@
 import Cloudflare, { CloudflareError } from "cloudflare";
-import type { ErrorResponse, TokenRequest } from "./api.js";
+import type { ErrorResponse, R2Credentials, TokenRequest, TokenResponse } from "./api.js";
 import { audit } from "./audit.js";
 import { HttpError } from "./errors.js";
 import { bearer, verifyGitHubJWT } from "./jwt.js";
-import { type Claims, clampTTL, loadPolicy, type Policy, PolicyError, selectProfile } from "./policy.js";
-import { cleanup, mint, revoke } from "./tokens.js";
+import { type Claims, clampTTL, loadPolicy, type Policy, PolicyError, r2Prefixes, selectProfile } from "./policy.js";
+import { issueR2 } from "./r2.js";
+import { cleanup, discard, type MintedToken, mint, revoke } from "./tokens.js";
 
 export interface Env {
   /** Account the broker token belongs to and tokens are minted in. */
   CF_OIDC_BROKER_ACCOUNT_ID: string;
   /**
-   * Account-owned token with only "Account API Tokens Write". Must be a Secrets
+   * Account-owned token with "Account API Tokens Write", plus R2 permissions on the
+   * buckets `r2` grants name: it's also their credentials' parent. Must be a Secrets
    * Store binding: a plain Worker secret is refused, not used.
    */
   CF_OIDC_BROKER_TOKEN: SecretsStoreSecret;
@@ -113,12 +115,45 @@ async function handleToken(request: Request, env: Env, raw: unknown): Promise<Re
     const selected = selectProfile(policy, claims, req.profile);
     profile = selected.name;
     const ttl = clampTTL(req.ttl, selected);
+    // Filled in before anything is minted, so an unusable claim leaves nothing behind.
+    const prefixes = selected.r2 ? r2Prefixes(selected.r2, claims) : [];
 
     const cf = await brokerClient(env);
-    const token = await mint(cf, env.CF_OIDC_BROKER_ACCOUNT_ID, selected, claims, ttl);
+    const accountId = env.CF_OIDC_BROKER_ACCOUNT_ID;
+    let token: MintedToken | undefined;
+    if (selected.policies) {
+      token = await mint(cf, accountId, selected.policies, claims, ttl);
+      audit("token.mint", { profile, claims, token_id: token.token_id, expires_on: token.expires_on });
+    }
 
-    audit("token.mint", { profile: token.profile, claims, token_id: token.token_id, expires_on: token.expires_on });
-    return json(200, token);
+    let r2: R2Credentials | undefined;
+    if (selected.r2) {
+      try {
+        r2 = await issueR2(cf, accountId, selected.r2, prefixes, ttl);
+      } catch (err) {
+        // Half a grant isn't handed out.
+        if (token) await discard(cf, accountId, token.token_id);
+        throw err;
+      }
+      audit("r2.issued", {
+        profile,
+        claims,
+        bucket: r2.bucket,
+        prefixes: r2.prefixes,
+        permission: selected.r2.permission,
+        expires_on: r2.expires_on,
+      });
+    }
+
+    const expires_on = token?.expires_on ?? r2?.expires_on;
+    if (expires_on === undefined) throw new Error(`profile ${profile} has neither a token nor an r2 grant`);
+    return json(200, {
+      ...token,
+      account_id: accountId,
+      expires_on,
+      profile: selected.name,
+      ...(r2 ? { r2 } : {}),
+    } satisfies TokenResponse);
   } catch (err) {
     if (err instanceof HttpError) {
       audit("token.deny", { profile, claims, reason: err.reason, detail: err.detail });
