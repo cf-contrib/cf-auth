@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.2](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.4.1...v0.4.2) (2026-09-30)
+
+
+### Bug Fixes
+
+* **broker:** ship the policy as policy.json next to broker.js ([#17](https://github.com/cf-contrib/cf-oidc-auth/issues/17)) ([2ff0aed](https://github.com/cf-contrib/cf-oidc-auth/commit/2ff0aed255efe207a8742fe0d714990df98a8cc4))
+* consistent names for the Secrets Store ID, bindings, token prefix and wrangler Worker ([#18](https://github.com/cf-contrib/cf-oidc-auth/issues/18)) ([c4b3f86](https://github.com/cf-contrib/cf-oidc-auth/commit/c4b3f86ee4cd8512b770e31369d3594aaa629b9c))
+* name the Secrets Store ID secret_store_id and the wrangler Worker cf-oidc-broker ([c4b3f86](https://github.com/cf-contrib/cf-oidc-auth/commit/c4b3f86ee4cd8512b770e31369d3594aaa629b9c))
+* rename the broker bindings to CF_OIDC_BROKER_* and the cf-auth: prefix to cf-oidc: ([c4b3f86](https://github.com/cf-contrib/cf-oidc-auth/commit/c4b3f86ee4cd8512b770e31369d3594aaa629b9c))
+* **terraform:** name the resources broker and the URL output url ([#20](https://github.com/cf-contrib/cf-oidc-auth/issues/20)) ([1398229](https://github.com/cf-contrib/cf-oidc-auth/commit/1398229f578f91e8b02cf2a039349c1e063ff5b0))
+* **terraform:** name the resources this ([#21](https://github.com/cf-contrib/cf-oidc-auth/issues/21)) ([9f2fafe](https://github.com/cf-contrib/cf-oidc-auth/commit/9f2fafec6128acf1d4547ff7467518945e16ffdc))
+
 ## [0.4.1](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.4.0...v0.4.1) (2026-09-30)
 
 
