@@ -21,7 +21,7 @@ permissions:
 steps:
   - uses: cf-contrib/cf-oidc-auth@v0.4.2 # x-release-please-version
     with:
-      broker-url: https://cf-auth.example.com
+      broker-url: https://cf-oidc-broker.example.com
       profile: workers-deploy
   - run: npx wrangler deploy # CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID are set
 ```
