@@ -234,7 +234,7 @@ jobs:
 | `OIDC unavailable: add permissions: id-token: write to the job` | The job can't request an OIDC token. Add the permission. Fork PRs on `pull_request` never get it. |
 | `broker returned 401 (unauthorized)` | The broker rejected the OIDC token, usually because `broker-url` doesn't match `github.audience` in the policy. |
 | `broker returned 403 (forbidden)` | No profile allows this workflow, or the named `profile` doesn't match. The broker's audit log (`token.deny`) has the reason. |
-| `broker returned 502 (upstream_error)` | The Cloudflare API refused a call; the audit log has the message. For a profile with an `r2` grant, it's usually a broker token without R2 Admin Read & Write. |
+| `broker returned 502 (upstream_error)` | The Cloudflare API refused a call; the audit log has the message. For a profile with an `r2` grant, it's usually a broker token without enough R2 permissions on the grant's bucket. |
 | `broker returned 500 (misconfigured)` | The broker's policy or bindings are invalid. Check `/healthz` and its logs. |
 | `broker-url must use https` | Plain `http` is only accepted for `localhost` and `127.0.0.1`. |
 | `AccessDenied` from S3 on some keys | The credentials only cover the grant's prefixes. Check `key` and `workspace_key_prefix` start with `$CLOUDFLARE_R2_PREFIX`. |

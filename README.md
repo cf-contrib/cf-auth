@@ -55,7 +55,7 @@ sequenceDiagram
     Note over Broker,CF: hourly cron deletes expired cf-oidc:* tokens
 ```
 
-The only long-lived credential is the **broker token**: an account-owned token with **Account API Tokens Write**, plus R2 Admin Read & Write if profiles hand out [prefix-limited R2 credentials](packages/cf-oidc-broker#r2-grants) (e.g. one shared Terraform-state bucket, each repo limited to its own prefix). It lives in Cloudflare Secrets Store, bound to the Worker, so it never passes through Terraform or CI and never leaves the Worker.
+The only long-lived credential is the **broker token**: an account-owned token with **Account API Tokens Write**, plus R2 permissions if profiles hand out [prefix-limited R2 credentials](packages/cf-oidc-broker#r2-grants) (e.g. one shared Terraform-state bucket, each repo limited to its own prefix). It lives in Cloudflare Secrets Store, bound to the Worker, so it never passes through Terraform or CI and never leaves the Worker.
 
 ## Do you need it?
 
@@ -72,7 +72,7 @@ If a stored secret is acceptable to you, it's less to run.
 
 ## Quick start
 
-1. **Create the broker token.** In the Cloudflare dashboard, create an account-owned API token with **Account API Tokens Write** (plus R2 Admin Read & Write for [R2 grants](packages/cf-oidc-broker#r2-grants)), and store it in Secrets Store.
+1. **Create the broker token.** In the Cloudflare dashboard, create an account-owned API token with **Account API Tokens Write** (plus R2 permissions for [R2 grants](packages/cf-oidc-broker#r2-grants)), and store it in Secrets Store.
 2. **Write a policy** that says which repos, branches and environments get which permissions. See the [broker's README](packages/cf-oidc-broker#policy).
 3. **Deploy the broker** with the [Terraform module](packages/cf-oidc-broker/terraform), on workers.dev (a custom domain is optional), then check that `<broker-url>/healthz` returns `200`.
 4. **Add the action** to a job with `permissions: id-token: write`. See the [action's README](packages/cf-oidc-action).
