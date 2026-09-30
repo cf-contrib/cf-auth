@@ -73,7 +73,7 @@ describe("main", () => {
     const r = await action("main.js", {
       ...oidcEnv(stub.url),
       "INPUT_BROKER-URL": `${stub.url}/`,
-      INPUT_RULE: "workers-deploy",
+      INPUT_PROFILE: "workers-deploy",
       INPUT_TTL: " 10m ",
     });
 
@@ -86,7 +86,7 @@ describe("main", () => {
     expect(maskAt).toBeGreaterThanOrEqual(0);
     expect(out.some((l) => l.startsWith("::add-mask::stub-jwt."))).toBe(true);
     expect(r.stdout).toContain(
-      `cf-auth: minted token ${STUB_TOKEN_ID} (rule workers-deploy, expires 2026-09-28T12:15:00Z)`,
+      `cf-auth: minted token ${STUB_TOKEN_ID} (profile workers-deploy, expires 2026-09-28T12:15:00Z)`,
     );
     // The token value itself only ever appears in the mask command.
     expect(out.filter((l) => l.includes(STUB_TOKEN)).length).toBe(1);
@@ -96,15 +96,15 @@ describe("main", () => {
     const token = stub.calls.find((c) => c.path === "/v1/token");
     // The audience is the broker's origin, without the trailing slash.
     expect(token?.authorization).toBe(`Bearer stub-jwt.${Buffer.from(stub.url).toString("base64url")}`);
-    expect(token?.body).toEqual({ rule: "workers-deploy", ttl: "10m" });
+    expect(token?.body).toEqual({ profile: "workers-deploy", ttl: "10m" });
   });
 
-  it("omits rule and ttl when not given", async () => {
+  it("omits profile and ttl when not given", async () => {
     stub = await startStub();
     const r = await action("main.js", {
       ...oidcEnv(stub.url),
       "INPUT_BROKER-URL": stub.url,
-      INPUT_RULE: "",
+      INPUT_PROFILE: "",
       INPUT_TTL: "",
     });
     expect(r.code).toBe(0);
@@ -185,7 +185,7 @@ describe("main", () => {
     stub = await startStub({ tokenStatus: 403 });
     const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain("::error::cf-auth broker returned 403 (forbidden): no policy rule allows this workflow");
+    expect(r.stdout).toContain("::error::cf-auth broker returned 403 (forbidden): no profile allows this workflow");
     expect(r.env).toEqual({});
     expect(r.state).toEqual({});
   });

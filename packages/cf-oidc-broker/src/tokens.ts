@@ -2,7 +2,7 @@ import Cloudflare, { AuthenticationError, BadRequestError, NotFoundError, Permis
 import type { TokenResponse } from "./api.js";
 import { audit } from "./audit.js";
 import { HttpError } from "./errors.js";
-import type { Claims, Rule } from "./policy.js";
+import type { Claims, Profile } from "./policy.js";
 import { resolvePolicies } from "./resolve.js";
 
 /** Every minted token's name starts with this. Revoke and cleanup never touch anything else. */
@@ -26,11 +26,11 @@ export function rfc3339(ms: number): string {
 export async function mint(
   cf: Cloudflare,
   accountId: string,
-  rule: Rule,
+  profile: Profile,
   claims: Claims,
   ttl: number,
 ): Promise<TokenResponse> {
-  const policies = await resolvePolicies(cf, accountId, rule.policies);
+  const policies = await resolvePolicies(cf, accountId, profile.policies);
   const expires_on = rfc3339(Date.now() + ttl);
 
   const token = await cf.accounts.tokens.create(
@@ -46,7 +46,7 @@ export async function mint(
     token_id: token.id,
     account_id: accountId,
     expires_on: token.expires_on ?? expires_on,
-    rule: rule.name,
+    profile: profile.name,
   };
 }
 

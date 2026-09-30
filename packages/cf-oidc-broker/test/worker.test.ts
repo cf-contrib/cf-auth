@@ -66,12 +66,12 @@ const auditLines = () => logs.map((l) => JSON.parse(l) as Record<string, unknown
 describe("POST /v1/token", () => {
   it("mints a scoped, expiring token", async () => {
     const before = Date.now();
-    const res = await call("POST", "/v1/token", { token: await issuer.sign(), body: { rule: "workers-deploy" } });
+    const res = await call("POST", "/v1/token", { token: await issuer.sign(), body: { profile: "workers-deploy" } });
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
 
     const body = (await res.json()) as TokenResponse;
-    expect(body.rule).toBe("workers-deploy");
+    expect(body.profile).toBe("workers-deploy");
     expect(body.account_id).toBe(ACCOUNT_ID);
     expect(body.token).toMatch(/^value-/);
 
@@ -92,17 +92,17 @@ describe("POST /v1/token", () => {
     expect(ttl).toBeLessThanOrEqual(15 * 60_000 + 1000);
   });
 
-  it("uses the single matching rule when none is named", async () => {
+  it("uses the single matching profile when none is named", async () => {
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
     expect(res.status).toBe(200);
-    expect(((await res.json()) as TokenResponse).rule).toBe("workers-deploy");
+    expect(((await res.json()) as TokenResponse).profile).toBe("workers-deploy");
   });
 
   it("resolves permission names to IDs and passes resources through", async () => {
     const claims = githubClaims({ repository: "example-org/infra", repository_id: "200000002" });
     const res = await call("POST", "/v1/token", {
       token: await issuer.sign(claims),
-      body: { rule: "infra-cloudflare" },
+      body: { profile: "infra-cloudflare" },
     });
     expect(res.status).toBe(200);
     const { token_id } = (await res.json()) as TokenResponse;
@@ -126,7 +126,7 @@ describe("POST /v1/token", () => {
     const { token, token_id } = (await res.json()) as TokenResponse;
     const mint = auditLines().find((l) => l.event === "token.mint");
     expect(mint).toMatchObject({
-      rule: "workers-deploy",
+      profile: "workers-deploy",
       repository: "example-org/api",
       repository_id: "200000003",
       ref: "refs/heads/main",
@@ -159,33 +159,33 @@ describe("POST /v1/token", () => {
     expect(cf.tokens.size).toBe(1); // only the broker token
   });
 
-  it("403s when several rules match and none is named", async () => {
+  it("403s when several profiles match and none is named", async () => {
     const claims = githubClaims({ repository: "example-org/infra", repository_id: "200000002" });
     const res = await call("POST", "/v1/token", { token: await issuer.sign(claims) });
     expect(res.status).toBe(403);
     expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({ reason: "ambiguous" });
   });
 
-  it("403s when the named rule doesn't match", async () => {
-    const res = await call("POST", "/v1/token", { token: await issuer.sign(), body: { rule: "infra-cloudflare" } });
+  it("403s when the named profile doesn't match", async () => {
+    const res = await call("POST", "/v1/token", { token: await issuer.sign(), body: { profile: "infra-cloudflare" } });
     expect(res.status).toBe(403);
     expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({
-      reason: "rule_mismatch",
-      rule: "infra-cloudflare",
+      reason: "profile_mismatch",
+      profile: "infra-cloudflare",
     });
   });
 
-  it.each([[{ ttl: "forever" }], [{ ttl: 600 }], [[1, 2]], [{ rule: "x".repeat(65) }]])(
+  it.each([[{ ttl: "forever" }], [{ ttl: 600 }], [[1, 2]], [{ profile: "x".repeat(65) }]])(
     "400s on body %j",
     async (body) => {
       expect((await call("POST", "/v1/token", { token: await issuer.sign(), body })).status).toBe(400);
     },
   );
 
-  it("logs the rule count when the policy loads", async () => {
+  it("logs the profile count when the policy loads", async () => {
     env.CF_AUTH_BROKER_POLICY = JSON.stringify({ ...testPolicy(ISSUER), defaults: { ttl: "10m" } }); // force a reload
     await call("GET", "/healthz");
-    expect(auditLines().find((l) => l.event === "policy.loaded")).toEqual({ event: "policy.loaded", rules: 3 });
+    expect(auditLines().find((l) => l.event === "policy.loaded")).toEqual({ event: "policy.loaded", profiles: 3 });
   });
 
   it("500s, failing closed, when the policy is invalid", async () => {
@@ -200,7 +200,7 @@ describe("POST /v1/token", () => {
 
   it("500s when a permission name is unknown", async () => {
     const policy = testPolicy(ISSUER);
-    (policy.rules[1]?.token.policies[0] as { permissions: string[] }).permissions = ["Workers Scrpts Write"];
+    (policy.profiles[1]?.token.policies[0] as { permissions: string[] }).permissions = ["Workers Scrpts Write"];
     env.CF_AUTH_BROKER_POLICY = JSON.stringify(policy);
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
     expect(res.status).toBe(500);
@@ -209,7 +209,7 @@ describe("POST /v1/token", () => {
 
   it("picks the right scope for a permission name shared by two groups", async () => {
     const policy = testPolicy(ISSUER);
-    (policy.rules[1]?.token.policies[0] as { permissions: string[] }).permissions = ["Load Balancers Write"];
+    (policy.profiles[1]?.token.policies[0] as { permissions: string[] }).permissions = ["Load Balancers Write"];
     env.CF_AUTH_BROKER_POLICY = JSON.stringify(policy);
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
     const { token_id } = (await res.json()) as TokenResponse;
@@ -220,12 +220,12 @@ describe("POST /v1/token", () => {
 
   it("picks the zone-scoped group for zone resources", async () => {
     const policy = testPolicy(ISSUER);
-    (policy.rules[0]?.token.policies[0] as { permissions: string[] }).permissions = ["Load Balancers Write"];
+    (policy.profiles[0]?.token.policies[0] as { permissions: string[] }).permissions = ["Load Balancers Write"];
     env.CF_AUTH_BROKER_POLICY = JSON.stringify(policy);
     const claims = githubClaims({ repository: "example-org/infra", repository_id: "200000002" });
     const res = await call("POST", "/v1/token", {
       token: await issuer.sign(claims),
-      body: { rule: "infra-cloudflare" },
+      body: { profile: "infra-cloudflare" },
     });
     const { token_id } = (await res.json()) as TokenResponse;
     expect(cf.tokens.get(token_id)?.policies[0]).toMatchObject({

@@ -24,7 +24,7 @@ export type AuditEvent =
 
 export interface AuditFields {
   claims?: Claims | undefined;
-  rule?: string | undefined;
+  profile?: string | undefined;
   reason?: string | undefined;
   detail?: string | undefined;
   token_id?: string | undefined;
@@ -38,7 +38,7 @@ export interface AuditFields {
  */
 export function audit(event: AuditEvent, { claims, ...fields }: AuditFields = {}) {
   const line: Record<string, unknown> = { event };
-  if (fields.rule !== undefined) line.rule = fields.rule;
+  if (fields.profile !== undefined) line.profile = fields.profile;
   for (const key of CLAIMS) {
     const value = claims?.[key];
     if (typeof value === "string" && value !== "") line[key] = value;

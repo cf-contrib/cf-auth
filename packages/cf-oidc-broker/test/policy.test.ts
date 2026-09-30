@@ -8,7 +8,7 @@ import {
   matches,
   type PolicyError,
   parseDuration,
-  selectRule,
+  selectProfile,
 } from "../src/policy.js";
 import { ACCOUNT_ID, githubClaims, OWNER_ID, testPolicy } from "./helpers.js";
 
@@ -71,15 +71,15 @@ describe("loadPolicy", () => {
   it("accepts the example policy and applies defaults", () => {
     const p = loadPolicy(JSON.stringify(policy()));
     expect(p.github.issuer).toBe(DEFAULT_ISSUER);
-    const deploy = p.rules.find((r) => r.name === "workers-deploy");
+    const deploy = p.profiles.find((r) => r.name === "workers-deploy");
     expect(deploy?.ttl).toBe(15 * 60_000);
     expect(deploy?.max_ttl).toBe(60 * 60_000);
     expect(deploy?.policies[0]?.effect).toBe("allow");
   });
 
-  it("adds the owner pin to every rule", () => {
-    for (const rule of loadPolicy(policy()).rules) {
-      expect(rule.match.repository_owner_id).toBe(OWNER_ID);
+  it("adds the owner pin to every profile", () => {
+    for (const profile of loadPolicy(policy()).profiles) {
+      expect(profile.match.repository_owner_id).toBe(OWNER_ID);
     }
   });
 
@@ -92,10 +92,10 @@ describe("loadPolicy", () => {
   it("accepts unquoted numeric IDs from YAML", () => {
     const p = policy();
     p.github.owner_id = Number(OWNER_ID) as unknown as string;
-    (p.rules[0] as { match: Record<string, unknown> }).match.repository_id = 200000002;
+    (p.profiles[0] as { match: Record<string, unknown> }).match.repository_id = 200000002;
     const loaded = loadPolicy(p);
     expect(loaded.github.owner_id).toBe(OWNER_ID);
-    expect(loaded.rules[0]?.match.repository_id).toBe("200000002");
+    expect(loaded.profiles[0]?.match.repository_id).toBe("200000002");
   });
 
   it("rejects invalid JSON", () => {
@@ -119,15 +119,15 @@ describe("loadPolicy", () => {
       expect(issues(p).join()).toMatch(/owner_id: must be a numeric ID/);
     });
 
-    it("1: rejects a rule that overrides the owner pin", () => {
+    it("1: rejects a profile that overrides the owner pin", () => {
       const p = policy();
-      (p.rules[1]?.match as Record<string, string>).repository_owner_id = "999";
+      (p.profiles[1]?.match as Record<string, string>).repository_owner_id = "999";
       expect(issues(p).join()).toMatch(/conflicts with github.owner_id/);
     });
 
     it("2: rejects globs on ID claims", () => {
       const p = policy();
-      (p.rules[0]?.match as Record<string, string>).repository_id = "2000*";
+      (p.profiles[0]?.match as Record<string, string>).repository_id = "2000*";
       expect(issues(p).join()).toMatch(/repository_id: ID claims must be exact/);
     });
 
@@ -135,14 +135,14 @@ describe("loadPolicy", () => {
       "3: rejects granting %s",
       (permission) => {
         const p = policy();
-        p.rules[1]?.token.policies[0]?.permissions.push(permission);
+        p.profiles[1]?.token.policies[0]?.permissions.push(permission);
         expect(issues(p).join()).toMatch(/not grantable/);
       },
     );
 
     it("3: allows denying token-management permissions", () => {
       const p = policy();
-      p.rules[1]?.token.policies.push({
+      p.profiles[1]?.token.policies.push({
         effect: "deny",
         permissions: ["API Tokens Write"],
         resources: { [`com.cloudflare.api.account.${ACCOUNT_ID}`]: "*" },
@@ -152,7 +152,7 @@ describe("loadPolicy", () => {
 
     it("4: caps max_ttl at 24h", () => {
       const p = policy();
-      (p.rules[1]?.token as Record<string, unknown>).max_ttl = "25h";
+      (p.profiles[1]?.token as Record<string, unknown>).max_ttl = "25h";
       expect(issues(p).join()).toMatch(/max_ttl: must be at most 24h/);
     });
 
@@ -162,9 +162,9 @@ describe("loadPolicy", () => {
       expect(issues(p).join()).toMatch(/defaults.ttl: must not exceed max_ttl/);
     });
 
-    it("4: rejects a rule ttl above the default max_ttl", () => {
+    it("4: rejects a profile ttl above the default max_ttl", () => {
       const p = policy();
-      (p.rules[1]?.token as Record<string, unknown>).ttl = "2h";
+      (p.profiles[1]?.token as Record<string, unknown>).ttl = "2h";
       expect(issues(p).join()).toMatch(/ttl: must not exceed max_ttl/);
     });
 
@@ -187,16 +187,16 @@ describe("loadPolicy", () => {
     });
   });
 
-  it("rejects duplicate rule names", () => {
+  it("rejects duplicate profile names", () => {
     const p = policy();
-    p.rules.push({ ...(p.rules[1] as (typeof p.rules)[number]) });
-    expect(issues(p).join()).toMatch(/duplicate rule name/);
+    p.profiles.push({ ...(p.profiles[1] as (typeof p.profiles)[number]) });
+    expect(issues(p).join()).toMatch(/duplicate profile name/);
   });
 
   describe("resources", () => {
     const withResources = (resources: Record<string, unknown>) => {
       const p = policy();
-      (p.rules[1]?.token.policies[0] as { resources: unknown }).resources = resources;
+      (p.profiles[1]?.token.policies[0] as { resources: unknown }).resources = resources;
       return p;
     };
 
@@ -235,55 +235,55 @@ describe("loadPolicy", () => {
   it("reports every problem at once", () => {
     const p = policy();
     p.defaults = { ttl: "2h", max_ttl: "30h" };
-    (p.rules[0]?.match as Record<string, string>).repository_id = "*";
+    (p.profiles[0]?.match as Record<string, string>).repository_id = "*";
     expect(issues(p).length).toBeGreaterThanOrEqual(3);
   });
 });
 
 describe("matching", () => {
   const loaded = loadPolicy(policy());
-  const rule = (name: string) => loaded.rules.find((r) => r.name === name) as (typeof loaded.rules)[number];
+  const profile = (name: string) => loaded.profiles.find((r) => r.name === name) as (typeof loaded.profiles)[number];
 
   it("ANDs every match key", () => {
-    expect(matches(rule("workers-deploy"), githubClaims())).toBe(true);
-    expect(matches(rule("workers-deploy"), githubClaims({ environment: "staging" }))).toBe(false);
+    expect(matches(profile("workers-deploy"), githubClaims())).toBe(true);
+    expect(matches(profile("workers-deploy"), githubClaims({ environment: "staging" }))).toBe(false);
   });
 
   it("requires the owner pin", () => {
-    expect(matches(rule("workers-deploy"), githubClaims({ repository_owner_id: "999" }))).toBe(false);
+    expect(matches(profile("workers-deploy"), githubClaims({ repository_owner_id: "999" }))).toBe(false);
   });
 
   it("fails when a matched claim is missing", () => {
     const { environment: _, ...claims } = githubClaims();
-    expect(matches(rule("workers-deploy"), claims)).toBe(false);
+    expect(matches(profile("workers-deploy"), claims)).toBe(false);
   });
 
   it("compares ID claims exactly", () => {
-    expect(matches(rule("infra-cloudflare"), githubClaims({ repository_id: "200000002" }))).toBe(true);
-    expect(matches(rule("infra-cloudflare"), githubClaims({ repository_id: "2000000021" }))).toBe(false);
+    expect(matches(profile("infra-cloudflare"), githubClaims({ repository_id: "200000002" }))).toBe(true);
+    expect(matches(profile("infra-cloudflare"), githubClaims({ repository_id: "2000000021" }))).toBe(false);
   });
 
-  it("selects the single matching rule", () => {
-    expect(selectRule(loaded, githubClaims()).name).toBe("workers-deploy");
+  it("selects the single matching profile", () => {
+    expect(selectProfile(loaded, githubClaims()).name).toBe("workers-deploy");
   });
 
   it("denies when nothing matches", () => {
-    expect(denial(() => selectRule(loaded, githubClaims({ ref: "refs/heads/dev" })))).toBe("no_match");
+    expect(denial(() => selectProfile(loaded, githubClaims({ ref: "refs/heads/dev" })))).toBe("no_match");
   });
 
-  it("denies when several rules match and none is named", () => {
+  it("denies when several profiles match and none is named", () => {
     const claims = githubClaims({ repository: "example-org/infra", repository_id: "200000002" });
-    expect(denial(() => selectRule(loaded, claims))).toBe("ambiguous");
-    expect(selectRule(loaded, claims, "infra-cloudflare").name).toBe("infra-cloudflare");
+    expect(denial(() => selectProfile(loaded, claims))).toBe("ambiguous");
+    expect(selectProfile(loaded, claims, "infra-cloudflare").name).toBe("infra-cloudflare");
   });
 
-  it("denies a named rule that doesn't match", () => {
-    expect(denial(() => selectRule(loaded, githubClaims(), "infra-cloudflare"))).toBe("rule_mismatch");
-    expect(denial(() => selectRule(loaded, githubClaims(), "nope"))).toBe("rule_mismatch");
+  it("denies a named profile that doesn't match", () => {
+    expect(denial(() => selectProfile(loaded, githubClaims(), "infra-cloudflare"))).toBe("profile_mismatch");
+    expect(denial(() => selectProfile(loaded, githubClaims(), "nope"))).toBe("profile_mismatch");
   });
 
   it("clamps ttl to max_ttl and rejects nonsense", () => {
-    const r = rule("workers-deploy");
+    const r = profile("workers-deploy");
     expect(clampTTL(undefined, r)).toBe(15 * 60_000);
     expect(clampTTL("5m", r)).toBe(5 * 60_000);
     expect(clampTTL("10h", r)).toBe(60 * 60_000);

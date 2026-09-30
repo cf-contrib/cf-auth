@@ -22,7 +22,7 @@ steps:
   - uses: cf-contrib/cf-oidc-auth@v0.4.0 # x-release-please-version
     with:
       broker-url: https://cf-auth.example.com
-      rule: workers-deploy
+      profile: workers-deploy
   - run: npx wrangler deploy # CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID are set
 ```
 
@@ -45,8 +45,8 @@ sequenceDiagram
     Job->>OIDC: 1. request JWT (aud = broker URL)
     OIDC-->>Job: JWT
     Job->>Broker: POST /v1/token (Bearer JWT)
-    Broker->>Broker: 2. verify JWT, match policy rule
-    Broker->>CF: 3. tokens.create (rule's permissions, expires_on)
+    Broker->>Broker: 2. verify JWT, pick the matching profile
+    Broker->>CF: 3. tokens.create (profile's permissions, expires_on)
     CF-->>Broker: token
     Broker-->>Job: token
     Note over Job: 4. mask and export CLOUDFLARE_API_TOKEN<br/>later steps use it

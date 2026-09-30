@@ -54,7 +54,7 @@ export function startStub({
         token_id: STUB_TOKEN_ID,
         account_id: STUB_ACCOUNT_ID,
         expires_on: "2026-09-28T12:15:00Z",
-        rule: body?.rule ?? "default",
+        profile: body?.profile ?? "default",
         ...tokenFields,
       });
     }

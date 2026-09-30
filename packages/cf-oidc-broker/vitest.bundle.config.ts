@@ -18,7 +18,7 @@ export default defineConfig({
           CF_AUTH_BROKER_POLICY: JSON.stringify({
             version: 1,
             github: { audience: "https://cf-auth.example.com", owner_id: "100000001" },
-            rules: [
+            profiles: [
               {
                 name: "workers-deploy",
                 match: { repository_id: "200000002" },

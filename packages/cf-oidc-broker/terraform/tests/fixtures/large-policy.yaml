@@ -3,7 +3,7 @@ version: 1
 github:
   audience: https://cf-auth.example.com
   owner_id: "100000001"
-rules:
+profiles:
   - name: repo-00
     match:
       repository_id: "200000000"
