@@ -30,10 +30,6 @@ locals {
     account_id = var.account_id
     broker_url = local.broker_url
   }))))
-
-  # Cloudflare caps each Worker environment variable at 5 KB. Counted
-  # conservatively as 5,000 characters; the JSON is ASCII in practice.
-  policy_max_length = 5000
 }
 
 # Upload a new version on every artifact, policy or binding change.
@@ -48,11 +44,6 @@ resource "cloudflare_worker_version" "cf_auth" {
       condition     = var.broker_sha256 == null || sha256(local.broker_js) == var.broker_sha256
       error_message = "broker.js does not match broker_sha256."
     }
-
-    precondition {
-      condition     = length(local.policy_json) <= local.policy_max_length
-      error_message = "The policy is ${length(local.policy_json)} characters as JSON; Cloudflare allows ${local.policy_max_length} per binding. Split it across brokers or trim it."
-    }
   }
 
   modules = [
@@ -61,6 +52,13 @@ resource "cloudflare_worker_version" "cf_auth" {
       content_type   = "application/javascript+module"
       content_base64 = base64encode(local.broker_js)
     },
+    {
+      # Imported by broker.js. Uploaded as text, which the broker parses, since
+      # Workers has no JSON module type.
+      name           = "policy.json"
+      content_type   = "text/plain"
+      content_base64 = base64encode(local.policy_json)
+    },
   ]
 
   bindings = [
@@ -68,11 +66,6 @@ resource "cloudflare_worker_version" "cf_auth" {
       name = "CF_AUTH_BROKER_ACCOUNT_ID"
       type = "plain_text"
       text = var.account_id
-    },
-    {
-      name = "CF_AUTH_BROKER_POLICY"
-      type = "plain_text"
-      text = local.policy_json
     },
     {
       # Only ever from Secrets Store, so the token never enters Terraform state.

@@ -45,9 +45,10 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
    gh api orgs/<org> --jq .id           # github.owner_id
    gh api repos/<org>/<repo> --jq .id   # match.repository_id
    ```
-3. **Deploy** the released `broker.js` with the [Terraform module](terraform) (`//packages/cf-oidc-broker/terraform?ref=<version>`). It downloads the release (optionally pinned to a checksum) and sets up the bindings, the workers.dev URL (or an optional custom domain) and the cron. To build from source instead:
+3. **Deploy** the released `broker.js` with the [Terraform module](terraform) (`//packages/cf-oidc-broker/terraform?ref=<version>`). It downloads the release (optionally pinned to a checksum), uploads your policy next to it, and sets up the bindings, the workers.dev URL (or an optional custom domain) and the cron. To build from source instead:
    ```sh
-   wrangler deploy   # after setting CF_AUTH_BROKER_ACCOUNT_ID, CF_AUTH_BROKER_POLICY and [[secrets_store_secrets]] in wrangler.toml
+   cp src/policy.example.json src/policy.json   # then edit it; it isn't committed
+   wrangler deploy   # after setting CF_AUTH_BROKER_ACCOUNT_ID and [[secrets_store_secrets]] in wrangler.toml
    ```
 4. **Check** that `<broker-url>/healthz` returns `200` (`https://cf-auth.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or the broker token can't be read; the reasons are in Workers Logs.
 
@@ -56,10 +57,20 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 | Binding | Type | Required | Description |
 |---|---|---|---|
 | `CF_AUTH_BROKER_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
-| `CF_AUTH_BROKER_POLICY` | plain text (JSON) | yes | The policy. Terraform: `jsonencode(yamldecode(templatefile("policy.yaml", …)))`. A Wrangler `[vars]` table also works. |
 | `CF_AUTH_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with only Account API Tokens Write. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
 
 The hourly cron (`17 * * * *` in the examples) deletes expired `cf-auth:*` tokens.
+
+The policy isn't a binding. `broker.js` imports it from `policy.json`, a second
+file in the same Worker version, so it changes only with a deploy and rolls back
+with it:
+
+- The Terraform module renders your `policy.yaml` to JSON and uploads it as a
+  text module next to the release `broker.js`.
+- A `wrangler` build bundles `src/policy.json`. The build fails if it's missing.
+
+The policy is checked when an isolate first serves a request. An invalid one is a
+`500` on every route, with the reasons in the `policy.invalid` log line.
 
 ## Policy
 
@@ -212,7 +223,6 @@ Denials are `token.deny` with a `reason`:
 
 ## Limitations
 
-- **The policy must fit in 5 KB.** `CF_AUTH_BROKER_POLICY` is a Worker binding, and Cloudflare caps each at 5 KB, which is roughly 15–20 profiles. The Terraform module fails the plan if it's larger. Split large policies across brokers per team or trust domain.
 - **One account per broker.** Tokens are minted in `CF_AUTH_BROKER_ACCOUNT_ID` only. Deploy one broker per account.
 - **GitHub Actions only.** Other OIDC issuers (GitLab CI, Buildkite, …) aren't supported yet.
 - **No JWT replay cache.** A stolen JWT can be exchanged again until it expires. The custom audience and its short lifetime limit this.

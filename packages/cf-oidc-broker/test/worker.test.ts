@@ -3,7 +3,7 @@
 import { createExecutionContext, createScheduledController, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TokenResponse } from "../src/api.js";
-import worker, { type Env } from "../src/index.js";
+import { createBroker, type Env } from "../src/broker.js";
 import { clearCache } from "../src/resolve.js";
 import { tokenName } from "../src/tokens.js";
 import {
@@ -23,6 +23,7 @@ const ISSUER = `https://token.actions.githubusercontent.com/worker-test-${crypto
 let issuer: Awaited<ReturnType<typeof createIssuer>>;
 let cf: FakeCloudflare;
 let env: Env;
+let policyFile: unknown;
 let logs: string[];
 
 beforeAll(async () => {
@@ -35,9 +36,10 @@ beforeEach(() => {
   installFetch(issuer, cf);
   env = {
     CF_AUTH_BROKER_ACCOUNT_ID: ACCOUNT_ID,
-    CF_AUTH_BROKER_POLICY: JSON.stringify(testPolicy(ISSUER)),
     CF_AUTH_BROKER_TOKEN: { get: async () => BROKER_TOKEN },
   };
+  // policy.json as the Terraform module uploads it: JSON text.
+  policyFile = JSON.stringify(testPolicy(ISSUER));
   logs = [];
   const capture = (...args: unknown[]) => void logs.push(args.join(" "));
   vi.spyOn(console, "log").mockImplementation(capture);
@@ -58,6 +60,7 @@ async function call(method: string, path: string, init: { token?: string; body?:
     headers,
     ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
   });
+  const worker = createBroker(policyFile);
   return worker.fetch(request as Parameters<typeof worker.fetch>[0], env);
 }
 
@@ -183,13 +186,13 @@ describe("POST /v1/token", () => {
   );
 
   it("logs the profile count when the policy loads", async () => {
-    env.CF_AUTH_BROKER_POLICY = JSON.stringify({ ...testPolicy(ISSUER), defaults: { ttl: "10m" } }); // force a reload
+    policyFile = JSON.stringify({ ...testPolicy(ISSUER), defaults: { ttl: "10m" } }); // force a reload
     await call("GET", "/healthz");
     expect(auditLines().find((l) => l.event === "policy.loaded")).toEqual({ event: "policy.loaded", profiles: 3 });
   });
 
   it("500s, failing closed, when the policy is invalid", async () => {
-    env.CF_AUTH_BROKER_POLICY = JSON.stringify({
+    policyFile = JSON.stringify({
       ...testPolicy(ISSUER),
       github: { audience: "https://x.example.com" },
     });
@@ -201,7 +204,7 @@ describe("POST /v1/token", () => {
   it("500s when a permission name is unknown", async () => {
     const policy = testPolicy(ISSUER);
     (policy.profiles[1]?.token.policies[0] as { permissions: string[] }).permissions = ["Workers Scrpts Write"];
-    env.CF_AUTH_BROKER_POLICY = JSON.stringify(policy);
+    policyFile = JSON.stringify(policy);
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
     expect(res.status).toBe(500);
     expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({ reason: "unknown_permission" });
@@ -210,7 +213,7 @@ describe("POST /v1/token", () => {
   it("picks the right scope for a permission name shared by two groups", async () => {
     const policy = testPolicy(ISSUER);
     (policy.profiles[1]?.token.policies[0] as { permissions: string[] }).permissions = ["Load Balancers Write"];
-    env.CF_AUTH_BROKER_POLICY = JSON.stringify(policy);
+    policyFile = JSON.stringify(policy);
     const res = await call("POST", "/v1/token", { token: await issuer.sign() });
     const { token_id } = (await res.json()) as TokenResponse;
     expect(cf.tokens.get(token_id)?.policies[0]).toMatchObject({
@@ -221,7 +224,7 @@ describe("POST /v1/token", () => {
   it("picks the zone-scoped group for zone resources", async () => {
     const policy = testPolicy(ISSUER);
     (policy.profiles[0]?.token.policies[0] as { permissions: string[] }).permissions = ["Load Balancers Write"];
-    env.CF_AUTH_BROKER_POLICY = JSON.stringify(policy);
+    policyFile = JSON.stringify(policy);
     const claims = githubClaims({ repository: "example-org/infra", repository_id: "200000002" });
     const res = await call("POST", "/v1/token", {
       token: await issuer.sign(claims),
@@ -338,14 +341,14 @@ describe("GET /healthz", () => {
   });
 
   it("500s when the policy is invalid, without revealing it", async () => {
-    env.CF_AUTH_BROKER_POLICY = "{";
+    policyFile = "{";
     const res = await call("GET", "/healthz");
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "misconfigured" });
   });
 
-  it("accepts a policy passed as an object (wrangler [vars] table)", async () => {
-    env.CF_AUTH_BROKER_POLICY = testPolicy(ISSUER);
+  it("accepts an already-parsed policy (policy.json inlined by a bundler)", async () => {
+    policyFile = testPolicy(ISSUER);
     expect((await call("GET", "/healthz")).status).toBe(200);
   });
 });
@@ -364,7 +367,7 @@ describe("scheduled cleanup", () => {
     const foreign = cf.add({ name: "someone else's", expires_on: past, status: "expired" });
 
     const ctx = createExecutionContext();
-    await worker.scheduled(createScheduledController(), env, ctx);
+    await createBroker(policyFile).scheduled(createScheduledController(), env, ctx);
     await waitOnExecutionContext(ctx);
 
     expect(cf.tokens.has(expired.id)).toBe(false);

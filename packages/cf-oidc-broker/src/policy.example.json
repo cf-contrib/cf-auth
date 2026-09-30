@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "github": {
+    "audience": "http://localhost:8787",
+    "owner_id": "100000001"
+  },
+  "profiles": [
+    {
+      "name": "workers-deploy",
+      "match": {
+        "repository_id": "200000002",
+        "ref": "refs/heads/main"
+      },
+      "token": {
+        "policies": [
+          {
+            "effect": "allow",
+            "permissions": ["Workers Scripts Write"],
+            "resources": {
+              "com.cloudflare.api.account.00000000000000000000000000000000": "*"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

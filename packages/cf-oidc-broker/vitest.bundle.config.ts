@@ -1,7 +1,29 @@
 // Boots the release artifact (dist/broker.js) in workerd, to catch bundling
 // problems the source-level tests can't see. Run `pnpm build` first.
+import { writeFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+
+// dist/broker.js imports ./policy.json, which a deploy puts next to it.
+const policy = {
+  version: 1,
+  github: { audience: "https://cf-auth.example.com", owner_id: "100000001" },
+  profiles: [
+    {
+      name: "workers-deploy",
+      match: { repository_id: "200000002" },
+      token: {
+        policies: [
+          {
+            permissions: ["Workers Scripts Write"],
+            resources: { "com.cloudflare.api.account.0123456789abcdef0123456789abcdef": "*" },
+          },
+        ],
+      },
+    },
+  ],
+};
+writeFileSync("dist/policy.json", JSON.stringify(policy));
 
 export default defineConfig({
   plugins: [
@@ -15,24 +37,6 @@ export default defineConfig({
         },
         bindings: {
           CF_AUTH_BROKER_ACCOUNT_ID: "0123456789abcdef0123456789abcdef",
-          CF_AUTH_BROKER_POLICY: JSON.stringify({
-            version: 1,
-            github: { audience: "https://cf-auth.example.com", owner_id: "100000001" },
-            profiles: [
-              {
-                name: "workers-deploy",
-                match: { repository_id: "200000002" },
-                token: {
-                  policies: [
-                    {
-                      permissions: ["Workers Scripts Write"],
-                      resources: { "com.cloudflare.api.account.0123456789abcdef0123456789abcdef": "*" },
-                    },
-                  ],
-                },
-              },
-            ],
-          }),
         },
       },
     }),
