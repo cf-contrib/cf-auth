@@ -17,8 +17,18 @@ export const STUB_BUCKET = {
   endpoint: `https://${STUB_ACCOUNT_ID}.r2.cloudflarestorage.com`,
   expires_on: "2026-09-28T12:15:00Z",
 };
+export const STUB_BUCKET_2 = {
+  ...STUB_BUCKET,
+  name: "org-artifacts",
+  access_key_id: "stub-r2-access-key-id-2",
+  secret_access_key: "stub-r2-secret-access-key-2",
+  session_token: "stub-r2-session-token-2",
+  prefixes: [],
+};
 /** A profile the stub answers as one with only buckets: no token, just STUB_BUCKET. */
 export const STUB_R2_PROFILE = "smoke-r2";
+/** A profile the stub answers as one with two buckets and no token. */
+export const STUB_R2_PROFILE_2 = "smoke-r2-multi";
 
 /**
  * @typedef {{ method: string, path: string, authorization?: string, body?: unknown }} Call
@@ -63,6 +73,14 @@ export function startStub({
       const common = { account_id: STUB_ACCOUNT_ID, expires_on: "2026-09-28T12:15:00Z" };
       if (body?.profile === STUB_R2_PROFILE) {
         return send(200, { ...common, profile: STUB_R2_PROFILE, buckets: [STUB_BUCKET], ...tokenFields });
+      }
+      if (body?.profile === STUB_R2_PROFILE_2) {
+        return send(200, {
+          ...common,
+          profile: STUB_R2_PROFILE_2,
+          buckets: [STUB_BUCKET, STUB_BUCKET_2],
+          ...tokenFields,
+        });
       }
       return send(200, {
         token: STUB_TOKEN,

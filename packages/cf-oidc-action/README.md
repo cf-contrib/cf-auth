@@ -60,13 +60,13 @@ A floating `v1` tag will follow each release from 1.0 on.
   - asks the broker for a Cloudflare token (not retried, because minting isn't idempotent);
   - masks the token and the OIDC token;
   - exports `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` for the rest of the job. For a profile with only `buckets` there's no token, and only `CLOUDFLARE_ACCOUNT_ID` is exported;
-  - when the profile has `buckets`, also exports [S3 credentials](#r2-over-the-s3-api) (`AWS_*`) and masks the secret and the session token;
+  - when the profile has `buckets`, also writes [S3 credentials](#r2-over-the-s3-api) as one AWS profile per bucket, exports them, and masks the secrets and session tokens;
   - logs the token ID, profile and expiry (none of them secret), so a run can be matched to the broker's audit log:
     ```
     cf-oidc: minted token 3f2a… (profile workers-deploy, expires 2026-09-28T12:15:00Z)
     cf-oidc: issued R2 credentials for bucket org-terraform-state under 100000001/200000003/ (profile terraform-state, expires 2026-09-28T12:15:00Z)
     ```
-- **Post step:** revokes the token, if there is one. It runs even when the job fails. A failed revoke is a warning, not an error: the token expires on its own and the broker's cron deletes it. R2 credentials can't be revoked; the post step logs when they expire.
+- **Post step:** revokes the token, if there is one, and deletes the R2 credentials file. It runs even when the job fails. A failed revoke is a warning, not an error: the token expires on its own and the broker's cron deletes it. R2 credentials can't be revoked; the post step logs when they expire.
 
 None of this can be switched off: what's exported is decided by the profile. Exported values are also in the `env` context, so actions that take credentials as inputs can use `${{ env.CLOUDFLARE_API_TOKEN }}`.
 
@@ -100,20 +100,24 @@ None of this can be switched off: what's exported is decided by the profile. Exp
 
 ### R2 over the S3 API
 
-When the matched profile has [`buckets`](../cf-oidc-broker#buckets), the broker returns temporary R2 credentials for the bucket, limited to its key prefixes. The action exports them for S3 tools:
+When the matched profile has [`buckets`](../cf-oidc-broker#buckets), the broker returns temporary R2 credentials for each bucket, limited to its key prefixes. The action writes them to a credentials file, `$RUNNER_TEMP/cf-oidc/credentials` (mode `0600`), with one AWS profile per bucket, named after it. It exports:
 
-| Variable | Value |
-|---|---|
-| `AWS_ACCESS_KEY_ID` | the access key ID (not secret, not masked) |
-| `AWS_SECRET_ACCESS_KEY` | the secret access key, masked |
-| `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN` | the session token, masked. botocore still reads the legacy name |
-| `AWS_ENDPOINT_URL_S3` | `https://<account_id>.r2.cloudflarestorage.com` |
-| `AWS_REGION`, `AWS_DEFAULT_REGION` | `auto` |
-| `CLOUDFLARE_R2_BUCKET` | the bucket's name |
-| `CLOUDFLARE_R2_PREFIX` | the filled-in prefix, e.g. `100000001/200000003/`. Only when the bucket has exactly one |
+| Variable | One bucket | Several buckets |
+|---|---|---|
+| `AWS_SHARED_CREDENTIALS_FILE` | the credentials file | the same |
+| `AWS_ENDPOINT_URL_S3` | `https://<account_id>.r2.cloudflarestorage.com` | the same |
+| `AWS_REGION`, `AWS_DEFAULT_REGION` | `auto` | the same |
+| `CLOUDFLARE_R2_BUCKETS` | JSON mapping each bucket to its filled-in prefixes, e.g. `{"org-terraform-state":["100000001/200000003/"]}` | the same |
+| `AWS_ACCESS_KEY_ID` | the bucket's access key ID (not secret, not masked) | empty |
+| `AWS_SECRET_ACCESS_KEY` | the bucket's secret access key, masked | empty |
+| `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN` | the bucket's session token, masked. botocore still reads the legacy name | empty |
+| `CLOUDFLARE_R2_BUCKET` | the bucket's name | empty |
+| `CLOUDFLARE_R2_PREFIX` | the filled-in prefix, e.g. `100000001/200000003/`, if the bucket has exactly one | empty |
 
-- **The policy decides when `AWS_*` is replaced.** These overwrite any `AWS_*` credentials already set in the job, for every workflow matching a profile with `buckets`, including one that doesn't set `profile`. Always set `profile` for R2, and give a job that also talks to AWS its R2 access in a separate job.
-- **No revocation.** The credentials last as long as the profile's `ttl` (or the requested `ttl`, capped at `max_ttl`), so keep it short.
+- **One bucket:** S3 tools work without a profile. The bucket's profile works too.
+- **Several buckets:** there are no default credentials, so every step names its bucket's profile: `aws --profile org-artifacts …`, `AWS_PROFILE` on the step, or the s3 backend's `profile` argument. A step that forgets fails with "Unable to locate credentials", not with credentials left by an earlier step. A workflow that names its profile keeps working when a bucket is added to the profile later.
+- **The policy decides when `AWS_*` is replaced.** The credentials overwrite any `AWS_*` credentials already set in the job, for every workflow matching a profile with `buckets`, including one that doesn't set `profile`. Always set `profile` for R2, and give a job that also talks to AWS its R2 access in a separate job.
+- **No revocation.** The credentials last as long as the profile's `ttl` (or the requested `ttl`, capped at `max_ttl`), so keep it short. The post step deletes the credentials file.
 
 ### Two scopes: two jobs
 

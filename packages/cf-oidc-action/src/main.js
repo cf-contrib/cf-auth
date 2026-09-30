@@ -2,6 +2,9 @@
 /** @typedef {import("../../cf-oidc-broker/src/api.js").TokenRequest} TokenRequest */
 /** @typedef {import("../../cf-oidc-broker/src/api.js").TokenResponse} TokenResponse */
 /** @typedef {import("../../cf-oidc-broker/src/api.js").ErrorResponse} ErrorResponse */
+/** @typedef {import("../../cf-oidc-broker/src/api.js").BucketCredentials} BucketCredentials */
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { brokerURL, fail, idToken, input, mask, write } from "./runner.js";
 
 /** Hints for the statuses a misconfigured workflow or policy usually produces. */
@@ -10,6 +13,9 @@ const HINTS = /** @type {Record<number, string>} */ ({
   403: "no profile allows this workflow; the broker's audit log has the reason",
   500: "the broker is misconfigured; check its /healthz and logs",
 });
+
+/** R2's bucket name rules. The name becomes a section header in the credentials file. */
+const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
 
 /**
  * Fails unless every field is a non-empty string, rather than export "undefined".
@@ -62,11 +68,12 @@ try {
     if (!Array.isArray(b.prefixes)) {
       throw new Error(`cf-oidc broker returned an invalid response: missing buckets.${i}.prefixes`);
     }
+    // Written into an INI file, so nothing may break out of its line or section.
+    const secrets = [b.access_key_id, b.secret_access_key, b.session_token];
+    if (!BUCKET_NAME.test(b.name) || secrets.some((v) => /\s/.test(v))) {
+      throw new Error(`cf-oidc broker returned an invalid response: malformed buckets.${i}`);
+    }
   });
-  // AWS_* holds one set of credentials. Checked before exporting anything.
-  if (buckets.length > 1) {
-    throw new Error(`profile ${t.profile} has ${buckets.length} buckets; this version of the action exports one`);
-  }
   if (t.token === undefined && buckets.length === 0) {
     throw new Error("cf-oidc broker returned an invalid response: missing token and buckets");
   }
@@ -80,28 +87,55 @@ try {
     console.log(`cf-oidc: minted token ${t.token_id} (profile ${t.profile}, expires ${t.expires_on})`);
   }
 
-  const bucket = buckets[0];
-  if (bucket !== undefined) {
-    mask(bucket.secret_access_key);
-    mask(bucket.session_token);
-    // These replace any AWS credentials an earlier step left in the job.
-    write("GITHUB_ENV", "AWS_ACCESS_KEY_ID", bucket.access_key_id);
-    write("GITHUB_ENV", "AWS_SECRET_ACCESS_KEY", bucket.secret_access_key);
-    // botocore still reads the legacy name.
-    write("GITHUB_ENV", "AWS_SESSION_TOKEN", bucket.session_token);
-    write("GITHUB_ENV", "AWS_SECURITY_TOKEN", bucket.session_token);
-    write("GITHUB_ENV", "AWS_ENDPOINT_URL_S3", bucket.endpoint);
+  if (buckets.length > 0) {
+    for (const b of buckets) {
+      mask(b.secret_access_key);
+      mask(b.session_token);
+    }
+    // One profile per bucket, named after it. Region and endpoint stay in the environment:
+    // every bucket in the account has the same endpoint.
+    const runnerTemp = process.env.RUNNER_TEMP;
+    if (!runnerTemp) throw new Error("RUNNER_TEMP is not set; is this running in GitHub Actions?");
+    const dir = join(runnerTemp, "cf-oidc");
+    const file = join(dir, "credentials");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const profiles = buckets.map(
+      (b) =>
+        `[${b.name}]\naws_access_key_id = ${b.access_key_id}\naws_secret_access_key = ${b.secret_access_key}\naws_session_token = ${b.session_token}\n`,
+    );
+    writeFileSync(file, profiles.join("\n"), { mode: 0o600 });
+    chmodSync(file, 0o600); // an existing file keeps its old mode otherwise
+    write("GITHUB_STATE", "credentials_file", file); // deleted by post.js
+
+    write("GITHUB_ENV", "AWS_SHARED_CREDENTIALS_FILE", file);
+    write("GITHUB_ENV", "AWS_ENDPOINT_URL_S3", /** @type {BucketCredentials} */ (buckets[0]).endpoint);
     write("GITHUB_ENV", "AWS_REGION", "auto");
     write("GITHUB_ENV", "AWS_DEFAULT_REGION", "auto");
-    write("GITHUB_ENV", "CLOUDFLARE_R2_BUCKET", bucket.name);
-    if (bucket.prefixes.length === 1) {
-      write("GITHUB_ENV", "CLOUDFLARE_R2_PREFIX", /** @type {string} */ (bucket.prefixes[0]));
+    const prefixes = Object.fromEntries(buckets.map((b) => [b.name, b.prefixes]));
+    write("GITHUB_ENV", "CLOUDFLARE_R2_BUCKETS", JSON.stringify(prefixes));
+
+    // With one bucket, its credentials are also the default, so tools work without a
+    // profile. With several there's no sensible default: clear the credentials, so a step
+    // that forgets its profile fails instead of using ones an earlier step left behind.
+    // Empty means unset to the AWS CLI and SDKs; botocore still reads the legacy name.
+    const only = buckets.length === 1 ? buckets[0] : undefined;
+    write("GITHUB_ENV", "AWS_ACCESS_KEY_ID", only?.access_key_id ?? "");
+    write("GITHUB_ENV", "AWS_SECRET_ACCESS_KEY", only?.secret_access_key ?? "");
+    write("GITHUB_ENV", "AWS_SESSION_TOKEN", only?.session_token ?? "");
+    write("GITHUB_ENV", "AWS_SECURITY_TOKEN", only?.session_token ?? "");
+    write("GITHUB_ENV", "CLOUDFLARE_R2_BUCKET", only?.name ?? "");
+    // Only meaningful for exactly one prefix; CLOUDFLARE_R2_BUCKETS has them all.
+    write("GITHUB_ENV", "CLOUDFLARE_R2_PREFIX", only?.prefixes.length === 1 ? (only.prefixes[0] ?? "") : "");
+
+    // Every bucket is issued with the same TTL; the post step reports the earliest expiry.
+    const expires = buckets.map((b) => b.expires_on).sort()[0];
+    write("GITHUB_STATE", "r2_expires_on", /** @type {string} */ (expires));
+    for (const b of buckets) {
+      const scope = b.prefixes.length > 0 ? ` under ${b.prefixes.join(", ")}` : "";
+      console.log(
+        `cf-oidc: issued R2 credentials for bucket ${b.name}${scope} as AWS profile ${b.name} (profile ${t.profile}, expires ${b.expires_on})`,
+      );
     }
-    write("GITHUB_STATE", "r2_expires_on", bucket.expires_on);
-    const scope = bucket.prefixes.length > 0 ? ` under ${bucket.prefixes.join(", ")}` : "";
-    console.log(
-      `cf-oidc: issued R2 credentials for bucket ${bucket.name}${scope} (profile ${t.profile}, expires ${bucket.expires_on})`,
-    );
   }
 } catch (err) {
   fail(err);

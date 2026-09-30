@@ -114,10 +114,8 @@ const Profile = v.strictObject({
       policies: v.pipe(v.array(TokenPolicy), v.minLength(1)),
     }),
   ),
-  // Each bucket gets its own credentials, which the action can only export one set of yet.
-  buckets: v.optional(
-    v.pipe(v.array(Bucket), v.minLength(1), v.maxLength(1, "only one bucket per profile is supported yet")),
-  ),
+  // Each bucket gets its own credentials, which the action exports as an AWS profile named after it.
+  buckets: v.optional(v.pipe(v.array(Bucket), v.minLength(1))),
 });
 
 const PolicySchema = v.strictObject({
@@ -251,7 +249,11 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       }
     });
 
+    const bucketNames = new Set<string>();
     buckets?.forEach((bucket, j) => {
+      // The name is also the AWS profile's, so it can only appear once.
+      if (bucketNames.has(bucket.name)) issues.push(`${at}.buckets.${j}.name: duplicate bucket ${bucket.name}`);
+      bucketNames.add(bucket.name);
       bucket.prefixes.forEach((prefix, k) => {
         const problem = templateProblem(prefix);
         if (problem) issues.push(`${at}.buckets.${j}.prefixes.${k}: ${problem}`);

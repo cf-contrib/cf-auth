@@ -178,7 +178,7 @@ Each entry in `buckets` gets the job [temporary R2 credentials](https://develope
         prefixes: ["github.com/{repository}/"]
 ```
 
-- **One bucket per profile for now**, because the action can only export one set of `AWS_*` credentials.
+- **Several buckets** each get their own credentials, and the action exports each one as an AWS profile named after the bucket. A bucket can appear only once per profile.
 
 - **Placeholders** are `{claim}`, not `${claim}`, so Terraform's `templatefile` leaves them alone. Only `{repository}`, `{repository_owner}`, `{repository_id}` and `{repository_owner_id}` are allowed. They're filled in from the verified JWT, never from the request.
 - **Prefixes** must end in `/`, so `github.com/org/site/` doesn't also cover `github.com/org/site-old/`. They can't start with `/` or contain `*`, `..`, empty or `.` segments, or control characters, and each placeholder must be a whole path segment (`tfstate/{repository_id}/`, not `tfstate-{repository_id}/`), so two repos can never end up with the same prefix. These are checked when the policy loads.
@@ -189,11 +189,11 @@ Each entry in `buckets` gets the job [temporary R2 credentials](https://develope
 - **With both** `token` and `buckets`, the broker mints the token first. If the credentials then can't be created, it deletes the token and replies `502`.
 
 > [!WARNING]
-> **The policy decides when a job's `AWS_*` variables are replaced.** The action exports the credentials as `AWS_*` whenever the matched profile has `buckets`, including for workflows that don't set `profile`. Set `profile` for R2 in every workflow, and give a job that also talks to AWS its R2 access in a separate job.
+> **The policy decides when a job's `AWS_*` variables are replaced.** The action exports the credentials, and replaces or clears `AWS_*`, whenever the matched profile has `buckets`, including for workflows that don't set `profile`. Set `profile` for R2 in every workflow, and give a job that also talks to AWS its R2 access in a separate job.
 
 **Renamed and reused repo names.** A prefix built from `{repository}` moves when the repo is renamed, and a deleted repo's name can be taken by a new repo in the org, which would then get the old repo's state. `{repository_owner_id}/{repository_id}/` doesn't change on a rename and is never reused.
 
-**What `buckets` doesn't cover yet:** several buckets in one job, and admin operations such as creating or listing buckets. For those, grant R2 permissions in the profile's `token` and derive S3 credentials from `CLOUDFLARE_API_TOKEN` in a step: the access key ID is the token's ID, and the secret is the SHA-256 of the token value. Buckets in a jurisdiction (`eu`, `fedramp`) need a different endpoint than the one the broker returns.
+**What `buckets` doesn't cover:** admin operations such as creating or listing buckets. For those, grant R2 permissions in the profile's `token` and derive S3 credentials from `CLOUDFLARE_API_TOKEN` in a step: the access key ID is the token's ID, and the secret is the SHA-256 of the token value. Buckets in a jurisdiction (`eu`, `fedramp`) need a different endpoint than the one the broker returns.
 
 ### TTL and names
 
