@@ -11,6 +11,7 @@ import { brokerURL, fail, idToken, input, mask, write } from "./runner.js";
 const HINTS = /** @type {Record<number, string>} */ ({
   401: "the broker rejected the OIDC token; check that broker-url matches github.audience in the policy",
   403: "no profile allows this workflow; the broker's audit log has the reason",
+  404: "the broker doesn't serve /v1/actions/token; deploy the broker from the same release as the action",
   500: "the broker is misconfigured; check its /healthz and logs",
 });
 
@@ -39,7 +40,7 @@ try {
   const body = { profile: input("profile") || undefined, ttl: input("ttl") || undefined };
 
   // No retry: minting isn't idempotent. A token orphaned by a failed request is removed by the broker's cron cleanup.
-  const response = await fetch(new URL("/v1/token", broker), {
+  const response = await fetch(new URL("/v1/actions/token", broker), {
     method: "POST",
     headers: { authorization: `Bearer ${jwt}`, "content-type": "application/json" },
     body: JSON.stringify(body),

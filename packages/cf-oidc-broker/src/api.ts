@@ -1,7 +1,7 @@
 // The broker's /v1 HTTP contract. The action type-checks against this file, so it
 // must stay free of runtime code and Workers-specific types.
 
-/** Body of `POST /v1/token`. */
+/** Body of `POST /v1/actions/token`, which a GitHub Actions job calls with its OIDC token. */
 export interface TokenRequest {
   /** Profile to use. If omitted, exactly one profile must match the caller's claims. */
   profile?: string | undefined;
@@ -9,7 +9,16 @@ export interface TokenRequest {
   ttl?: string | undefined;
 }
 
-/** `200` response of `POST /v1/token`. */
+/** Body of `POST /v1/users/token`, which a person calls with their GitHub user token. */
+export interface UserTokenRequest extends TokenRequest {
+  /**
+   * Repo to get credentials for: `owner/name` or its numeric ID. The broker checks the
+   * caller's role on it, and fills in bucket prefixes from what GitHub returns for it.
+   */
+  repository: string;
+}
+
+/** `200` response of `POST /v1/actions/token` and `POST /v1/users/token`. */
 export interface TokenResponse {
   /** Absent for a profile with only `buckets`, like `token_id`. */
   token?: string;

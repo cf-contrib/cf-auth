@@ -1,19 +1,28 @@
 import Cloudflare, { AuthenticationError, BadRequestError, NotFoundError, PermissionDeniedError } from "cloudflare";
 import { audit } from "./audit.js";
 import { HttpError } from "./errors.js";
-import type { Claims, TokenPolicy } from "./policy.js";
+import type { Claims, Subject, TokenPolicy } from "./policy.js";
 import { resolvePolicies } from "./resolve.js";
 
 /** Every minted token's name starts with this. Revoke and cleanup never touch anything else. */
 export const TOKEN_PREFIX = "cf-oidc:";
 const NAME_MAX = 120;
 
-/** `cf-oidc:<repo>:<run_id>:<attempt>`, truncating the repo so the name fits in 120 chars. */
-export function tokenName(claims: Claims): string {
+/**
+ * `cf-oidc:<repo>:<run_id>:<attempt>` for a job and `cf-oidc:user:<login>:<repo>` for a
+ * person, truncating the repo so the name fits in 120 chars. A repo name can't contain
+ * `:`, so the two never collide.
+ */
+export function tokenName(claims: Claims, subject: Subject): string {
   const str = (key: string) => (typeof claims[key] === "string" ? (claims[key] as string) : "");
+  const repo = str("repository") || "unknown";
+  if (subject === "user") {
+    const who = `user:${str("actor") || "unknown"}:`;
+    return `${TOKEN_PREFIX}${who}${repo.slice(0, NAME_MAX - TOKEN_PREFIX.length - who.length)}`;
+  }
   const run = `:${str("run_id") || "0"}:${str("run_attempt") || "0"}`;
   const room = NAME_MAX - TOKEN_PREFIX.length - run.length;
-  return `${TOKEN_PREFIX}${(str("repository") || "unknown").slice(0, room)}${run}`;
+  return `${TOKEN_PREFIX}${repo.slice(0, room)}${run}`;
 }
 
 /** RFC 3339 without fractional seconds, which is what the tokens API accepts. */
@@ -32,14 +41,14 @@ export async function mint(
   cf: Cloudflare,
   accountId: string,
   policies: TokenPolicy[],
-  claims: Claims,
+  name: string,
   ttl: number,
 ): Promise<MintedToken> {
   const resolved = await resolvePolicies(cf, accountId, policies);
   const expires_on = rfc3339(Date.now() + ttl);
 
   const token = await cf.accounts.tokens.create(
-    { account_id: accountId, name: tokenName(claims), policies: resolved, expires_on },
+    { account_id: accountId, name, policies: resolved, expires_on },
     { maxRetries: 0 },
   );
   if (!token.id || !token.value) {

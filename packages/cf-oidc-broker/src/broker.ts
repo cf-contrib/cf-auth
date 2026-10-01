@@ -1,11 +1,21 @@
 import Cloudflare, { CloudflareError } from "cloudflare";
-import type { BucketCredentials, ErrorResponse, TokenRequest, TokenResponse } from "./api.js";
+import type { BucketCredentials, ErrorResponse, TokenResponse, UserTokenRequest } from "./api.js";
 import { audit } from "./audit.js";
 import { HttpError } from "./errors.js";
+import { REPOSITORY, verifyGitHubUser } from "./github.js";
 import { bearer, verifyGitHubJWT } from "./jwt.js";
-import { type Claims, clampTTL, loadPolicy, type Policy, PolicyError, r2Prefixes, selectProfile } from "./policy.js";
+import {
+  type Claims,
+  clampTTL,
+  loadPolicy,
+  type Policy,
+  PolicyError,
+  r2Prefixes,
+  type Subject,
+  selectProfile,
+} from "./policy.js";
 import { issueR2 } from "./r2.js";
-import { cleanup, discard, type MintedToken, mint, revoke } from "./tokens.js";
+import { cleanup, discard, type MintedToken, mint, revoke, tokenName } from "./tokens.js";
 
 export interface Env {
   /** Account the broker token belongs to and tokens are minted in. */
@@ -80,9 +90,13 @@ function failure(err: unknown): Response {
   return json(500, { error: "internal" } satisfies ErrorResponse);
 }
 
-async function readTokenRequest(request: Request): Promise<TokenRequest> {
+/** Reads the body of either token route. `repository` is only read, and then required, for people. */
+async function readTokenRequest(request: Request, subject: Subject): Promise<Partial<UserTokenRequest>> {
   const text = await request.text();
-  if (text.trim() === "") return {};
+  if (text.trim() === "") {
+    if (subject === "user") throw new HttpError("bad_request", "invalid_body", "repository is required");
+    return {};
+  }
   let body: unknown;
   try {
     body = JSON.parse(text);
@@ -100,19 +114,45 @@ async function readTokenRequest(request: Request): Promise<TokenRequest> {
   if ((profile?.length ?? 0) > 64 || (ttl?.length ?? 0) > 16) {
     throw new HttpError("bad_request", "invalid_body", "profile or ttl too long");
   }
-  return { profile, ttl };
+  if (subject === "actions") return { profile, ttl };
+
+  const { repository } = body as Record<string, unknown>;
+  if (typeof repository !== "string" || repository.length > 200 || !REPOSITORY.test(repository)) {
+    throw new HttpError("bad_request", "invalid_body", "repository must be owner/name or a numeric ID");
+  }
+  return { profile, ttl, repository };
 }
 
-async function handleToken(request: Request, env: Env, raw: unknown): Promise<Response> {
+/** Authenticates the caller of a token route, and returns their claims and request. */
+async function authenticate(request: Request, policy: Policy, subject: Subject) {
+  if (subject === "actions") {
+    const claims = await verifyGitHubJWT(bearer(request), policy.github);
+    return { claims, req: await readTokenRequest(request, subject) };
+  }
+
+  // A broker without user profiles serves no people, so it doesn't call GitHub for them.
+  const users = policy.profiles.filter((p) => p.subject === "user");
+  if (users.length === 0) throw new HttpError("not_found", "no_user_profiles");
+  const token = bearer(request, "invalid_user_token");
+  // The body first: a malformed request costs no GitHub calls.
+  const req = await readTokenRequest(request, subject);
+  // Teams cost extra GitHub calls, so they're only looked up if a profile that could match needs them.
+  const candidates = req.profile === undefined ? users : users.filter((p) => p.name === req.profile);
+  const teams = candidates.some((p) => p.match.team_id !== undefined);
+  const claims = await verifyGitHubUser(token, req.repository as string, { ownerId: policy.github.owner_id, teams });
+  return { claims, req };
+}
+
+async function handleToken(request: Request, env: Env, raw: unknown, subject: Subject): Promise<Response> {
   let claims: Claims | undefined;
   let profile: string | undefined;
   try {
     const policy = config(raw, env);
-    claims = await verifyGitHubJWT(bearer(request), policy.github);
-
-    const req = await readTokenRequest(request);
+    const caller = await authenticate(request, policy, subject);
+    claims = caller.claims;
+    const { req } = caller;
     profile = req.profile;
-    const selected = selectProfile(policy, claims, req.profile);
+    const selected = selectProfile(policy, subject, claims, req.profile);
     profile = selected.name;
     const ttl = clampTTL(req.ttl, selected);
     // Filled in before anything is minted, so an unusable claim leaves nothing behind.
@@ -123,8 +163,8 @@ async function handleToken(request: Request, env: Env, raw: unknown): Promise<Re
     const accountId = env.CF_OIDC_BROKER_ACCOUNT_ID;
     let token: MintedToken | undefined;
     if (selected.policies) {
-      token = await mint(cf, accountId, selected.policies, claims, ttl);
-      audit("token.mint", { profile, claims, token_id: token.token_id, expires_on: token.expires_on });
+      token = await mint(cf, accountId, selected.policies, tokenName(claims, subject), ttl);
+      audit("token.mint", { subject, profile, claims, token_id: token.token_id, expires_on: token.expires_on });
     }
 
     const issued: BucketCredentials[] = [];
@@ -139,6 +179,7 @@ async function handleToken(request: Request, env: Env, raw: unknown): Promise<Re
         throw err;
       }
       audit("r2.issued", {
+        subject,
         profile,
         claims,
         bucket: creds.name,
@@ -160,9 +201,9 @@ async function handleToken(request: Request, env: Env, raw: unknown): Promise<Re
     } satisfies TokenResponse);
   } catch (err) {
     if (err instanceof HttpError) {
-      audit("token.deny", { profile, claims, reason: err.reason, detail: err.detail });
+      audit("token.deny", { subject, profile, claims, reason: err.reason, detail: err.detail });
     } else if (err instanceof CloudflareError) {
-      audit("token.deny", { profile, claims, reason: "cloudflare_error", detail: err.message });
+      audit("token.deny", { subject, profile, claims, reason: "cloudflare_error", detail: err.message });
     }
     return failure(err);
   }
@@ -192,8 +233,10 @@ export function createBroker(policy: unknown) {
       const { pathname } = new URL(request.url);
       const route = `${request.method} ${pathname}`;
       switch (route) {
-        case "POST /v1/token":
-          return handleToken(request, env, policy);
+        case "POST /v1/actions/token":
+          return handleToken(request, env, policy, "actions");
+        case "POST /v1/users/token":
+          return handleToken(request, env, policy, "user");
         case "POST /v1/revoke":
           return handleRevoke(request, env, policy);
         case "GET /healthz":

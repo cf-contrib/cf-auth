@@ -31,7 +31,9 @@ steps:
 | [Action](packages/cf-oidc-action) | `uses: cf-contrib/cf-oidc-auth@<version>` | Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. No runtime dependencies. |
 | [Broker](packages/cf-oidc-broker) | `broker.js` in [Releases](https://github.com/cf-contrib/cf-oidc-auth/releases) | A Worker in your account that checks the OIDC token against your policy and mints the Cloudflare token. |
 
-The action and the broker, with its Terraform module, are released together from one tag. The action talks only to the broker, never to the Cloudflare API.
+The action and the broker, with its Terraform module, are released together from one tag, so deploy the broker from the release whose action you use. The action talks only to the broker, never to the Cloudflare API.
+
+People can get credentials too, for example to run `tofu plan` locally against the shared state bucket. [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare) sends their `gh auth token` to the broker, which checks their role on the repo with GitHub and matches [`subject: user` profiles](packages/cf-oidc-broker#people).
 
 ## How it works
 
@@ -44,7 +46,7 @@ sequenceDiagram
 
     Job->>OIDC: 1. request JWT (aud = broker URL)
     OIDC-->>Job: JWT
-    Job->>Broker: POST /v1/token (Bearer JWT)
+    Job->>Broker: POST /v1/actions/token (Bearer JWT)
     Broker->>Broker: 2. verify JWT, pick the matching profile
     Broker->>CF: 3. tokens.create (profile's permissions, expires_on)
     CF-->>Broker: token

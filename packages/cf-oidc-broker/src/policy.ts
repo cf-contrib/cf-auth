@@ -40,6 +40,32 @@ const PREFIX_CLAIMS = {
 } as const;
 type PrefixClaim = keyof typeof PREFIX_CLAIMS;
 
+/** Who a profile is for: GitHub Actions jobs (OIDC JWT) or people (GitHub user token). */
+export type Subject = "actions" | "user";
+
+/**
+ * GitHub's repo roles, least to most. `write` is GitHub's `push` and `read` its `pull`.
+ * A user profile's `repository_permission` is the least it accepts.
+ */
+export const REPOSITORY_PERMISSIONS = ["read", "triage", "write", "maintain", "admin"] as const;
+export type RepositoryPermission = (typeof REPOSITORY_PERMISSIONS)[number];
+
+/** What a user profile can match: what the broker looks up for a person, nothing Actions-specific. */
+const USER_MATCH = [
+  "repository",
+  "repository_id",
+  "repository_owner_id",
+  "actor_id",
+  "team_id",
+  "repository_permission",
+];
+
+/** Match keys the broker checks against GitHub for a person, rather than compares with a claim. */
+const USER_ONLY_MATCH = ["team_id", "repository_permission"];
+
+/** Default `max_ttl` for user profiles, unless the profile sets its own. */
+const USER_DEFAULT_MAX_TTL = HOUR;
+
 /** A `{claim}` placeholder. Not `${claim}`, which Terraform's templatefile would try to fill in. */
 const PLACEHOLDER = /\{([^{}]*)\}/g;
 
@@ -102,6 +128,7 @@ const Bucket = v.strictObject({
 
 const Profile = v.strictObject({
   name: v.pipe(v.string(), v.regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/, "must be 1-64 of [A-Za-z0-9_.-]")),
+  subject: v.optional(v.picklist(["actions", "user"], "must be actions or user"), "actions"),
   match: v.optional(v.record(v.pipe(v.string(), v.regex(/^[a-z_]+$/, "must be a claim name")), ClaimValue), {}),
   // For everything the profile hands out: the token and the buckets' credentials.
   ttl: v.optional(Duration),
@@ -147,6 +174,8 @@ export interface Bucket {
 
 export interface Profile {
   name: string;
+  /** Only callers of this subject can use the profile. */
+  subject: Subject;
   /** All keys must match (AND). Always includes `repository_owner_id`. */
   match: Record<string, string>;
   ttl: number;
@@ -222,6 +251,28 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       }
     }
 
+    // Guardrail 6: a person has no ref, environment or workflow, and the client picks the
+    // repo, so a user profile matches only what the broker looks up, and must require a
+    // role on that repo. Actions profiles can't use the keys only a person has.
+    if (profile.subject === "user") {
+      for (const claim of Object.keys(profile.match)) {
+        if (!USER_MATCH.includes(claim)) {
+          issues.push(`${at}.match.${claim}: not available for people; use ${USER_MATCH.join(", ")}`);
+        }
+      }
+      if (profile.match.repository_permission === undefined) {
+        issues.push(`${at}.match.repository_permission: required for a user profile`);
+      }
+    } else {
+      for (const claim of USER_ONLY_MATCH) {
+        if (claim in profile.match) issues.push(`${at}.match.${claim}: only for user profiles (subject: user)`);
+      }
+    }
+    const role = profile.match.repository_permission;
+    if (role !== undefined && !(REPOSITORY_PERMISSIONS as readonly string[]).includes(role)) {
+      issues.push(`${at}.match.repository_permission: must be one of ${REPOSITORY_PERMISSIONS.join(", ")}`);
+    }
+
     // Guardrail 1: the owner pin applies to every profile and can't be overridden.
     const owner = profile.match.repository_owner_id;
     if (owner !== undefined && owner !== github.owner_id) {
@@ -266,7 +317,9 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       issues.push(`${at}: set ttl and max_ttl on the profile or on its token, not both`);
     }
     const lifetime = legacy ? token : profile;
-    const max_ttl = lifetime?.max_ttl ?? defaultMax;
+    // A stolen gh token never expires, so what it can mint for a person should.
+    const fallbackMax = profile.subject === "user" ? Math.min(defaultMax, USER_DEFAULT_MAX_TTL) : defaultMax;
+    const max_ttl = lifetime?.max_ttl ?? fallbackMax;
     const ttl = lifetime?.ttl ?? Math.min(defaultTTL, max_ttl);
     checkTTLs(legacy ? `${at}.token` : at, ttl, max_ttl, issues);
     if (buckets && (ttl < R2_MIN_TTL || max_ttl > R2_MAX_TTL)) {
@@ -275,6 +328,7 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
 
     return {
       name: profile.name,
+      subject: profile.subject,
       match: { ...profile.match, repository_owner_id: github.owner_id },
       ttl,
       max_ttl,
@@ -373,25 +427,44 @@ export function glob(pattern: string, value: string): boolean {
   return new RegExp(`^${re}$`, "s").test(value);
 }
 
+/** Whether a person's role on the repo is at least `required`. */
+function hasRole(role: unknown, required: string): boolean {
+  const roles: readonly unknown[] = REPOSITORY_PERMISSIONS;
+  return roles.includes(role) && roles.indexOf(role) >= roles.indexOf(required);
+}
+
 export function matches(profile: Profile, claims: Claims): boolean {
   return Object.entries(profile.match).every(([claim, pattern]) => {
+    // Only a person's claims carry these: the teams they're in and their role on the repo.
+    if (claim === "team_id") return Array.isArray(claims.team_ids) && claims.team_ids.includes(pattern);
+    if (claim === "repository_permission") return hasRole(claims.repository_permission, pattern);
     const value = claims[claim];
     if (typeof value !== "string") return false;
     return claim.endsWith("_id") ? value === pattern : glob(pattern, value);
   });
 }
 
-/** Picks the profile to mint with, or throws a `403` whose reason goes to the audit log. */
-export function selectProfile(policy: Policy, claims: Claims, requested?: string): Profile {
+/**
+ * Picks the profile to mint with, among those for `subject` only, or throws a `403`
+ * whose reason goes to the audit log.
+ */
+export function selectProfile(policy: Policy, subject: Subject, claims: Claims, requested?: string): Profile {
+  const profiles = policy.profiles.filter((p) => p.subject === subject);
   if (requested !== undefined) {
-    const profile = policy.profiles.find((p) => p.name === requested);
+    const profile = profiles.find((p) => p.name === requested);
     if (!profile || !matches(profile, claims)) {
-      throw new HttpError("forbidden", "profile_mismatch", profile ? undefined : `unknown profile ${requested}`);
+      const known = policy.profiles.some((p) => p.name === requested);
+      const detail = profile
+        ? undefined
+        : known
+          ? `profile ${requested} isn't for ${subject}`
+          : `unknown profile ${requested}`;
+      throw new HttpError("forbidden", "profile_mismatch", detail);
     }
     return profile;
   }
 
-  const candidates = policy.profiles.filter((p) => matches(p, claims));
+  const candidates = profiles.filter((p) => matches(p, claims));
   if (candidates.length === 0) throw new HttpError("forbidden", "no_match");
   if (candidates.length > 1) {
     throw new HttpError("forbidden", "ambiguous", candidates.map((p) => p.name).join(","));

@@ -1,4 +1,4 @@
-import type { Claims } from "./policy.js";
+import type { Claims, Subject } from "./policy.js";
 
 /** Claims copied into audit lines. None of them are secret. */
 const CLAIMS = [
@@ -11,6 +11,7 @@ const CLAIMS = [
   "job_workflow_ref",
   "run_id",
   "run_attempt",
+  "actor",
   "actor_id",
 ] as const;
 
@@ -25,6 +26,7 @@ export type AuditEvent =
 
 export interface AuditFields {
   claims?: Claims | undefined;
+  subject?: Subject | undefined;
   profile?: string | undefined;
   reason?: string | undefined;
   detail?: string | undefined;
@@ -39,6 +41,7 @@ export interface AuditFields {
  */
 export function audit(event: AuditEvent, { claims, ...fields }: AuditFields = {}) {
   const line: Record<string, unknown> = { event };
+  if (fields.subject !== undefined) line.subject = fields.subject;
   if (fields.profile !== undefined) line.profile = fields.profile;
   for (const key of CLAIMS) {
     const value = claims?.[key];

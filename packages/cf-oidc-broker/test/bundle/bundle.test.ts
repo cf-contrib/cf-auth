@@ -18,7 +18,7 @@ it("reads the broker token from Secrets Store and serves /healthz", async () => 
 });
 
 it("rejects a mint without a JWT", async () => {
-  const res = await SELF.fetch("https://cf-auth.example.com/v1/token", { method: "POST" });
+  const res = await SELF.fetch("https://cf-auth.example.com/v1/actions/token", { method: "POST" });
   expect(res.status).toBe(401);
   expect(await res.json()).toEqual({ error: "unauthorized" });
 });

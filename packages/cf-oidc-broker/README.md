@@ -3,7 +3,8 @@
 > The Worker half of [cf-oidc-auth](../..): verifies a GitHub Actions OIDC token,
 > matches it against your policy, and mints a short-lived Cloudflare API token
 > with exactly that profile's permissions, R2 credentials limited to the repo's
-> key prefix, or both.
+> key prefix, or both. People can get the same from their GitHub token, through
+> [`subject: user` profiles](#people).
 
 [![CI](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
@@ -128,9 +129,19 @@ profiles:
       - name: org-terraform-state
         permission: object-read-write
         prefixes: ["{repository_owner_id}/{repository_id}/"]
+
+  - name: tofu-plan                     # for people, with gh-cloudflare
+    subject: user
+    match:
+      team_id: "400000005"              # infra team
+      repository_permission: write      # at least write on the requested repo
+    buckets:
+      - name: org-terraform-state
+        permission: object-read-only
+        prefixes: ["{repository_owner_id}/{repository_id}/"]
 ```
 
-A profile has a `token`, `buckets`, or both.
+A profile has a `token`, `buckets`, or both. It's for GitHub Actions jobs unless it says `subject: user`.
 
 The broker validates the policy on the first request. If it's invalid, the broker fails closed and every request gets `500`.
 
@@ -142,6 +153,34 @@ The broker validates the policy on the first request. If it's invalid, the broke
 - `*` matches any run of characters, including `/`. ID claims (`*_id`) must be exact.
 - If the request names a `profile`, that profile must match. Otherwise exactly one profile must match. Both failures are a `403`.
 - Unquoted YAML numbers are accepted for IDs and compared as strings.
+- A job is only matched against profiles for `actions` (the default), and a person only against `subject: user` profiles. Naming a profile for the other subject is a `403`.
+
+### People
+
+A `subject: user` profile gives people credentials for a repo, from their GitHub user token. The client is [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare), which sends `gh auth token` to [`POST /v1/users/token`](#http-api) with the repo to act for:
+
+```sh
+gh cloudflare exec --profile tofu-plan -- tofu plan
+```
+
+The broker asks GitHub, with the person's token, who they are, what the repo's IDs are, what their role on it is and, if a profile needs it, which teams they're in. It builds the claims from those answers. Nothing in them comes from the request except which repo to look up.
+
+| Match key | Matches when |
+|---|---|
+| `repository_permission` | **Required.** The person's role on the repo is at least this: `read`, `triage`, `write`, `maintain` or `admin`. |
+| `team_id` | The person is a member of this team. GitHub answers for a token with the `repo`, `read:org` or `user` scope; gh's token has `repo`. |
+| `repository`, `repository_id` | The repo, as for jobs. |
+| `actor_id` | The person's numeric user ID. |
+
+- The repo must belong to `github.owner_id`.
+- Claims only jobs have (`ref`, `environment`, `workflow_ref`, …) can't be used in a user profile, and `team_id` and `repository_permission` can't be used in an Actions profile.
+- Bucket prefixes are filled in from the repo GitHub returned, so `{repository_owner_id}/{repository_id}/` gives a person the same prefix the repo's jobs get.
+- `max_ttl` defaults to `1h` for user profiles, even if `defaults.max_ttl` is higher. A profile can set its own.
+- GitHub App installation tokens (`ghs_…`, including `GITHUB_TOKEN`) are refused: they identify a repo, not a person. Jobs use `/v1/actions/token`.
+- A token that isn't authorized for an org's SAML SSO is refused with `sso_required` in the audit log.
+
+> [!WARNING]
+> **A gh token works across all of GitHub and doesn't expire.** Anyone who steals one can mint whatever the user profiles give its owner. Keep user profiles to what `tofu plan` needs, such as read-only tokens and `object-read-only` state, and keep `apply` in CI behind `environment: prod` with required reviewers. Otherwise anyone who can run it locally can skip those reviewers.
 
 ### Permissions
 
@@ -200,7 +239,7 @@ Each entry in `buckets` gets the job [temporary R2 credentials](https://develope
 - Durations look like `90s`, `15m`, `1h`, `1h30m`.
 - `ttl` and `max_ttl` go on the profile, and apply to its token and buckets alike. `token.ttl` and `token.max_ttl`, where they used to go, still work, but a profile can't use both places.
 - A requested `ttl` above the profile's `max_ttl` is clamped. Below `1m`, or unparseable, is a `400`.
-- Minted tokens are named `cf-oidc:<repository>:<run_id>:<run_attempt>`, at most 120 characters.
+- Minted tokens are named `cf-oidc:<repository>:<run_id>:<run_attempt>` for jobs and `cf-oidc:user:<login>:<repository>` for people, at most 120 characters.
 
 ### Guardrails
 
@@ -211,12 +250,14 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 3. **No token-management permissions.** Granting any permission group matching `API Tokens` is rejected, so a job can't turn its short-lived token into a long-lived one.
 4. **TTLs are capped.** `max_ttl` is at most 24h, and `ttl` can't exceed it.
 5. **The audience must be custom.** `github.audience` is required and can't be GitHub's default (`https://github.com/<owner>`), so a JWT requested for AWS or GCP can't be replayed here.
+6. **People and jobs are kept apart.** Each only matches profiles for its own subject. A user profile must require a role on the repo, since the person picks the repo, and can't match claims only jobs have.
 
 ## HTTP API
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/v1/token` | `Bearer <github-oidc-jwt>` | Mint a token, R2 credentials, or both. Body: `{ "profile"?, "ttl"? }`. Returns `{ token?, token_id?, account_id, expires_on, profile, buckets? }`: `token` and `token_id` when the profile has a `token`, and `buckets: [{ name, access_key_id, secret_access_key, session_token, prefixes, endpoint, expires_on }]`, one entry per bucket, when it has `buckets`. |
+| `POST` | `/v1/actions/token` | `Bearer <github-oidc-jwt>` | For a GitHub Actions job: mint a token, R2 credentials, or both. Body: `{ "profile"?, "ttl"? }`. Returns `{ token?, token_id?, account_id, expires_on, profile, buckets? }`: `token` and `token_id` when the profile has a `token`, and `buckets: [{ name, access_key_id, secret_access_key, session_token, prefixes, endpoint, expires_on }]`, one entry per bucket, when it has `buckets`. |
+| `POST` | `/v1/users/token` | `Bearer <github-user-token>` | For a [person](#people): the same, for the repo in the body. Body: `{ "repository", "profile"?, "ttl"? }`, where `repository` is `owner/name` or its numeric ID. Same response. `404` if no profile is for people. |
 | `POST` | `/v1/revoke` | `Bearer <minted-token>` | Revoke a token. Holding it is the proof. Returns `204`, also when it's already gone, and `403` for tokens not named `cf-oidc:*`. |
 | `GET` | `/healthz` | public | `200` if the policy and bindings are valid, else `500`. Never shows the policy. |
 
@@ -225,6 +266,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 - `400 bad_request`
 - `401 unauthorized`
 - `403 forbidden`
+- `404 not_found`
 - `500 misconfigured`
 - `502 upstream_error`
 
@@ -244,35 +286,39 @@ Bodies are deliberately generic; the reason goes to the audit log.
 | Stolen R2 credentials | Limited to one bucket and the repo's prefixes, and short-lived. They can't be revoked one by one; rolling the broker token revokes all of them |
 | One repo reaches another's R2 keys | Prefixes must end in `/`, placeholders fill whole segments from verified claims with a fixed character set, and both the template and the result are checked. Prefer ID-based prefixes |
 | Stolen JWT replayed | Short JWT lifetime and a custom audience |
+| Stolen gh token | Only gets what user profiles give its owner, for repos they can access. Keep those profiles read-only, with short TTLs (`1h` cap by default). Revoking the token on GitHub cuts it off at the next mint |
+| A person picks a repo they shouldn't reach | The broker looks up their role on it with GitHub, and user profiles must require one. Prefixes come from GitHub's answer, not the request |
 | Broker token exfiltrated | Kept in Secrets Store, so it isn't in Terraform state or CI. Only code running in the Worker can read it. Restrict who can deploy Workers in the broker's account, rotate the broker token, and consider a dedicated account per trust domain. |
-| Token flooding | Only workflows the policy allows can mint. Tokens are short-lived, revoked at job end, and cleaned up hourly. There's no rate limit yet (see [Limitations](#limitations)). |
+| Token flooding | Only workflows and people the policy allows can mint. Tokens are short-lived, revoked at job end, and cleaned up hourly. There's no rate limit yet (see [Limitations](#limitations)). |
 
 ### Audit log
 
-Every mint, denial and revoke emits one JSON line to Workers Logs. Token values, R2 secrets and JWTs are never logged:
+Every mint, denial and revoke emits one JSON line to Workers Logs, with `subject` (`actions` or `user`) for mints and denials. Token values, R2 secrets, JWTs and gh tokens are never logged:
 
 ```json
-{"event":"token.mint","profile":"workers-deploy","repository":"example-org/api","repository_id":"200000003","ref":"refs/heads/main","environment":"prod","run_id":"1234567890","run_attempt":"1","actor_id":"300000004","token_id":"<token-id>","expires_on":"2026-09-28T12:15:00Z"}
+{"event":"token.mint","subject":"actions","profile":"workers-deploy","repository":"example-org/api","repository_id":"200000003","ref":"refs/heads/main","environment":"prod","run_id":"1234567890","run_attempt":"1","actor_id":"300000004","token_id":"<token-id>","expires_on":"2026-09-28T12:15:00Z"}
 ```
 
 R2 credentials are `r2.issued`, with the bucket, the filled-in prefixes and the permission:
 
 ```json
-{"event":"r2.issued","profile":"terraform-state","repository":"example-org/api","repository_id":"200000003","ref":"refs/heads/main","run_id":"1234567890","run_attempt":"1","actor_id":"300000004","bucket":"org-terraform-state","prefixes":["100000001/200000003/"],"permission":"object-read-write","expires_on":"2026-09-28T12:15:00Z"}
+{"event":"r2.issued","subject":"actions","profile":"terraform-state","repository":"example-org/api","repository_id":"200000003","ref":"refs/heads/main","run_id":"1234567890","run_attempt":"1","actor_id":"300000004","bucket":"org-terraform-state","prefixes":["100000001/200000003/"],"permission":"object-read-write","expires_on":"2026-09-28T12:15:00Z"}
 ```
 
 When an isolate first loads the policy, it logs `policy.loaded` with the profile count, e.g. `{"event":"policy.loaded","profiles":3}`. Check this line after deploying.
 
 Denials are `token.deny` with a `reason`:
 
-- **Request problems:** `invalid_jwt`, `invalid_body`, `invalid_ttl`
-- **Policy didn't allow it:** `no_match`, `ambiguous`, `profile_mismatch`, `invalid_r2_prefix`
-- **Configuration or upstream errors:** `broker_token_unavailable`, `unknown_permission`, `ambiguous_permission`, `jwks_unavailable`, `cloudflare_error`
+- **Request problems:** `invalid_jwt`, `invalid_user_token`, `installation_token`, `invalid_body`, `invalid_ttl`, `no_user_profiles`
+- **Policy or GitHub didn't allow it:** `no_match`, `ambiguous`, `profile_mismatch`, `invalid_r2_prefix`, `repository_forbidden`, `teams_forbidden`, `sso_required`
+- **Configuration or upstream errors:** `broker_token_unavailable`, `unknown_permission`, `ambiguous_permission`, `jwks_unavailable`, `github_unavailable`, `cloudflare_error`
 
 ## Limitations
 
 - **One account per broker.** Tokens are minted in `CF_OIDC_BROKER_ACCOUNT_ID` only. Deploy one broker per account.
-- **GitHub Actions only.** Other OIDC issuers (GitLab CI, Buildkite, …) aren't supported yet.
+- **GitHub only.** Other OIDC issuers (GitLab CI, Buildkite, …) aren't supported yet, and people need a github.com account: GitHub Enterprise Server's API isn't supported for user profiles.
+- **People use their gh token.** It's sent to the broker as is. A GitHub App, whose short-lived tokens only it accepts, may come later.
+- **A person's role and teams are checked on every mint.** Each mint makes two or three GitHub API calls with their token, which counts against their rate limit. Teams past the first 1000 aren't seen.
 - **No JWT replay cache.** A stolen JWT can be exchanged again until it expires. The custom audience and its short lifetime limit this.
 - **Resource IDs aren't checked up front.** Apart from the account check, a wrong zone ID is only caught when Cloudflare rejects the mint (`502`).
 - **Permission names can change.** Cloudflare can rename a permission group. Profiles using the old name fail closed (`500`) until the policy is updated, and the one-hour cache can delay a fix by up to an hour per isolate.
