@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.5.0...v0.6.0) (2026-10-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* POST /v1/token is removed in favour of POST /v1/actions/token. Actions pinned at 0.5.0 or older get a 404 from this broker; upgrade the action with the broker.
+
+### Features
+
+* let people get credentials with their GitHub token ([#29](https://github.com/cf-contrib/cf-oidc-auth/issues/29)) ([55a552c](https://github.com/cf-contrib/cf-oidc-auth/commit/55a552ce64406e8f477c92b74769b48b438b025f)), closes [#28](https://github.com/cf-contrib/cf-oidc-auth/issues/28)
+
 ## [0.5.0](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.4.2...v0.5.0) (2026-09-30)
 
 
