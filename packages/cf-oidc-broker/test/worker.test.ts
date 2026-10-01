@@ -697,6 +697,14 @@ describe("POST /v1/user/token", () => {
     expect(github.requests).toEqual([]);
   });
 
+  it("403s when the token can't list teams", async () => {
+    // What GitHub answers a classic token without the repo, read:org or user scope.
+    github.fail = { path: "/user/teams", status: 404 };
+    expect((await mintFor({ profile: "tofu-plan", repository: "example-org/api" })).status).toBe(403);
+    expect(deny()).toMatchObject({ reason: "teams_forbidden" });
+    expect(cf.tokens.size).toBe(1);
+  });
+
   it("403s when the token isn't authorized for SAML SSO", async () => {
     github.fail = {
       path: "/repos/",
