@@ -94,7 +94,7 @@ function failure(err: unknown): Response {
 async function readTokenRequest(request: Request, subject: Subject): Promise<Partial<UserTokenRequest>> {
   const text = await request.text();
   if (text.trim() === "") {
-    if (subject === "user") throw new HttpError("bad_request", "invalid_body", "repository is required");
+    if (subject === "users") throw new HttpError("bad_request", "invalid_body", "repository is required");
     return {};
   }
   let body: unknown;
@@ -131,7 +131,7 @@ async function authenticate(request: Request, policy: Policy, subject: Subject) 
   }
 
   // A broker without user profiles serves no people, so it doesn't call GitHub for them.
-  const users = policy.profiles.filter((p) => p.subject === "user");
+  const users = policy.profiles.filter((p) => p.subject === "users");
   if (users.length === 0) throw new HttpError("not_found", "no_user_profiles");
   const token = bearer(request, "invalid_user_token");
   // The body first: a malformed request costs no GitHub calls.
@@ -236,7 +236,7 @@ export function createBroker(policy: unknown) {
         case "POST /v1/actions/token":
           return handleToken(request, env, policy, "actions");
         case "POST /v1/users/token":
-          return handleToken(request, env, policy, "user");
+          return handleToken(request, env, policy, "users");
         case "POST /v1/revoke":
           return handleRevoke(request, env, policy);
         case "GET /healthz":

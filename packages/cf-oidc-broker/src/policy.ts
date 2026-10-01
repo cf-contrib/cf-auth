@@ -41,7 +41,7 @@ const PREFIX_CLAIMS = {
 type PrefixClaim = keyof typeof PREFIX_CLAIMS;
 
 /** Who a profile is for: GitHub Actions jobs (OIDC JWT) or people (GitHub user token). */
-export type Subject = "actions" | "user";
+export type Subject = "actions" | "users";
 
 /**
  * GitHub's repo roles, least to most. `write` is GitHub's `push` and `read` its `pull`.
@@ -128,7 +128,7 @@ const Bucket = v.strictObject({
 
 const Profile = v.strictObject({
   name: v.pipe(v.string(), v.regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/, "must be 1-64 of [A-Za-z0-9_.-]")),
-  subject: v.optional(v.picklist(["actions", "user"], "must be actions or user"), "actions"),
+  subject: v.optional(v.picklist(["actions", "users"], "must be actions or users"), "actions"),
   match: v.optional(v.record(v.pipe(v.string(), v.regex(/^[a-z_]+$/, "must be a claim name")), ClaimValue), {}),
   // For everything the profile hands out: the token and the buckets' credentials.
   ttl: v.optional(Duration),
@@ -254,7 +254,7 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
     // Guardrail 6: a person has no ref, environment or workflow, and the client picks the
     // repo, so a user profile matches only what the broker looks up, and must require a
     // role on that repo. Actions profiles can't use the keys only a person has.
-    if (profile.subject === "user") {
+    if (profile.subject === "users") {
       for (const claim of Object.keys(profile.match)) {
         if (!USER_MATCH.includes(claim)) {
           issues.push(`${at}.match.${claim}: not available for people; use ${USER_MATCH.join(", ")}`);
@@ -265,7 +265,7 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       }
     } else {
       for (const claim of USER_ONLY_MATCH) {
-        if (claim in profile.match) issues.push(`${at}.match.${claim}: only for user profiles (subject: user)`);
+        if (claim in profile.match) issues.push(`${at}.match.${claim}: only for user profiles (subject: users)`);
       }
     }
     const role = profile.match.repository_permission;
@@ -318,7 +318,7 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
     }
     const lifetime = legacy ? token : profile;
     // A stolen gh token never expires, so what it can mint for a person should.
-    const fallbackMax = profile.subject === "user" ? Math.min(defaultMax, USER_DEFAULT_MAX_TTL) : defaultMax;
+    const fallbackMax = profile.subject === "users" ? Math.min(defaultMax, USER_DEFAULT_MAX_TTL) : defaultMax;
     const max_ttl = lifetime?.max_ttl ?? fallbackMax;
     const ttl = lifetime?.ttl ?? Math.min(defaultTTL, max_ttl);
     checkTTLs(legacy ? `${at}.token` : at, ttl, max_ttl, issues);

@@ -16,7 +16,7 @@ const NAME_MAX = 120;
 export function tokenName(claims: Claims, subject: Subject): string {
   const str = (key: string) => (typeof claims[key] === "string" ? (claims[key] as string) : "");
   const repo = str("repository") || "unknown";
-  if (subject === "user") {
+  if (subject === "users") {
     const who = `user:${str("actor") || "unknown"}:`;
     return `${TOKEN_PREFIX}${who}${repo.slice(0, NAME_MAX - TOKEN_PREFIX.length - who.length)}`;
   }
