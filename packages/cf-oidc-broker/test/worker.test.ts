@@ -536,7 +536,7 @@ describe("POST /v1/actions/token with buckets", () => {
   });
 });
 
-describe("POST /v1/user/token", () => {
+describe("POST /v1/users/token", () => {
   /** A person's profiles: a team's read-only state, and a token for one repo's writers. */
   function withUserProfiles(...extra: Partial<TestProfile>[]) {
     const policy = testPolicy(ISSUER);
@@ -570,7 +570,7 @@ describe("POST /v1/user/token", () => {
     policyFile = JSON.stringify(policy);
   }
 
-  const mintFor = (body: unknown, token = USER_TOKEN) => call("POST", "/v1/user/token", { token, body });
+  const mintFor = (body: unknown, token = USER_TOKEN) => call("POST", "/v1/users/token", { token, body });
   const deny = () => auditLines().find((l) => l.event === "token.deny");
 
   beforeEach(() => withUserProfiles());
@@ -678,7 +678,7 @@ describe("POST /v1/user/token", () => {
   });
 
   it("401s without a token", async () => {
-    const res = await call("POST", "/v1/user/token", { body: { repository: "example-org/api" } });
+    const res = await call("POST", "/v1/users/token", { body: { repository: "example-org/api" } });
     expect(res.status).toBe(401);
     expect(deny()).toMatchObject({ reason: "invalid_user_token" });
   });
@@ -829,6 +829,7 @@ describe("GET /healthz", () => {
 
 it("404s on unknown routes, including the removed POST /v1/token", async () => {
   expect((await call("POST", "/v1/token", { token: await issuer.sign() })).status).toBe(404);
+  expect((await call("POST", "/v1/user/token", { token: USER_TOKEN })).status).toBe(404);
   expect((await call("GET", "/v1/actions/token")).status).toBe(404);
   expect((await call("GET", "/")).status).toBe(404);
 });

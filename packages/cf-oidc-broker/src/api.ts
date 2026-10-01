@@ -9,7 +9,7 @@ export interface TokenRequest {
   ttl?: string | undefined;
 }
 
-/** Body of `POST /v1/user/token`, which a person calls with their GitHub user token. */
+/** Body of `POST /v1/users/token`, which a person calls with their GitHub user token. */
 export interface UserTokenRequest extends TokenRequest {
   /**
    * Repo to get credentials for: `owner/name` or its numeric ID. The broker checks the
@@ -18,7 +18,7 @@ export interface UserTokenRequest extends TokenRequest {
   repository: string;
 }
 
-/** `200` response of `POST /v1/actions/token` and `POST /v1/user/token`. */
+/** `200` response of `POST /v1/actions/token` and `POST /v1/users/token`. */
 export interface TokenResponse {
   /** Absent for a profile with only `buckets`, like `token_id`. */
   token?: string;

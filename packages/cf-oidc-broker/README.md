@@ -157,7 +157,7 @@ The broker validates the policy on the first request. If it's invalid, the broke
 
 ### People
 
-A `subject: user` profile gives people credentials for a repo, from their GitHub user token. The client is [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare), which sends `gh auth token` to [`POST /v1/user/token`](#http-api) with the repo to act for:
+A `subject: user` profile gives people credentials for a repo, from their GitHub user token. The client is [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare), which sends `gh auth token` to [`POST /v1/users/token`](#http-api) with the repo to act for:
 
 ```sh
 gh cloudflare exec --profile tofu-plan -- tofu plan
@@ -257,7 +257,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/v1/actions/token` | `Bearer <github-oidc-jwt>` | For a GitHub Actions job: mint a token, R2 credentials, or both. Body: `{ "profile"?, "ttl"? }`. Returns `{ token?, token_id?, account_id, expires_on, profile, buckets? }`: `token` and `token_id` when the profile has a `token`, and `buckets: [{ name, access_key_id, secret_access_key, session_token, prefixes, endpoint, expires_on }]`, one entry per bucket, when it has `buckets`. |
-| `POST` | `/v1/user/token` | `Bearer <github-user-token>` | For a [person](#people): the same, for the repo in the body. Body: `{ "repository", "profile"?, "ttl"? }`, where `repository` is `owner/name` or its numeric ID. Same response. `404` if no profile is for people. |
+| `POST` | `/v1/users/token` | `Bearer <github-user-token>` | For a [person](#people): the same, for the repo in the body. Body: `{ "repository", "profile"?, "ttl"? }`, where `repository` is `owner/name` or its numeric ID. Same response. `404` if no profile is for people. |
 | `POST` | `/v1/revoke` | `Bearer <minted-token>` | Revoke a token. Holding it is the proof. Returns `204`, also when it's already gone, and `403` for tokens not named `cf-oidc:*`. |
 | `GET` | `/healthz` | public | `200` if the policy and bindings are valid, else `500`. Never shows the policy. |
 

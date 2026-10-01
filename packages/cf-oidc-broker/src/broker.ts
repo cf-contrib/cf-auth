@@ -235,7 +235,7 @@ export function createBroker(policy: unknown) {
       switch (route) {
         case "POST /v1/actions/token":
           return handleToken(request, env, policy, "actions");
-        case "POST /v1/user/token":
+        case "POST /v1/users/token":
           return handleToken(request, env, policy, "user");
         case "POST /v1/revoke":
           return handleRevoke(request, env, policy);

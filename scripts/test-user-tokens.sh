@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks POST /v1/user/token (#28) against the real GitHub API and a real
+# Checks POST /v1/users/token (#28) against the real GitHub API and a real
 # Cloudflare account, with the broker running under `wrangler dev`:
 #   - A person with write access gets a token for a repo, by name and by ID,
 #     named cf-oidc:user:<login>:<repo>, and can revoke it.
@@ -201,7 +201,7 @@ check() {
   fi
 }
 
-user() { check "$1" /v1/user/token "$GH_USER_TOKEN" "$2" "${@:3}"; }
+user() { check "$1" /v1/users/token "$GH_USER_TOKEN" "$2" "${@:3}"; }
 
 echo
 user "writer gets a token for $REPO" "{\"profile\":\"me\",\"repository\":\"$REPO\"}" 200
@@ -222,11 +222,11 @@ if [[ -n ${TEST_READ_ONLY_REPO:-} ]]; then
 else
   echo "SKIP  write needed, only read (set TEST_READ_ONLY_REPO)"
 fi
-check "installation token (ghs_)" /v1/user/token ghs_notARealInstallationToken000000000000 \
+check "installation token (ghs_)" /v1/users/token ghs_notARealInstallationToken000000000000 \
   "{\"repository\":\"$REPO\"}" 401 installation_token
-check "token GitHub rejects" /v1/user/token gho_notARealToken000000000000000000000000 \
+check "token GitHub rejects" /v1/users/token gho_notARealToken000000000000000000000000 \
   "{\"repository\":\"$REPO\"}" 401 invalid_user_token
-check "no token" /v1/user/token - "{\"repository\":\"$REPO\"}" 401 invalid_user_token
+check "no token" /v1/users/token - "{\"repository\":\"$REPO\"}" 401 invalid_user_token
 user "no repository" '{"profile":"me"}' 400 invalid_body
 user "malformed repository" '{"profile":"me","repository":"a/b/c"}' 400 invalid_body
 check "gh token on /v1/actions/token" /v1/actions/token "$GH_USER_TOKEN" '{"profile":"ci"}' 401 invalid_jwt
