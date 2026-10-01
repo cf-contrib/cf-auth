@@ -1,4 +1,5 @@
-// Test doubles for GitHub's OIDC issuer and the Cloudflare API. All IDs are made up.
+// Test doubles for GitHub's OIDC issuer, GitHub's REST API and the Cloudflare API. All IDs
+// and tokens are made up.
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { vi } from "vitest";
 
@@ -45,6 +46,7 @@ export interface TestPolicy {
   defaults?: { ttl?: string; max_ttl?: string };
   profiles: {
     name: string;
+    subject?: string;
     match: Record<string, unknown>;
     /** Always there in testPolicy's profiles; tests delete it to leave only `buckets`. */
     token: {
@@ -239,12 +241,76 @@ export class FakeCloudflare {
   }
 }
 
-/** Routes the Worker's outbound `fetch` to the fake issuer and fake Cloudflare API. */
-export function installFetch(issuer: { issuer: string; jwks: unknown }, cf: FakeCloudflare) {
+export const USER_TOKEN = "gho_exampleUserToken0000000000000000000";
+export const USER_ID = "300000004";
+export const TEAM_ID = "400000005";
+
+type Role = "read" | "triage" | "write" | "maintain" | "admin";
+
+/** GitHub's permission flags for a role: each role includes the ones below it. */
+function flags(role: Role | undefined) {
+  const order: Role[] = ["read", "triage", "write", "maintain", "admin"];
+  const at = role ? order.indexOf(role) : -1;
+  return { pull: at >= 0, triage: at >= 1, push: at >= 2, maintain: at >= 3, admin: at >= 4 };
+}
+
+interface FakeRepo {
+  id: number;
+  full_name: string;
+  owner_id: number;
+  /** The test user's role; absent means the repo is visible (public) without access. */
+  role?: Role;
+}
+
+/** In-memory GitHub REST API for one user: `/user`, repos and `/user/teams`. */
+export class FakeGitHub {
+  requests: string[] = [];
+  repos: FakeRepo[] = [
+    { id: 200000002, full_name: "example-org/infra", owner_id: Number(OWNER_ID), role: "write" },
+    { id: 200000003, full_name: "example-org/api", owner_id: Number(OWNER_ID), role: "read" },
+    { id: 200000009, full_name: "other-org/infra", owner_id: 999999, role: "admin" },
+  ];
+  teams = [
+    { id: Number(TEAM_ID), organization: { id: Number(OWNER_ID) } },
+    { id: 400000099, organization: { id: 999999 } },
+  ];
+  /** Replies with this to every request whose path starts with `path`. */
+  fail: { path: string; status: number; headers?: Record<string, string> } | undefined;
+
+  handle(req: Request): Response {
+    const url = new URL(req.url);
+    this.requests.push(`${url.pathname}${url.search}`);
+    if (this.fail && url.pathname.startsWith(this.fail.path)) {
+      return Response.json({ message: "fail" }, { status: this.fail.status, headers: this.fail.headers ?? {} });
+    }
+    if (req.headers.get("authorization") !== `Bearer ${USER_TOKEN}`) {
+      return Response.json({ message: "Bad credentials" }, { status: 401 });
+    }
+
+    if (url.pathname === "/user") return Response.json({ id: Number(USER_ID), login: "octocat" });
+    if (url.pathname === "/user/teams") return Response.json(url.searchParams.get("page") === "1" ? this.teams : []);
+
+    const byName = /^\/repos\/([^/]+\/[^/]+)$/.exec(url.pathname)?.[1];
+    const byId = /^\/repositories\/(\d+)$/.exec(url.pathname)?.[1];
+    const repo = this.repos.find((r) => r.full_name === byName || String(r.id) === byId);
+    if (!repo) return Response.json({ message: "Not Found" }, { status: 404 });
+    const [owner] = repo.full_name.split("/");
+    return Response.json({
+      id: repo.id,
+      full_name: repo.full_name,
+      owner: { id: repo.owner_id, login: owner },
+      permissions: flags(repo.role),
+    });
+  }
+}
+
+/** Routes the Worker's outbound `fetch` to the fake issuer, GitHub API and Cloudflare API. */
+export function installFetch(issuer: { issuer: string; jwks: unknown }, cf: FakeCloudflare, github?: FakeGitHub) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const req = new Request(input as RequestInfo, init as RequestInit);
     if (req.url === `${issuer.issuer}/.well-known/jwks`) return Response.json(issuer.jwks);
     if (req.url.startsWith(API)) return cf.handle(req);
+    if (github && req.url.startsWith("https://api.github.com/")) return github.handle(req);
     throw new TypeError(`unexpected fetch ${req.url}`);
   });
 }

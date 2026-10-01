@@ -12,7 +12,7 @@ import {
   r2Prefixes,
   selectProfile,
 } from "../src/policy.js";
-import { ACCOUNT_ID, githubClaims, OWNER_ID, type TestPolicy, testPolicy } from "./helpers.js";
+import { ACCOUNT_ID, githubClaims, OWNER_ID, TEAM_ID, type TestPolicy, testPolicy, USER_ID } from "./helpers.js";
 
 const policy = () => testPolicy(DEFAULT_ISSUER);
 
@@ -266,22 +266,22 @@ describe("matching", () => {
   });
 
   it("selects the single matching profile", () => {
-    expect(selectProfile(loaded, githubClaims()).name).toBe("workers-deploy");
+    expect(selectProfile(loaded, "actions", githubClaims()).name).toBe("workers-deploy");
   });
 
   it("denies when nothing matches", () => {
-    expect(denial(() => selectProfile(loaded, githubClaims({ ref: "refs/heads/dev" })))).toBe("no_match");
+    expect(denial(() => selectProfile(loaded, "actions", githubClaims({ ref: "refs/heads/dev" })))).toBe("no_match");
   });
 
   it("denies when several profiles match and none is named", () => {
     const claims = githubClaims({ repository: "example-org/infra", repository_id: "200000002" });
-    expect(denial(() => selectProfile(loaded, claims))).toBe("ambiguous");
-    expect(selectProfile(loaded, claims, "infra-cloudflare").name).toBe("infra-cloudflare");
+    expect(denial(() => selectProfile(loaded, "actions", claims))).toBe("ambiguous");
+    expect(selectProfile(loaded, "actions", claims, "infra-cloudflare").name).toBe("infra-cloudflare");
   });
 
   it("denies a named profile that doesn't match", () => {
-    expect(denial(() => selectProfile(loaded, githubClaims(), "infra-cloudflare"))).toBe("profile_mismatch");
-    expect(denial(() => selectProfile(loaded, githubClaims(), "nope"))).toBe("profile_mismatch");
+    expect(denial(() => selectProfile(loaded, "actions", githubClaims(), "infra-cloudflare"))).toBe("profile_mismatch");
+    expect(denial(() => selectProfile(loaded, "actions", githubClaims(), "nope"))).toBe("profile_mismatch");
   });
 
   it("clamps ttl to max_ttl and rejects nonsense", () => {
@@ -291,6 +291,130 @@ describe("matching", () => {
     expect(clampTTL("10h", r)).toBe(60 * 60_000);
     expect(denial(() => clampTTL("forever", r))).toBe("invalid_ttl");
     expect(denial(() => clampTTL("30s", r))).toBe("invalid_ttl");
+  });
+});
+
+describe("user profiles", () => {
+  type TestProfile = TestPolicy["profiles"][number];
+
+  /** The test policy plus one user profile, with workers-deploy's token. */
+  const withUser = (match: Record<string, unknown>, extra: Partial<TestProfile> = {}) => {
+    const p = policy();
+    const token = (p.profiles[1] as TestProfile).token;
+    p.profiles.push({ name: "tofu-plan", subject: "user", match, token, ...extra });
+    return p;
+  };
+
+  /** A person's claims as github.ts builds them. */
+  const person = (overrides: Record<string, unknown> = {}) => ({
+    actor: "octocat",
+    actor_id: USER_ID,
+    repository: "example-org/infra",
+    repository_id: "200000002",
+    repository_owner: "example-org",
+    repository_owner_id: OWNER_ID,
+    repository_permission: "write",
+    team_ids: [TEAM_ID],
+    ...overrides,
+  });
+
+  it("defaults subject to actions", () => {
+    for (const profile of loadPolicy(policy()).profiles) expect(profile.subject).toBe("actions");
+  });
+
+  it("accepts a user profile", () => {
+    const p = loadPolicy(withUser({ team_id: TEAM_ID, repository_permission: "write" }));
+    expect(p.profiles.find((r) => r.name === "tofu-plan")?.subject).toBe("user");
+  });
+
+  it("rejects an unknown subject", () => {
+    expect(issues(withUser({ repository_permission: "write" }, { subject: "robot" }))).toEqual([
+      "profiles.3.subject: must be actions or user",
+    ]);
+  });
+
+  it("6: requires repository_permission", () => {
+    expect(issues(withUser({ team_id: TEAM_ID }))).toEqual([
+      "profiles.3 (tofu-plan).match.repository_permission: required for a user profile",
+    ]);
+  });
+
+  it("6: rejects claims only Actions jobs have", () => {
+    expect(issues(withUser({ repository_permission: "write", ref: "refs/heads/main", environment: "prod" }))).toEqual([
+      expect.stringMatching(/^profiles\.3 \(tofu-plan\)\.match\.ref: not available for people/),
+      expect.stringMatching(/^profiles\.3 \(tofu-plan\)\.match\.environment: not available for people/),
+    ]);
+  });
+
+  it("6: rejects person-only keys in an Actions profile", () => {
+    const p = policy();
+    (p.profiles[0] as TestProfile).match.team_id = TEAM_ID;
+    (p.profiles[0] as TestProfile).match.repository_permission = "write";
+    expect(issues(p)).toEqual([
+      "profiles.0 (infra-cloudflare).match.team_id: only for user profiles (subject: user)",
+      "profiles.0 (infra-cloudflare).match.repository_permission: only for user profiles (subject: user)",
+    ]);
+  });
+
+  it("rejects an unknown repository_permission", () => {
+    expect(issues(withUser({ repository_permission: "push" }))).toEqual([
+      "profiles.3 (tofu-plan).match.repository_permission: must be one of read, triage, write, maintain, admin",
+    ]);
+  });
+
+  it("2: rejects a globbed team_id", () => {
+    expect(issues(withUser({ team_id: "4000*", repository_permission: "write" }))).toEqual([
+      "profiles.3 (tofu-plan).match.team_id: ID claims must be exact, globs are not allowed",
+    ]);
+  });
+
+  it("caps the default max_ttl at 1h, unless the profile sets its own", () => {
+    const p = withUser({ repository_permission: "write" });
+    p.defaults = { ttl: "15m", max_ttl: "24h" };
+    const user = loadPolicy(p).profiles.find((r) => r.name === "tofu-plan");
+    expect(user?.max_ttl).toBe(60 * 60_000);
+    expect(loadPolicy(p).profiles.find((r) => r.name === "workers-deploy")?.max_ttl).toBe(24 * 60 * 60_000);
+
+    const own = withUser({ repository_permission: "write" }, { max_ttl: "8h" });
+    own.defaults = { ttl: "15m", max_ttl: "24h" };
+    expect(loadPolicy(own).profiles.find((r) => r.name === "tofu-plan")?.max_ttl).toBe(8 * 60 * 60_000);
+  });
+
+  describe("matching", () => {
+    const loaded = loadPolicy(withUser({ team_id: TEAM_ID, repository_permission: "write" }));
+    const user = loaded.profiles.find((r) => r.name === "tofu-plan") as Profile;
+
+    it("requires at least the role", () => {
+      expect(matches(user, person())).toBe(true);
+      expect(matches(user, person({ repository_permission: "admin" }))).toBe(true);
+      expect(matches(user, person({ repository_permission: "triage" }))).toBe(false);
+      expect(matches(user, person({ repository_permission: undefined }))).toBe(false);
+      expect(matches(user, person({ repository_permission: "push" }))).toBe(false);
+    });
+
+    it("requires membership of the team", () => {
+      expect(matches(user, person({ team_ids: ["400000099", TEAM_ID] }))).toBe(true);
+      expect(matches(user, person({ team_ids: [] }))).toBe(false);
+      expect(matches(user, person({ team_ids: undefined }))).toBe(false);
+      expect(matches(user, person({ team_ids: TEAM_ID }))).toBe(false);
+    });
+
+    it("keeps the owner pin", () => {
+      expect(matches(user, person({ repository_owner_id: "999999" }))).toBe(false);
+    });
+
+    it("never picks an Actions profile for a person", () => {
+      // workers-deploy matches repository example-org/*, which a person's claims have too.
+      expect(selectProfile(loaded, "user", person()).name).toBe("tofu-plan");
+      expect(denial(() => selectProfile(loaded, "user", person(), "workers-deploy"))).toBe("profile_mismatch");
+      expect(denial(() => selectProfile(loaded, "user", person({ team_ids: [] })))).toBe("no_match");
+    });
+
+    it("never picks a user profile for a job", () => {
+      const job = githubClaims({ ...person(), ref: "refs/heads/dev" });
+      expect(denial(() => selectProfile(loaded, "actions", job))).toBe("no_match");
+      expect(denial(() => selectProfile(loaded, "actions", job, "tofu-plan"))).toBe("profile_mismatch");
+    });
   });
 });
 

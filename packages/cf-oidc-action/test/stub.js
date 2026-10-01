@@ -67,9 +67,9 @@ export function startStub({
         value: `stub-jwt.${Buffer.from(url.searchParams.get("audience") ?? "").toString("base64url")}`,
       });
     }
-    if (req.method === "POST" && url.pathname === "/v1/token") {
+    if (req.method === "POST" && url.pathname === "/v1/actions/token") {
       if (!req.headers.authorization?.startsWith("Bearer stub-jwt.")) return send(401, { error: "unauthorized" });
-      if (tokenStatus !== 200) return send(tokenStatus, { error: "forbidden" });
+      if (tokenStatus !== 200) return send(tokenStatus, { error: tokenStatus === 404 ? "not_found" : "forbidden" });
       const common = { account_id: STUB_ACCOUNT_ID, expires_on: "2026-09-28T12:15:00Z" };
       if (body?.profile === STUB_R2_PROFILE) {
         return send(200, { ...common, profile: STUB_R2_PROFILE, buckets: [STUB_BUCKET], ...tokenFields });

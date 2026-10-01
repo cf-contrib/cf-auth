@@ -108,7 +108,7 @@ describe("main", () => {
 
     const oidc = stub.calls.find((c) => c.path === "/oidc");
     expect(oidc).toBeDefined();
-    const token = stub.calls.find((c) => c.path === "/v1/token");
+    const token = stub.calls.find((c) => c.path === "/v1/actions/token");
     // The audience is the broker's origin, without the trailing slash.
     expect(token?.authorization).toBe(`Bearer stub-jwt.${Buffer.from(stub.url).toString("base64url")}`);
     expect(token?.body).toEqual({ profile: "workers-deploy", ttl: "10m" });
@@ -123,7 +123,7 @@ describe("main", () => {
       INPUT_TTL: "",
     });
     expect(r.code).toBe(0);
-    expect(stub.calls.find((c) => c.path === "/v1/token")?.body).toEqual({});
+    expect(stub.calls.find((c) => c.path === "/v1/actions/token")?.body).toEqual({});
   });
 
   /** @param {typeof STUB_BUCKET} b */
@@ -298,6 +298,15 @@ describe("main", () => {
     expect(r.stdout).toContain("::error::cf-oidc broker returned 403 (forbidden): no profile allows this workflow");
     expect(r.env).toEqual({});
     expect(r.state).toEqual({});
+  });
+
+  it("fails with a hint when the broker is older than the action", async () => {
+    stub = await startStub({ tokenStatus: 404 });
+    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain(
+      "::error::cf-oidc broker returned 404 (not_found): the broker doesn't serve /v1/actions/token",
+    );
   });
 
   it("retries a flaky OIDC endpoint", async () => {

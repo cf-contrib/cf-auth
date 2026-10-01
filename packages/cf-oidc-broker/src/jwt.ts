@@ -14,11 +14,11 @@ function remoteKeys(issuer: string): JWTVerifyGetKey {
   return keys;
 }
 
-/** Extracts the token from an `Authorization: Bearer <token>` header. */
-export function bearer(request: Request): string {
+/** Extracts the token from an `Authorization: Bearer <token>` header. `reason` is for the audit log when it's missing. */
+export function bearer(request: Request, reason = "invalid_jwt"): string {
   const header = request.headers.get("authorization") ?? "";
   const m = /^bearer\s+(\S+)$/i.exec(header);
-  if (!m) throw new HttpError("unauthorized", "invalid_jwt", "missing bearer token");
+  if (!m) throw new HttpError("unauthorized", reason, "missing bearer token");
   return m[1] as string;
 }
 
