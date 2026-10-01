@@ -20,7 +20,7 @@ jobs:
       id-token: write # required: lets the job request an OIDC token
     steps:
       - uses: actions/checkout@v6
-      - uses: cf-contrib/cf-oidc-auth@v0.5.0 # x-release-please-version
+      - uses: cf-contrib/cf-oidc-auth@v0.6.0 # x-release-please-version
         with:
           broker-url: https://cf-oidc-broker.example.com
           profile: workers-deploy
@@ -34,7 +34,7 @@ It needs a deployed [broker](../cf-oidc-broker) whose policy allows this workflo
 Pin a release. Before 1.0 there's no floating `v0` tag, because a minor release may contain breaking changes:
 
 ```yaml
-- uses: cf-contrib/cf-oidc-auth@v0.5.0 # x-release-please-version
+- uses: cf-contrib/cf-oidc-auth@v0.6.0 # x-release-please-version
 ```
 
 For the strictest setup, pin the commit SHA the tag points to, and let Dependabot's `github-actions` updates keep it current:
@@ -77,7 +77,7 @@ None of this can be switched off: what's exported is decided by the profile. Exp
 `wrangler-action` sets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from its own inputs. If you omit them it overwrites the exported values with empty strings, so pass them explicitly:
 
 ```yaml
-      - uses: cf-contrib/cf-oidc-auth@v0.5.0 # x-release-please-version
+      - uses: cf-contrib/cf-oidc-auth@v0.6.0 # x-release-please-version
         with:
           broker-url: https://cf-oidc-broker.example.com
           profile: workers-deploy
@@ -90,7 +90,7 @@ None of this can be switched off: what's exported is decided by the profile. Exp
 ### Terraform / OpenTofu apply
 
 ```yaml
-      - uses: cf-contrib/cf-oidc-auth@v0.5.0 # x-release-please-version
+      - uses: cf-contrib/cf-oidc-auth@v0.6.0 # x-release-please-version
         with:
           broker-url: https://cf-oidc-broker.example.com
           profile: infra-cloudflare
@@ -129,7 +129,7 @@ jobs:
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/checkout@v6
-      - uses: cf-contrib/cf-oidc-auth@v0.5.0 # x-release-please-version
+      - uses: cf-contrib/cf-oidc-auth@v0.6.0 # x-release-please-version
         with: { broker-url: https://cf-oidc-broker.example.com, profile: service-dns }
       - run: ./scripts/update-dns.sh
 
@@ -140,7 +140,7 @@ jobs:
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/checkout@v6
-      - uses: cf-contrib/cf-oidc-auth@v0.5.0 # x-release-please-version
+      - uses: cf-contrib/cf-oidc-auth@v0.6.0 # x-release-please-version
         with: { broker-url: https://cf-oidc-broker.example.com, profile: workers-deploy }
       - run: npx wrangler deploy
 ```
