@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.6.0...v0.7.0) (2026-10-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* `subject: user`, released in 0.6.0, is now `subject: users`, so a profile's subject is also its route. A policy still using `user` fails to load with "subject: must be actions or users".
+
+### Bug Fixes
+
+* name the people subject users, like its route ([#31](https://github.com/cf-contrib/cf-oidc-auth/issues/31)) ([2323713](https://github.com/cf-contrib/cf-oidc-auth/commit/2323713bb47ef39b55344284f0d92ad63bb3317d))
+
 ## [0.6.0](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.5.0...v0.6.0) (2026-10-01)
 
 
