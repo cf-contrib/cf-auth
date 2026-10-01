@@ -168,7 +168,7 @@ The broker asks GitHub, with the person's token, who they are, what the repo's I
 | Match key | Matches when |
 |---|---|
 | `repository_permission` | **Required.** The person's role on the repo is at least this: `read`, `triage`, `write`, `maintain` or `admin`. |
-| `team_id` | The person is a member of this team. Needs the token's `read:org` scope, which gh's token has. |
+| `team_id` | The person is a member of this team. GitHub answers for a token with the `repo`, `read:org` or `user` scope; gh's token has `repo`. |
 | `repository`, `repository_id` | The repo, as for jobs. |
 | `actor_id` | The person's numeric user ID. |
 

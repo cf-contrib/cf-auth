@@ -85,7 +85,7 @@ export async function verifyGitHubUser(token: string, repository: string, check:
   return claims;
 }
 
-/** IDs of the caller's teams in the owner. Needs the `read:org` scope, which gh's token has. */
+/** IDs of the caller's teams in the owner. GitHub accepts `repo`, `read:org` or `user` for it, and gh's token has `repo`. */
 async function teamIds(token: string, ownerId: string): Promise<string[]> {
   const ids: string[] = [];
   for (let page = 1; page <= MAX_TEAM_PAGES; page++) {
