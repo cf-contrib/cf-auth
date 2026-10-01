@@ -301,7 +301,7 @@ describe("user profiles", () => {
   const withUser = (match: Record<string, unknown>, extra: Partial<TestProfile> = {}) => {
     const p = policy();
     const token = (p.profiles[1] as TestProfile).token;
-    p.profiles.push({ name: "tofu-plan", subject: "user", match, token, ...extra });
+    p.profiles.push({ name: "tofu-plan", subject: "users", match, token, ...extra });
     return p;
   };
 
@@ -324,12 +324,12 @@ describe("user profiles", () => {
 
   it("accepts a user profile", () => {
     const p = loadPolicy(withUser({ team_id: TEAM_ID, repository_permission: "write" }));
-    expect(p.profiles.find((r) => r.name === "tofu-plan")?.subject).toBe("user");
+    expect(p.profiles.find((r) => r.name === "tofu-plan")?.subject).toBe("users");
   });
 
   it("rejects an unknown subject", () => {
     expect(issues(withUser({ repository_permission: "write" }, { subject: "robot" }))).toEqual([
-      "profiles.3.subject: must be actions or user",
+      "profiles.3.subject: must be actions or users",
     ]);
   });
 
@@ -351,8 +351,8 @@ describe("user profiles", () => {
     (p.profiles[0] as TestProfile).match.team_id = TEAM_ID;
     (p.profiles[0] as TestProfile).match.repository_permission = "write";
     expect(issues(p)).toEqual([
-      "profiles.0 (infra-cloudflare).match.team_id: only for user profiles (subject: user)",
-      "profiles.0 (infra-cloudflare).match.repository_permission: only for user profiles (subject: user)",
+      "profiles.0 (infra-cloudflare).match.team_id: only for user profiles (subject: users)",
+      "profiles.0 (infra-cloudflare).match.repository_permission: only for user profiles (subject: users)",
     ]);
   });
 
@@ -405,9 +405,9 @@ describe("user profiles", () => {
 
     it("never picks an Actions profile for a person", () => {
       // workers-deploy matches repository example-org/*, which a person's claims have too.
-      expect(selectProfile(loaded, "user", person()).name).toBe("tofu-plan");
-      expect(denial(() => selectProfile(loaded, "user", person(), "workers-deploy"))).toBe("profile_mismatch");
-      expect(denial(() => selectProfile(loaded, "user", person({ team_ids: [] })))).toBe("no_match");
+      expect(selectProfile(loaded, "users", person()).name).toBe("tofu-plan");
+      expect(denial(() => selectProfile(loaded, "users", person(), "workers-deploy"))).toBe("profile_mismatch");
+      expect(denial(() => selectProfile(loaded, "users", person({ team_ids: [] })))).toBe("no_match");
     });
 
     it("never picks a user profile for a job", () => {

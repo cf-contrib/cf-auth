@@ -543,7 +543,7 @@ describe("POST /v1/users/token", () => {
     const profiles = [
       {
         name: "tofu-plan",
-        subject: "user",
+        subject: "users",
         match: { team_id: TEAM_ID, repository_permission: "read" },
         ttl: "30m",
         buckets: [
@@ -556,7 +556,7 @@ describe("POST /v1/users/token", () => {
       },
       {
         name: "infra-dns",
-        subject: "user",
+        subject: "users",
         match: { repository_id: "200000002", repository_permission: "write" },
         token: {
           policies: [
@@ -603,7 +603,7 @@ describe("POST /v1/users/token", () => {
   it("writes audit lines with the person, without the gh token", async () => {
     await mintFor({ profile: "infra-dns", repository: "example-org/infra" });
     expect(auditLines().find((l) => l.event === "token.mint")).toMatchObject({
-      subject: "user",
+      subject: "users",
       profile: "infra-dns",
       actor: "octocat",
       actor_id: USER_ID,
@@ -616,14 +616,14 @@ describe("POST /v1/users/token", () => {
   it("403s when several user profiles match and none is named", async () => {
     // tofu-plan (team, read) and infra-dns (repo, write) both match example-org/infra.
     expect((await mintFor({ repository: "example-org/infra" })).status).toBe(403);
-    expect(deny()).toMatchObject({ subject: "user", reason: "ambiguous" });
+    expect(deny()).toMatchObject({ subject: "users", reason: "ambiguous" });
   });
 
   it("never uses an Actions profile for a person", async () => {
     // workers-deploy matches repository example-org/*, as this person's claims would.
     const res = await mintFor({ profile: "workers-deploy", repository: "example-org/api" });
     expect(res.status).toBe(403);
-    expect(deny()).toMatchObject({ reason: "profile_mismatch", detail: "profile workers-deploy isn't for user" });
+    expect(deny()).toMatchObject({ reason: "profile_mismatch", detail: "profile workers-deploy isn't for users" });
   });
 
   it("never uses a user profile for a job", async () => {
@@ -862,7 +862,7 @@ describe("tokenName", () => {
 
   it("names a person's token after them, also within 120 characters", () => {
     const claims = { actor: "octocat", repository: `example-org/${"x".repeat(200)}` };
-    const name = tokenName(claims, "user");
+    const name = tokenName(claims, "users");
     expect(name.length).toBe(120);
     expect(name).toMatch(/^cf-oidc:user:octocat:example-org\/x+$/);
   });

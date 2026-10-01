@@ -123,10 +123,10 @@ jq -n \
       github: { audience: $audience, owner_id: $owner },
       profiles: ([
         { name: "ci", match: { repository_id: $repo }, token: $token },
-        { name: "me", subject: "user", match: { repository_permission: "write" }, token: $token },
-        { name: "me-bad-team", subject: "user", match: { team_id: "1", repository_permission: "read" }, token: $token }
+        { name: "me", subject: "users", match: { repository_permission: "write" }, token: $token },
+        { name: "me-bad-team", subject: "users", match: { team_id: "1", repository_permission: "read" }, token: $token }
       ] + if $team == "" then [] else [
-        { name: "me-team", subject: "user", match: { team_id: $team, repository_permission: "read" }, token: $token }
+        { name: "me-team", subject: "users", match: { team_id: $team, repository_permission: "read" }, token: $token }
       ] end)
     }' >"$POLICY"
 

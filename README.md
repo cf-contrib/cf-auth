@@ -33,7 +33,7 @@ steps:
 
 The action and the broker, with its Terraform module, are released together from one tag, so deploy the broker from the release whose action you use. The action talks only to the broker, never to the Cloudflare API.
 
-People can get credentials too, for example to run `tofu plan` locally against the shared state bucket. [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare) sends their `gh auth token` to the broker, which checks their role on the repo with GitHub and matches [`subject: user` profiles](packages/cf-oidc-broker#people).
+People can get credentials too, for example to run `tofu plan` locally against the shared state bucket. [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare) sends their `gh auth token` to the broker, which checks their role on the repo with GitHub and matches [`subject: users` profiles](packages/cf-oidc-broker#people).
 
 ## How it works
 

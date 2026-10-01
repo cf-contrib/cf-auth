@@ -4,7 +4,7 @@
 > matches it against your policy, and mints a short-lived Cloudflare API token
 > with exactly that profile's permissions, R2 credentials limited to the repo's
 > key prefix, or both. People can get the same from their GitHub token, through
-> [`subject: user` profiles](#people).
+> [`subject: users` profiles](#people).
 
 [![CI](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
@@ -131,7 +131,7 @@ profiles:
         prefixes: ["{repository_owner_id}/{repository_id}/"]
 
   - name: tofu-plan                     # for people, with gh-cloudflare
-    subject: user
+    subject: users
     match:
       team_id: "400000005"              # infra team
       repository_permission: write      # at least write on the requested repo
@@ -141,7 +141,7 @@ profiles:
         prefixes: ["{repository_owner_id}/{repository_id}/"]
 ```
 
-A profile has a `token`, `buckets`, or both. It's for GitHub Actions jobs unless it says `subject: user`.
+A profile has a `token`, `buckets`, or both. It's for GitHub Actions jobs unless it says `subject: users`.
 
 The broker validates the policy on the first request. If it's invalid, the broker fails closed and every request gets `500`.
 
@@ -153,11 +153,11 @@ The broker validates the policy on the first request. If it's invalid, the broke
 - `*` matches any run of characters, including `/`. ID claims (`*_id`) must be exact.
 - If the request names a `profile`, that profile must match. Otherwise exactly one profile must match. Both failures are a `403`.
 - Unquoted YAML numbers are accepted for IDs and compared as strings.
-- A job is only matched against profiles for `actions` (the default), and a person only against `subject: user` profiles. Naming a profile for the other subject is a `403`.
+- A job is only matched against profiles for `actions` (the default), and a person only against `subject: users` profiles. Naming a profile for the other subject is a `403`. The subject is also the route: jobs call `/v1/actions/token` and people `/v1/users/token`.
 
 ### People
 
-A `subject: user` profile gives people credentials for a repo, from their GitHub user token. The client is [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare), which sends `gh auth token` to [`POST /v1/users/token`](#http-api) with the repo to act for:
+A `subject: users` profile gives people credentials for a repo, from their GitHub user token. The client is [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare), which sends `gh auth token` to [`POST /v1/users/token`](#http-api) with the repo to act for:
 
 ```sh
 gh cloudflare exec --profile tofu-plan -- tofu plan
@@ -293,7 +293,7 @@ Bodies are deliberately generic; the reason goes to the audit log.
 
 ### Audit log
 
-Every mint, denial and revoke emits one JSON line to Workers Logs, with `subject` (`actions` or `user`) for mints and denials. Token values, R2 secrets, JWTs and gh tokens are never logged:
+Every mint, denial and revoke emits one JSON line to Workers Logs, with `subject` (`actions` or `users`) for mints and denials. Token values, R2 secrets, JWTs and gh tokens are never logged:
 
 ```json
 {"event":"token.mint","subject":"actions","profile":"workers-deploy","repository":"example-org/api","repository_id":"200000003","ref":"refs/heads/main","environment":"prod","run_id":"1234567890","run_attempt":"1","actor_id":"300000004","token_id":"<token-id>","expires_on":"2026-09-28T12:15:00Z"}
