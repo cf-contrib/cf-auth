@@ -20,6 +20,10 @@ tower-service = "0.3"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The policy: errors by the path of the field they're about, claim patterns, URLs.
+serde_path_to_error = "0.1"
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl"] }
+url = "2"
 
 [features]
 # Opt-in integration tests which require `wrangler dev` running locally.
