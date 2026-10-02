@@ -1,13 +1,12 @@
-# The broker's token-exchange contract. Keep it in step with src/api.ts, which the
+# The broker's OAuth contract. Keep it in step with src/api.ts, which the
 # action type-checks against; the Worker's tests exercise every response it lists.
 openapi: 3.1.0
 info:
   title: cf-oidc-broker
   version: "1"
   description: >-
-    Exchanges a GitHub identity for short-lived Cloudflare credentials. `POST /oauth/token`
-    is an RFC 8693 token exchange; the `/v1` routes predate it and stay until the next
-    breaking release.
+    Exchanges a GitHub identity for short-lived Cloudflare credentials (RFC 8693 token
+    exchange at `POST /oauth/token`), and revokes them (RFC 7009 at `POST /oauth/revoke`).
 servers:
   - url: https://cf-oidc-broker.example.com
 paths:
@@ -53,6 +52,34 @@ paths:
           $ref: "#/components/responses/Error"
         "502":
           $ref: "#/components/responses/Error"
+  /oauth/revoke:
+    post:
+      operationId: revokeToken
+      summary: Revoke a Cloudflare API token the broker minted.
+      description: >-
+        Holding the token is the proof. Answers `200` whether the token was revoked, already
+        gone or never valid, as RFC 7009 has it, and `403` for a token the broker didn't mint,
+        which it never deletes.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/TokenRevocationRequest"
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenRevocationRequest"
+      responses:
+        "200":
+          description: Revoked, already gone, or never valid. No body.
+        "400":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
 components:
   responses:
     Error:
@@ -66,6 +93,18 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    TokenRevocationRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          minLength: 1
+          maxLength: 8192
+        token_type_hint:
+          type: string
+          const: access_token
+          description: Ignored; only Cloudflare API tokens the broker minted can be revoked.
     TokenExchangeRequest:
       type: object
       required: [grant_type, subject_token, subject_token_type]

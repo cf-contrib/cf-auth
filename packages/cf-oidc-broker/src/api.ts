@@ -1,22 +1,5 @@
-// The broker's /v1 HTTP contract. The action type-checks against this file, so it
+// The broker's HTTP contract. The action type-checks against this file, so it
 // must stay free of runtime code and Workers-specific types.
-
-/** Body of `POST /v1/actions/token`, which a GitHub Actions job calls with its OIDC token. */
-export interface TokenRequest {
-  /** Profile to use. If omitted, exactly one profile must match the caller's claims. */
-  profile?: string | undefined;
-  /** Requested lifetime such as `10m` or `1h`. Capped at the profile's `max_ttl`. */
-  ttl?: string | undefined;
-}
-
-/** Body of `POST /v1/users/token`, which a person calls with their GitHub user token. */
-export interface UserTokenRequest extends TokenRequest {
-  /**
-   * Repo to get credentials for: `owner/name` or its numeric ID. The broker checks the
-   * caller's role on it, and fills in bucket prefixes from what GitHub returns for it.
-   */
-  repository: string;
-}
 
 /** What the presented `subject_token` is: a GitHub Actions OIDC token (`id_token` or `jwt`), or a GitHub user token (`access_token`). */
 export type SubjectTokenType =
@@ -31,7 +14,7 @@ export type IssuedTokenType =
 
 /**
  * Body of `POST /oauth/token`, an RFC 8693 token exchange, form-encoded or JSON. `profile`,
- * `ttl` and `repository` are extension parameters with the same meaning as on the `/v1` routes.
+ * `ttl` and `repository` are the broker's own extension parameters.
  */
 export interface TokenExchangeRequest {
   grant_type: "urn:ietf:params:oauth:grant-type:token-exchange";
@@ -65,17 +48,14 @@ export interface TokenExchangeResponse {
   buckets?: BucketCredentials[];
 }
 
-/** `200` response of `POST /v1/actions/token` and `POST /v1/users/token`. */
-export interface TokenResponse {
-  /** Absent for a profile with only `buckets`, like `token_id`. */
-  token?: string;
-  token_id?: string;
-  account_id: string;
-  /** RFC 3339 timestamp, e.g. `2026-09-28T12:15:00Z`. */
-  expires_on: string;
-  profile: string;
-  /** One entry per bucket in the profile's `buckets`, in the same order. */
-  buckets?: BucketCredentials[];
+/**
+ * Body of `POST /oauth/revoke`, an RFC 7009 revocation, form-encoded or JSON. Answers `200`
+ * whether the token was revoked, already gone or never valid; `403` for tokens the broker didn't mint.
+ */
+export interface TokenRevocationRequest {
+  token: string;
+  /** Ignored, as RFC 7009 allows: only Cloudflare API tokens the broker minted can be revoked. */
+  token_type_hint?: "access_token" | undefined;
 }
 
 /** S3 credentials for one R2 bucket, limited to `prefixes`. They can't be revoked; they expire. */

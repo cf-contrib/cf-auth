@@ -340,7 +340,13 @@ describe("post", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain(`cf-oidc: revoked token ${STUB_TOKEN_ID}`);
     expect(stub.calls).toEqual([
-      { method: "POST", path: "/v1/revoke", authorization: `Bearer ${STUB_TOKEN}`, body: undefined },
+      // RFC 7009: the token in a form body, not a header.
+      {
+        method: "POST",
+        path: "/oauth/revoke",
+        authorization: undefined,
+        body: { token: STUB_TOKEN, token_type_hint: "access_token" },
+      },
     ]);
   });
 

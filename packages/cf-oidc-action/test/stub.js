@@ -40,7 +40,7 @@ export const STUB_R2_PROFILE_2 = "smoke-r2-multi";
 export function startStub({
   port = 0,
   tokenStatus = 200,
-  revokeStatus = 204,
+  revokeStatus = 200,
   oidcStatuses = [],
   tokenFields = {},
 } = {}) {
@@ -52,7 +52,8 @@ export function startStub({
     const url = new URL(req.url ?? "/", "http://stub");
     let raw = "";
     for await (const chunk of req) raw += chunk;
-    const body = raw ? JSON.parse(raw) : undefined;
+    const form = req.headers["content-type"] === "application/x-www-form-urlencoded";
+    const body = !raw ? undefined : form ? Object.fromEntries(new URLSearchParams(raw)) : JSON.parse(raw);
     calls.push({ method: req.method ?? "", path: url.pathname, authorization: req.headers.authorization, body });
 
     /** @param {number} status @param {unknown} [json] */
@@ -95,8 +96,9 @@ export function startStub({
         ...tokenFields,
       });
     }
-    if (req.method === "POST" && url.pathname === "/v1/revoke") {
-      return send(req.headers.authorization === `Bearer ${STUB_TOKEN}` ? revokeStatus : 401);
+    if (req.method === "POST" && url.pathname === "/oauth/revoke") {
+      if (!body?.token) return send(400, { error: "bad_request" });
+      return send(body.token === STUB_TOKEN ? revokeStatus : 200);
     }
     send(404, { error: "not_found" });
   });

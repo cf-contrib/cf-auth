@@ -1,4 +1,4 @@
-import type { IssuedTokenType, SubjectTokenType, TokenExchangeRequest, UserTokenRequest } from "./api.js";
+import type { IssuedTokenType, SubjectTokenType, TokenExchangeRequest } from "./api.js";
 import { HttpError } from "./errors.js";
 import { REPOSITORY } from "./github.js";
 import type { Subject } from "./policy.js";
@@ -20,8 +20,8 @@ const SUBJECTS: Record<SubjectTokenType, Subject> = {
 /** A GitHub OIDC token is a few KB at most, and a GitHub user token far less. */
 const MAX_SUBJECT_TOKEN = 8192;
 
-/** A token request, whichever route it came in on. */
-export type TokenFields = Partial<UserTokenRequest>;
+/** The broker's own exchange parameters, once checked. */
+export type TokenFields = Pick<TokenExchangeRequest, "profile" | "ttl" | "repository">;
 
 const invalid = (detail: string) => new HttpError("bad_request", "invalid_body", detail);
 
@@ -54,14 +54,13 @@ function parseObject(text: string): Record<string, unknown> {
   return body as Record<string, unknown>;
 }
 
-/** Reads the body of `/v1/actions/token` or `/v1/users/token`. `repository` is only read, and then required, for people. */
-export async function readTokenRequest(request: Request, subject: Subject): Promise<TokenFields> {
+/** Reads an `/oauth/*` body: form-encoded as the RFCs have it, or JSON. */
+async function readBody(request: Request): Promise<Record<string, unknown>> {
+  const type = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
   const text = await request.text();
-  if (text.trim() === "") {
-    if (subject === "users") throw invalid("repository is required");
-    return {};
-  }
-  return checkFields(subject, parseObject(text));
+  if (type === "application/x-www-form-urlencoded") return Object.fromEntries(new URLSearchParams(text));
+  if (type === "application/json") return parseObject(text);
+  throw invalid("content-type must be application/x-www-form-urlencoded or application/json");
 }
 
 /** A parsed `POST /oauth/token`: who's asking, with what token, for what. */
@@ -76,16 +75,7 @@ export interface Exchange {
  * as delegation with `actor_token` or another audience, is refused rather than ignored.
  */
 export async function readExchangeRequest(request: Request): Promise<Exchange> {
-  const type = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
-  const text = await request.text();
-  let body: Record<string, unknown>;
-  if (type === "application/x-www-form-urlencoded") {
-    body = Object.fromEntries(new URLSearchParams(text));
-  } else if (type === "application/json") {
-    body = parseObject(text);
-  } else {
-    throw invalid("content-type must be application/x-www-form-urlencoded or application/json");
-  }
+  const body = await readBody(request);
 
   const { grant_type, subject_token, subject_token_type, audience, requested_token_type } = body;
   // The audit log gets what was asked for, cut short.
@@ -114,4 +104,15 @@ export async function readExchangeRequest(request: Request): Promise<Exchange> {
     throw new HttpError("bad_request", "unsupported_requested_token_type", shown(requested_token_type));
   }
   return { subject, token: subject_token, fields: checkFields(subject, body) };
+}
+
+/**
+ * Reads an RFC 7009 revocation: the token to revoke, form-encoded or JSON. `token_type_hint`
+ * is ignored, as the RFC allows: only Cloudflare API tokens the broker minted can be revoked.
+ */
+export async function readRevokeRequest(request: Request): Promise<string> {
+  const { token } = await readBody(request);
+  if (typeof token !== "string" || token === "") throw invalid("token is required");
+  if (token.length > MAX_SUBJECT_TOKEN) throw invalid("token too long");
+  return token;
 }

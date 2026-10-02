@@ -40,7 +40,7 @@ export interface UserCheck {
 export async function verifyGitHubUser(token: string, repository: string, check: UserCheck): Promise<Claims> {
   // GITHUB_TOKEN and other installation tokens identify a repo, not a person.
   if (token.startsWith("ghs_")) {
-    throw new HttpError("unauthorized", "installation_token", "use /v1/actions/token from GitHub Actions");
+    throw new HttpError("unauthorized", "installation_token", "GitHub Actions jobs exchange their OIDC token instead");
   }
 
   const repoPath = /^\d+$/.test(repository) ? `/repositories/${repository}` : `/repos/${repository}`;

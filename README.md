@@ -52,7 +52,7 @@ sequenceDiagram
     CF-->>Broker: token
     Broker-->>Job: token
     Note over Job: 4. mask and export CLOUDFLARE_API_TOKEN<br/>later steps use it
-    Job->>Broker: 5. POST /v1/revoke (post step)
+    Job->>Broker: 5. POST /oauth/revoke (post step)
     Broker->>CF: tokens.verify, tokens.get, tokens.delete
     Note over Broker,CF: hourly cron deletes expired cf-oidc:* tokens
 ```

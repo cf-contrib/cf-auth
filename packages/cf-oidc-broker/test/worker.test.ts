@@ -2,7 +2,7 @@
 // Cloudflare API replaced by in-memory fakes.
 import { createExecutionContext, createScheduledController, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TokenExchangeResponse, TokenResponse } from "../src/api.js";
+import type { TokenExchangeResponse } from "../src/api.js";
 import { createBroker, type Env } from "../src/broker.js";
 import { clearParent } from "../src/r2.js";
 import { clearCache } from "../src/resolve.js";
@@ -28,7 +28,7 @@ import {
 type TestProfile = TestPolicy["profiles"][number];
 
 /** A response for a profile with a token. */
-type WithToken = TokenResponse & { token: string; token_id: string };
+type WithToken = TokenExchangeResponse & { access_token: string; token_id: string };
 
 // A unique issuer keeps this file's JWKS out of any other file's per-isolate cache.
 const ISSUER = `https://token.actions.githubusercontent.com/worker-test-${crypto.randomUUID()}`;
@@ -80,22 +80,42 @@ async function call(method: string, path: string, init: { token?: string; body?:
   return worker.fetch(request as Parameters<typeof worker.fetch>[0], env);
 }
 
+const GRANT = "urn:ietf:params:oauth:grant-type:token-exchange";
+const ID_TOKEN = "urn:ietf:params:oauth:token-type:id_token";
+const ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token";
+
+/** Exchanges a job's OIDC token at `POST /oauth/token`, with the broker's own `fields`, as JSON. */
+function jobToken(jwt: string, fields: Record<string, unknown> = {}) {
+  return call("POST", "/oauth/token", {
+    body: { grant_type: GRANT, subject_token: jwt, subject_token_type: ID_TOKEN, ...fields },
+  });
+}
+
+/** Revokes `token` at `POST /oauth/revoke`, form-encoded as RFC 7009 has it. */
+function revokeToken(token?: string) {
+  const request = new Request("https://cf-auth.example.com/oauth/revoke", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(token === undefined ? {} : { token, token_type_hint: "access_token" }).toString(),
+  });
+  const worker = createBroker(policyFile);
+  return worker.fetch(request as Parameters<typeof worker.fetch>[0], env);
+}
+
 const auditLines = () => logs.map((l) => JSON.parse(l) as Record<string, unknown>);
 
-describe("POST /v1/actions/token", () => {
+describe("token exchange for jobs", () => {
   it("mints a scoped, expiring token", async () => {
     const before = Date.now();
-    const res = await call("POST", "/v1/actions/token", {
-      token: await issuer.sign(),
-      body: { profile: "workers-deploy" },
-    });
+    const res = await jobToken(await issuer.sign(), { profile: "workers-deploy" });
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
 
     const body = (await res.json()) as WithToken;
     expect(body.profile).toBe("workers-deploy");
     expect(body.account_id).toBe(ACCOUNT_ID);
-    expect(body.token).toMatch(/^value-/);
+    expect(body.access_token).toMatch(/^value-/);
+    expect(body).toMatchObject({ issued_token_type: ACCESS_TOKEN, token_type: "Bearer" });
 
     const created = cf.tokens.get(body.token_id);
     expect(created?.name).toBe("cf-oidc:example-org/api:1234567890:1");
@@ -107,25 +127,23 @@ describe("POST /v1/actions/token", () => {
       },
     ]);
 
-    // Default ttl is 15m, sent without fractional seconds.
-    expect(body.expires_on).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
-    const ttl = Date.parse(body.expires_on) - before;
+    // Default ttl is 15m, sent to Cloudflare without fractional seconds.
+    expect(created?.expires_on).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+    expect(body.expires_at).toBe(Date.parse(created?.expires_on ?? "") / 1000);
+    const ttl = body.expires_at * 1000 - before;
     expect(ttl).toBeGreaterThan(14 * 60_000);
     expect(ttl).toBeLessThanOrEqual(15 * 60_000 + 1000);
   });
 
   it("uses the single matching profile when none is named", async () => {
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign() });
+    const res = await jobToken(await issuer.sign());
     expect(res.status).toBe(200);
     expect(((await res.json()) as WithToken).profile).toBe("workers-deploy");
   });
 
   it("resolves permission names to IDs and passes resources through", async () => {
     const claims = githubClaims({ repository: "example-org/infra", repository_id: "200000002" });
-    const res = await call("POST", "/v1/actions/token", {
-      token: await issuer.sign(claims),
-      body: { profile: "infra-cloudflare" },
-    });
+    const res = await jobToken(await issuer.sign(claims), { profile: "infra-cloudflare" });
     expect(res.status).toBe(200);
     const { token_id } = (await res.json()) as WithToken;
     expect(cf.tokens.get(token_id)?.policies).toEqual([
@@ -138,14 +156,15 @@ describe("POST /v1/actions/token", () => {
   });
 
   it("clamps the requested ttl to max_ttl", async () => {
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign(), body: { ttl: "12h" } });
-    const { expires_on } = (await res.json()) as WithToken;
-    expect(Date.parse(expires_on) - Date.now()).toBeLessThanOrEqual(60 * 60_000 + 1000);
+    const res = await jobToken(await issuer.sign(), { ttl: "12h" });
+    const { expires_at, expires_in } = (await res.json()) as WithToken;
+    expect(expires_at * 1000 - Date.now()).toBeLessThanOrEqual(60 * 60_000 + 1000);
+    expect(expires_in).toBeLessThanOrEqual(60 * 60);
   });
 
   it("writes an audit line without secrets", async () => {
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign() });
-    const { token, token_id } = (await res.json()) as WithToken;
+    const res = await jobToken(await issuer.sign());
+    const { access_token: token, token_id } = (await res.json()) as WithToken;
     const mint = auditLines().find((l) => l.event === "token.mint");
     expect(mint).toMatchObject({
       profile: "workers-deploy",
@@ -161,20 +180,20 @@ describe("POST /v1/actions/token", () => {
     expect(logs.join("\n")).not.toContain(token);
   });
 
-  it("401s without a JWT", async () => {
-    const res = await call("POST", "/v1/actions/token", {});
-    expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: "unauthorized" });
+  it("400s without a subject token", async () => {
+    const res = await call("POST", "/oauth/token", { body: { grant_type: GRANT, subject_token_type: ID_TOKEN } });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "bad_request" });
   });
 
   it("401s on a JWT for another audience", async () => {
     const jwt = await issuer.sign(undefined, { audience: "sts.amazonaws.com" });
-    expect((await call("POST", "/v1/actions/token", { token: jwt })).status).toBe(401);
+    expect((await jobToken(jwt)).status).toBe(401);
   });
 
   it("403s for a repo outside the pinned owner, with a generic body", async () => {
     const claims = githubClaims({ repository: "example-org/api", repository_owner_id: "999999" });
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign(claims) });
+    const res = await jobToken(await issuer.sign(claims));
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "forbidden" });
     expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({ reason: "no_match" });
@@ -183,16 +202,13 @@ describe("POST /v1/actions/token", () => {
 
   it("403s when several profiles match and none is named", async () => {
     const claims = githubClaims({ repository: "example-org/infra", repository_id: "200000002" });
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign(claims) });
+    const res = await jobToken(await issuer.sign(claims));
     expect(res.status).toBe(403);
     expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({ reason: "ambiguous" });
   });
 
   it("403s when the named profile doesn't match", async () => {
-    const res = await call("POST", "/v1/actions/token", {
-      token: await issuer.sign(),
-      body: { profile: "infra-cloudflare" },
-    });
+    const res = await jobToken(await issuer.sign(), { profile: "infra-cloudflare" });
     expect(res.status).toBe(403);
     expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({
       reason: "profile_mismatch",
@@ -200,10 +216,10 @@ describe("POST /v1/actions/token", () => {
     });
   });
 
-  it.each([[{ ttl: "forever" }], [{ ttl: 600 }], [[1, 2]], [{ profile: "x".repeat(65) }]])(
+  it.each([[{ ttl: "forever" }], [{ ttl: 600 }], [{ profile: ["a"] }], [{ profile: "x".repeat(65) }]])(
     "400s on body %j",
     async (body) => {
-      expect((await call("POST", "/v1/actions/token", { token: await issuer.sign(), body })).status).toBe(400);
+      expect((await jobToken(await issuer.sign(), body)).status).toBe(400);
     },
   );
 
@@ -218,7 +234,7 @@ describe("POST /v1/actions/token", () => {
       ...testPolicy(ISSUER),
       github: { audience: "https://x.example.com" },
     });
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign() });
+    const res = await jobToken(await issuer.sign());
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "misconfigured" });
   });
@@ -227,7 +243,7 @@ describe("POST /v1/actions/token", () => {
     const policy = testPolicy(ISSUER);
     (policy.profiles[1]?.token.policies[0] as { permissions: string[] }).permissions = ["Workers Scrpts Write"];
     policyFile = JSON.stringify(policy);
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign() });
+    const res = await jobToken(await issuer.sign());
     expect(res.status).toBe(500);
     expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({ reason: "unknown_permission" });
   });
@@ -236,7 +252,7 @@ describe("POST /v1/actions/token", () => {
     const policy = testPolicy(ISSUER);
     (policy.profiles[1]?.token.policies[0] as { permissions: string[] }).permissions = ["Load Balancers Write"];
     policyFile = JSON.stringify(policy);
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign() });
+    const res = await jobToken(await issuer.sign());
     const { token_id } = (await res.json()) as WithToken;
     expect(cf.tokens.get(token_id)?.policies[0]).toMatchObject({
       permission_groups: [{ id: "pg-lb-write-account" }],
@@ -248,10 +264,7 @@ describe("POST /v1/actions/token", () => {
     (policy.profiles[0]?.token.policies[0] as { permissions: string[] }).permissions = ["Load Balancers Write"];
     policyFile = JSON.stringify(policy);
     const claims = githubClaims({ repository: "example-org/infra", repository_id: "200000002" });
-    const res = await call("POST", "/v1/actions/token", {
-      token: await issuer.sign(claims),
-      body: { profile: "infra-cloudflare" },
-    });
+    const res = await jobToken(await issuer.sign(claims), { profile: "infra-cloudflare" });
     const { token_id } = (await res.json()) as WithToken;
     expect(cf.tokens.get(token_id)?.policies[0]).toMatchObject({
       permission_groups: [{ id: "pg-lb-write-zone" }],
@@ -260,20 +273,20 @@ describe("POST /v1/actions/token", () => {
 
   it("500s when the policy names another account", async () => {
     env.CF_OIDC_BROKER_ACCOUNT_ID = "ffffffffffffffffffffffffffffffff";
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign() });
+    const res = await jobToken(await issuer.sign());
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "misconfigured" });
   });
 
   it("502s when the Cloudflare API fails, without retrying the create", async () => {
     cf.failCreate = true;
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign() });
+    const res = await jobToken(await issuer.sign());
     expect(res.status).toBe(502);
     expect(cf.requests.filter((r) => r.method === "POST").length).toBe(1);
   });
 });
 
-describe("POST /v1/actions/token with buckets", () => {
+describe("token exchange for jobs, with buckets", () => {
   const STATE = { repository: "example-org/state-*", environment: "state" };
 
   /** Adds profiles for the state environment, which no other test profile matches. */
@@ -297,16 +310,16 @@ describe("POST /v1/actions/token with buckets", () => {
       ],
     });
     const before = Date.now();
-    const res = await call("POST", "/v1/actions/token", {
-      token: await stateRepo(),
-      body: { profile: "terraform-state" },
-    });
+    const res = await jobToken(await stateRepo(), { profile: "terraform-state" });
     expect(res.status).toBe(200);
 
-    const body = (await res.json()) as TokenResponse;
+    const body = (await res.json()) as TokenExchangeResponse;
     expect(body).toEqual({
+      issued_token_type: "urn:cf-oidc-auth:params:oauth:token-type:r2-credentials",
+      token_type: "N_A",
+      expires_in: expect.any(Number),
+      expires_at: Math.floor(Date.parse(body.buckets?.[0]?.expires_on ?? "") / 1000),
       account_id: ACCOUNT_ID,
-      expires_on: body.buckets?.[0]?.expires_on,
       profile: "terraform-state",
       buckets: [
         {
@@ -320,7 +333,7 @@ describe("POST /v1/actions/token with buckets", () => {
         },
       ],
     });
-    const ttl = Date.parse(body.expires_on) - before;
+    const ttl = body.expires_at * 1000 - before;
     expect(ttl).toBeGreaterThan(14 * 60_000);
     expect(ttl).toBeLessThanOrEqual(15 * 60_000 + 1000);
 
@@ -347,8 +360,8 @@ describe("POST /v1/actions/token with buckets", () => {
       max_ttl: "30m",
       buckets: [{ name: "org-terraform-state", permission: "object-read-only" }],
     });
-    const res = await call("POST", "/v1/actions/token", { token: await stateRepo(), body: { ttl: "2h" } });
-    const body = (await res.json()) as TokenResponse;
+    const res = await jobToken(await stateRepo(), { ttl: "2h" });
+    const body = (await res.json()) as TokenExchangeResponse;
     expect(body.buckets?.[0]?.prefixes).toEqual([]);
     expect(r2Requests()[0]?.body).toEqual({
       bucket: "org-terraform-state",
@@ -373,12 +386,13 @@ describe("POST /v1/actions/token with buckets", () => {
       },
       buckets: [{ name: "org-terraform-state", permission: "object-read-write", prefixes: ["{repository_id}/"] }],
     });
-    const res = await call("POST", "/v1/actions/token", { token: await stateRepo() });
+    const res = await jobToken(await stateRepo());
     expect(res.status).toBe(200);
     const body = (await res.json()) as WithToken;
     expect(cf.tokens.has(body.token_id)).toBe(true);
     expect(body.buckets?.[0]?.prefixes).toEqual(["200000003/"]);
-    expect(Math.abs(Date.parse(body.buckets?.[0]?.expires_on ?? "") - Date.parse(body.expires_on))).toBeLessThanOrEqual(
+    // The token's expiry, which the bucket's matches to the second.
+    expect(Math.abs(Date.parse(body.buckets?.[0]?.expires_on ?? "") - body.expires_at * 1000)).toBeLessThanOrEqual(
       1000,
     );
     expect(r2Requests()[0]?.body).toMatchObject({ ttlSeconds: 600 });
@@ -393,9 +407,9 @@ describe("POST /v1/actions/token with buckets", () => {
         { name: "org-artifacts", permission: "object-read-only" },
       ],
     });
-    const res = await call("POST", "/v1/actions/token", { token: await stateRepo() });
+    const res = await jobToken(await stateRepo());
     expect(res.status).toBe(200);
-    const body = (await res.json()) as TokenResponse;
+    const body = (await res.json()) as TokenExchangeResponse;
     expect(body.buckets?.map((b) => [b.name, b.prefixes])).toEqual([
       ["org-terraform-state", ["github.com/example-org/state-app/"]],
       ["org-artifacts", []],
@@ -432,7 +446,7 @@ describe("POST /v1/actions/token with buckets", () => {
       ],
     });
     cf.failR2Bucket = "org-artifacts";
-    const res = await call("POST", "/v1/actions/token", { token: await stateRepo() });
+    const res = await jobToken(await stateRepo());
     expect(res.status).toBe(502);
     expect(cf.tokens.size).toBe(1); // only the broker token
     expect(
@@ -454,7 +468,7 @@ describe("POST /v1/actions/token with buckets", () => {
       buckets: [{ name: "org-terraform-state", permission: "object-read-write" }],
     });
     cf.failR2 = true;
-    const res = await call("POST", "/v1/actions/token", { token: await stateRepo() });
+    const res = await jobToken(await stateRepo());
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({ error: "upstream_error" });
     expect(cf.tokens.size).toBe(1); // only the broker token: the minted one was deleted
@@ -468,9 +482,7 @@ describe("POST /v1/actions/token with buckets", () => {
       match: STATE,
       buckets: [{ name: "org-terraform-state", permission: "object-read-write", prefixes: ["{repository_owner}/"] }],
     });
-    const res = await call("POST", "/v1/actions/token", {
-      token: await stateRepo("state-app", { repository_owner: "../example-org" }),
-    });
+    const res = await jobToken(await stateRepo("state-app", { repository_owner: "../example-org" }));
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "forbidden" });
     expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({
@@ -488,8 +500,8 @@ describe("POST /v1/actions/token with buckets", () => {
         { name: "org-terraform-state", permission: "object-read-write", prefixes: ["github.com/{repository}/"] },
       ],
     });
-    const res = await call("POST", "/v1/actions/token", { token: await stateRepo() });
-    const { buckets } = (await res.json()) as TokenResponse;
+    const res = await jobToken(await stateRepo());
+    const { buckets } = (await res.json()) as TokenExchangeResponse;
     expect(auditLines().find((l) => l.event === "r2.issued")).toEqual({
       event: "r2.issued",
       subject: "actions",
@@ -520,8 +532,8 @@ describe("POST /v1/actions/token with buckets", () => {
       buckets: [{ name: "org-terraform-state", permission: "object-read-write" }],
     });
     const verifies = () => cf.requests.filter((r) => r.path.endsWith("/tokens/verify")).length;
-    await call("POST", "/v1/actions/token", { token: await stateRepo() });
-    await call("POST", "/v1/actions/token", { token: await stateRepo() });
+    await jobToken(await stateRepo());
+    await jobToken(await stateRepo());
     expect(verifies()).toBe(1);
 
     const rotated = cf.add({
@@ -531,12 +543,12 @@ describe("POST /v1/actions/token with buckets", () => {
     });
     env.CF_OIDC_BROKER_TOKEN = { get: async () => rotated.value };
     // The fake only accepts the original broker token for everything but verify, so stop here.
-    await call("POST", "/v1/actions/token", { token: await stateRepo() });
+    await jobToken(await stateRepo());
     expect(verifies()).toBe(2);
   });
 });
 
-describe("POST /v1/users/token", () => {
+describe("token exchange for people", () => {
   /** A person's profiles: a team's read-only state, and a token for one repo's writers. */
   function withUserProfiles(...extra: Partial<TestProfile>[]) {
     const policy = testPolicy(ISSUER);
@@ -570,7 +582,11 @@ describe("POST /v1/users/token", () => {
     policyFile = JSON.stringify(policy);
   }
 
-  const mintFor = (body: unknown, token = USER_TOKEN) => call("POST", "/v1/users/token", { token, body });
+  /** Exchanges a person's GitHub token, with the broker's own `fields`. */
+  const mintFor = (fields: Record<string, unknown> | undefined, token = USER_TOKEN) =>
+    call("POST", "/oauth/token", {
+      body: { grant_type: GRANT, subject_token: token, subject_token_type: ACCESS_TOKEN, ...fields },
+    });
   const deny = () => auditLines().find((l) => l.event === "token.deny");
 
   beforeEach(() => withUserProfiles());
@@ -578,13 +594,13 @@ describe("POST /v1/users/token", () => {
   it("issues state credentials under the prefix GitHub's IDs give", async () => {
     const res = await mintFor({ profile: "tofu-plan", repository: "example-org/api" });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as TokenResponse;
-    expect(body.token).toBeUndefined();
+    const body = (await res.json()) as TokenExchangeResponse;
+    expect(body.access_token).toBeUndefined();
     expect(body.buckets?.[0]).toMatchObject({
       name: "org-terraform-state",
       prefixes: [`${OWNER_ID}/200000003/`],
     });
-    expect(Date.parse(body.expires_on) - Date.now()).toBeLessThanOrEqual(30 * 60_000 + 1000);
+    expect(body.expires_at * 1000 - Date.now()).toBeLessThanOrEqual(30 * 60_000 + 1000);
   });
 
   it("accepts a numeric repository ID", async () => {
@@ -627,7 +643,7 @@ describe("POST /v1/users/token", () => {
   });
 
   it("never uses a user profile for a job", async () => {
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign(), body: { profile: "tofu-plan" } });
+    const res = await jobToken(await issuer.sign(), { profile: "tofu-plan" });
     expect(res.status).toBe(403);
     expect(deny()).toMatchObject({ subject: "actions", reason: "profile_mismatch" });
   });
@@ -677,10 +693,11 @@ describe("POST /v1/users/token", () => {
     expect(deny()).toMatchObject({ reason: "invalid_user_token" });
   });
 
-  it("401s without a token", async () => {
-    const res = await call("POST", "/v1/users/token", { body: { repository: "example-org/api" } });
-    expect(res.status).toBe(401);
-    expect(deny()).toMatchObject({ reason: "invalid_user_token" });
+  it("400s without a token, without calling GitHub", async () => {
+    const res = await mintFor({ repository: "example-org/api" }, "");
+    expect(res.status).toBe(400);
+    expect(deny()).toMatchObject({ reason: "invalid_body" });
+    expect(github.requests).toEqual([]);
   });
 
   it.each([[undefined], [{}], [{ repository: "example-org" }], [{ repository: "a/b/c" }], [{ repository: 200000003 }]])(
@@ -733,40 +750,47 @@ describe("POST /v1/users/token", () => {
   );
 });
 
-describe("POST /v1/revoke", () => {
+describe("POST /oauth/revoke", () => {
   async function minted(): Promise<WithToken> {
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign() });
+    const res = await jobToken(await issuer.sign());
     return (await res.json()) as WithToken;
   }
 
   it("deletes a cf-auth token", async () => {
     const t = await minted();
-    const res = await call("POST", "/v1/revoke", { token: t.token });
-    expect(res.status).toBe(204);
+    const res = await revokeToken(t.access_token);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
     expect(cf.tokens.has(t.token_id)).toBe(false);
     expect(auditLines().find((l) => l.event === "token.revoke")).toMatchObject({ token_id: t.token_id });
   });
 
-  it("204s when the token is already gone", async () => {
+  it("200s when the token is already gone or never existed", async () => {
     const t = await minted();
-    await call("POST", "/v1/revoke", { token: t.token });
-    expect((await call("POST", "/v1/revoke", { token: t.token })).status).toBe(204);
-    expect((await call("POST", "/v1/revoke", { token: "never-existed" })).status).toBe(204);
+    await revokeToken(t.access_token);
+    expect((await revokeToken(t.access_token)).status).toBe(200);
+    expect((await revokeToken("never-existed")).status).toBe(200);
   });
 
   it("refuses to delete tokens cf-auth didn't mint", async () => {
     const foreign = cf.add({ name: "ci deploy (manual)" });
-    const res = await call("POST", "/v1/revoke", { token: foreign.value });
+    const res = await revokeToken(foreign.value);
     expect(res.status).toBe(403);
     expect(cf.tokens.has(foreign.id)).toBe(true);
   });
 
   it("refuses to delete the broker token", async () => {
-    expect((await call("POST", "/v1/revoke", { token: BROKER_TOKEN })).status).toBe(403);
+    expect((await revokeToken(BROKER_TOKEN)).status).toBe(403);
   });
 
-  it("401s without a token", async () => {
-    expect((await call("POST", "/v1/revoke")).status).toBe(401);
+  it("400s without a token", async () => {
+    expect((await revokeToken()).status).toBe(400);
+  });
+
+  it("accepts JSON too", async () => {
+    const t = await minted();
+    expect((await call("POST", "/oauth/revoke", { body: { token: t.access_token } })).status).toBe(200);
+    expect(cf.tokens.has(t.token_id)).toBe(false);
   });
 });
 
@@ -776,10 +800,10 @@ describe("broker token", () => {
   it("is read from Secrets Store on every use", async () => {
     const secret = store(async () => BROKER_TOKEN);
     env.CF_OIDC_BROKER_TOKEN = secret;
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign() });
+    const res = await jobToken(await issuer.sign());
     expect(res.status).toBe(200);
-    const { token } = (await res.json()) as WithToken;
-    expect((await call("POST", "/v1/revoke", { token })).status).toBe(204);
+    const { access_token: token } = (await res.json()) as WithToken;
+    expect((await revokeToken(token)).status).toBe(200);
     // Read on every use, so a rotated secret takes effect without a redeploy.
     expect(secret.get).toHaveBeenCalledTimes(2);
   });
@@ -788,7 +812,7 @@ describe("broker token", () => {
     env.CF_OIDC_BROKER_TOKEN = store(async () => {
       throw new Error("secret not found");
     });
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign() });
+    const res = await jobToken(await issuer.sign());
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "misconfigured" });
     expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({ reason: "broker_token_unavailable" });
@@ -804,7 +828,7 @@ describe("broker token", () => {
 
   it("refuses a plain Worker secret, failing closed", async () => {
     env.CF_OIDC_BROKER_TOKEN = BROKER_TOKEN as unknown as SecretsStoreSecret;
-    const res = await call("POST", "/v1/actions/token", { token: await issuer.sign() });
+    const res = await jobToken(await issuer.sign());
     expect(res.status).toBe(500);
     expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({
       reason: "broker_token_unavailable",
@@ -836,10 +860,6 @@ describe("GET /healthz", () => {
 });
 
 describe("POST /oauth/token", () => {
-  const GRANT = "urn:ietf:params:oauth:grant-type:token-exchange";
-  const ID_TOKEN = "urn:ietf:params:oauth:token-type:id_token";
-  const ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token";
-
   /** Posts a token exchange, form-encoded as RFC 8693 has it, or as JSON. */
   async function exchange(params: Record<string, string>, contentType = "application/x-www-form-urlencoded") {
     const json = contentType === "application/json";
@@ -986,6 +1006,12 @@ describe("POST /oauth/token", () => {
     expect(cf.requests).toEqual([]);
   });
 
+  it("400s on a JSON body that isn't an object", async () => {
+    const res = await call("POST", "/oauth/token", { body: [GRANT] });
+    expect(res.status).toBe(400);
+    expect(deny()?.detail).toBe("not an object");
+  });
+
   it("400s on a body that's neither form-encoded nor JSON", async () => {
     const res = await exchange(await forJob(), "text/plain");
     expect(res.status).toBe(400);
@@ -1006,10 +1032,12 @@ describe("POST /oauth/token", () => {
   });
 });
 
-it("404s on unknown routes, including the removed POST /v1/token", async () => {
-  expect((await call("POST", "/v1/token", { token: await issuer.sign() })).status).toBe(404);
-  expect((await call("POST", "/v1/user/token", { token: USER_TOKEN })).status).toBe(404);
-  expect((await call("GET", "/v1/actions/token")).status).toBe(404);
+it("404s on unknown routes, including the removed /v1 token routes", async () => {
+  const jwt = await issuer.sign();
+  for (const path of ["/v1/token", "/v1/actions/token", "/v1/users/token", "/v1/user/token", "/v1/revoke"]) {
+    expect((await call("POST", path, { token: jwt, body: {} })).status).toBe(404);
+  }
+  expect((await call("GET", "/oauth/token")).status).toBe(404);
   expect((await call("GET", "/")).status).toBe(404);
 });
 

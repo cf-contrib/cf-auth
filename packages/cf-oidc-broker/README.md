@@ -155,11 +155,11 @@ The broker validates the policy on the first request. If it's invalid, the broke
 - A pattern can end in one `*` after a prefix, such as `example-org/*` or `refs/heads/release/*`, and then matches any value starting with that prefix, including across `/`. A `*` anywhere else, or on its own, is refused when the policy loads. ID claims (`*_id`) must be exact.
 - If the request names a `profile`, that profile must match. Otherwise exactly one profile must match. Both failures are a `403`.
 - Unquoted YAML numbers are accepted for IDs and compared as strings.
-- A job is only matched against profiles for `actions` (the default), and a person only against `subject: users` profiles. Naming a profile for the other subject is a `403`. On `/oauth/token`, `subject_token_type` says which: a job sends its OIDC token and a person their GitHub token. The older routes are per subject: jobs call `/v1/actions/token` and people `/v1/users/token`.
+- A job is only matched against profiles for `actions` (the default), and a person only against `subject: users` profiles. Naming a profile for the other subject is a `403`. `subject_token_type` on [`/oauth/token`](#token-exchange) says which: a job sends its OIDC token and a person their GitHub token.
 
 ### People
 
-A `subject: users` profile gives people credentials for a repo, from their GitHub user token. The client is [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare), which sends `gh auth token` to [`POST /v1/users/token`](#http-api) with the repo to act for (or, as a token exchange, to [`POST /oauth/token`](#token-exchange)):
+A `subject: users` profile gives people credentials for a repo, from their GitHub user token. The client is [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare), which sends `gh auth token` to [`POST /oauth/token`](#token-exchange) with the repo to act for:
 
 ```sh
 gh cloudflare exec --profile tofu-plan -- tofu plan
@@ -259,12 +259,8 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/oauth/token` | `subject_token` in the body | [Token exchange](#token-exchange) (RFC 8693) for jobs and people alike. What the action uses. |
-| `POST` | `/v1/actions/token` | `Bearer <github-oidc-jwt>` | For a GitHub Actions job: mint a token, R2 credentials, or both. Body: `{ "profile"?, "ttl"? }`. Returns `{ token?, token_id?, account_id, expires_on, profile, buckets? }`: `token` and `token_id` when the profile has a `token`, and `buckets: [{ name, access_key_id, secret_access_key, session_token, prefixes, endpoint, expires_on }]`, one entry per bucket, when it has `buckets`. |
-| `POST` | `/v1/users/token` | `Bearer <github-user-token>` | For a [person](#people): the same, for the repo in the body. Body: `{ "repository", "profile"?, "ttl"? }`, where `repository` is `owner/name` or its numeric ID. Same response. `404` if no enabled profile is for people. |
-| `POST` | `/v1/revoke` | `Bearer <minted-token>` | Revoke a token. Holding it is the proof. Returns `204`, also when it's already gone, and `403` for tokens not named `cf-oidc:*`. |
+| `POST` | `/oauth/revoke` | `token` in the body | [Revoke](#revocation) (RFC 7009) a token the broker minted. What the action's post step uses. |
 | `GET` | `/healthz` | public | `200` if the policy and bindings are valid, else `500`. Never shows the policy. |
-
-`/v1/actions/token` and `/v1/users/token` predate `/oauth/token`, and stay until the next breaking release.
 
 ### Token exchange
 
@@ -285,10 +281,11 @@ curl -sS https://cf-oidc-broker.example.com/oauth/token \
 | `subject_token_type` | `urn:ietf:params:oauth:token-type:id_token` or `…:jwt` for a job, `urn:ietf:params:oauth:token-type:access_token` for a person |
 | `audience` | Optional. `https://api.cloudflare.com`, the default and so far the only one |
 | `requested_token_type` | Optional. `urn:ietf:params:oauth:token-type:access_token` or `urn:cf-oidc-auth:params:oauth:token-type:r2-credentials` |
-| `profile`, `ttl` | As on the `/v1` routes |
+| `profile` | Optional. Profile to use; if omitted, exactly one profile must match |
+| `ttl` | Optional. Requested lifetime such as `10m` or `1h`, clamped to the profile's `max_ttl` |
 | `repository` | Required for a person: `owner/name` or the repo's numeric ID |
 
-Delegation (`actor_token`), other audiences and other token types are refused with `400`, not ignored.
+Delegation (`actor_token`), other audiences and other token types are refused with `400`, not ignored. A person gets `404` when no enabled profile is for people.
 
 The response has the standard fields plus the broker's own:
 
@@ -307,6 +304,14 @@ The response has the standard fields plus the broker's own:
 ```
 
 `buckets` is there when the profile has buckets. A profile with only buckets has no single bearer token, so it returns no `access_token` or `token_id`, with `issued_token_type` `urn:cf-oidc-auth:params:oauth:token-type:r2-credentials` and `token_type` `N_A`. Errors are the same as on every route.
+
+### Revocation
+
+`POST /oauth/revoke` is an [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) revocation, form-encoded or JSON, with the token in `token` (`token_type_hint` is ignored). Holding the token is the proof. It answers `200` with no body whether the token was revoked, was already gone or was never valid, and `403` for a token the broker didn't mint (one not named `cf-oidc:*`, including the broker token), which it never deletes.
+
+```sh
+curl -sS https://cf-oidc-broker.example.com/oauth/revoke -d token="$CLOUDFLARE_API_TOKEN"
+```
 
 **Errors:** `{ "error": "<code>" }` with one of these statuses:
 
