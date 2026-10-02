@@ -1,11 +1,15 @@
 # Over the 5 KB Worker binding limit, to show the policy module has no such cap.
-version: 1
-github:
-  audience: https://cf-auth.example.com
-  owner_id: "100000001"
+version: 2
+issuer: https://cf-auth.example.com
+providers:
+  - name: github
+    issuer: https://token.actions.githubusercontent.com
+    audience: https://cf-auth.example.com
+    claims:
+      repository_owner_id: "100000001"
 profiles:
   - name: repo-00
-    match:
+    claims:
       repository_id: "200000000"
       ref: refs/heads/main
       environment: prod
@@ -15,7 +19,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-01
-    match:
+    claims:
       repository_id: "200000001"
       ref: refs/heads/main
       environment: prod
@@ -25,7 +29,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-02
-    match:
+    claims:
       repository_id: "200000002"
       ref: refs/heads/main
       environment: prod
@@ -35,7 +39,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-03
-    match:
+    claims:
       repository_id: "200000003"
       ref: refs/heads/main
       environment: prod
@@ -45,7 +49,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-04
-    match:
+    claims:
       repository_id: "200000004"
       ref: refs/heads/main
       environment: prod
@@ -55,7 +59,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-05
-    match:
+    claims:
       repository_id: "200000005"
       ref: refs/heads/main
       environment: prod
@@ -65,7 +69,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-06
-    match:
+    claims:
       repository_id: "200000006"
       ref: refs/heads/main
       environment: prod
@@ -75,7 +79,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-07
-    match:
+    claims:
       repository_id: "200000007"
       ref: refs/heads/main
       environment: prod
@@ -85,7 +89,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-08
-    match:
+    claims:
       repository_id: "200000008"
       ref: refs/heads/main
       environment: prod
@@ -95,7 +99,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-09
-    match:
+    claims:
       repository_id: "200000009"
       ref: refs/heads/main
       environment: prod
@@ -105,7 +109,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-10
-    match:
+    claims:
       repository_id: "200000010"
       ref: refs/heads/main
       environment: prod
@@ -115,7 +119,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-11
-    match:
+    claims:
       repository_id: "200000011"
       ref: refs/heads/main
       environment: prod
@@ -125,7 +129,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-12
-    match:
+    claims:
       repository_id: "200000012"
       ref: refs/heads/main
       environment: prod
@@ -135,7 +139,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-13
-    match:
+    claims:
       repository_id: "200000013"
       ref: refs/heads/main
       environment: prod
@@ -145,7 +149,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-14
-    match:
+    claims:
       repository_id: "200000014"
       ref: refs/heads/main
       environment: prod
@@ -155,7 +159,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-15
-    match:
+    claims:
       repository_id: "200000015"
       ref: refs/heads/main
       environment: prod
@@ -165,7 +169,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-16
-    match:
+    claims:
       repository_id: "200000016"
       ref: refs/heads/main
       environment: prod
@@ -175,7 +179,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-17
-    match:
+    claims:
       repository_id: "200000017"
       ref: refs/heads/main
       environment: prod
@@ -185,7 +189,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-18
-    match:
+    claims:
       repository_id: "200000018"
       ref: refs/heads/main
       environment: prod
@@ -195,7 +199,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-19
-    match:
+    claims:
       repository_id: "200000019"
       ref: refs/heads/main
       environment: prod
@@ -205,7 +209,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-20
-    match:
+    claims:
       repository_id: "200000020"
       ref: refs/heads/main
       environment: prod
@@ -215,7 +219,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-21
-    match:
+    claims:
       repository_id: "200000021"
       ref: refs/heads/main
       environment: prod
@@ -225,7 +229,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-22
-    match:
+    claims:
       repository_id: "200000022"
       ref: refs/heads/main
       environment: prod
@@ -235,7 +239,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-23
-    match:
+    claims:
       repository_id: "200000023"
       ref: refs/heads/main
       environment: prod
@@ -245,7 +249,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-24
-    match:
+    claims:
       repository_id: "200000024"
       ref: refs/heads/main
       environment: prod
@@ -255,7 +259,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-25
-    match:
+    claims:
       repository_id: "200000025"
       ref: refs/heads/main
       environment: prod
@@ -265,7 +269,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-26
-    match:
+    claims:
       repository_id: "200000026"
       ref: refs/heads/main
       environment: prod
@@ -275,7 +279,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-27
-    match:
+    claims:
       repository_id: "200000027"
       ref: refs/heads/main
       environment: prod
@@ -285,7 +289,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-28
-    match:
+    claims:
       repository_id: "200000028"
       ref: refs/heads/main
       environment: prod
@@ -295,7 +299,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-29
-    match:
+    claims:
       repository_id: "200000029"
       ref: refs/heads/main
       environment: prod
@@ -305,7 +309,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-30
-    match:
+    claims:
       repository_id: "200000030"
       ref: refs/heads/main
       environment: prod
@@ -315,7 +319,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-31
-    match:
+    claims:
       repository_id: "200000031"
       ref: refs/heads/main
       environment: prod
@@ -325,7 +329,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-32
-    match:
+    claims:
       repository_id: "200000032"
       ref: refs/heads/main
       environment: prod
@@ -335,7 +339,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-33
-    match:
+    claims:
       repository_id: "200000033"
       ref: refs/heads/main
       environment: prod
@@ -345,7 +349,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-34
-    match:
+    claims:
       repository_id: "200000034"
       ref: refs/heads/main
       environment: prod
@@ -355,7 +359,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-35
-    match:
+    claims:
       repository_id: "200000035"
       ref: refs/heads/main
       environment: prod
@@ -365,7 +369,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-36
-    match:
+    claims:
       repository_id: "200000036"
       ref: refs/heads/main
       environment: prod
@@ -375,7 +379,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-37
-    match:
+    claims:
       repository_id: "200000037"
       ref: refs/heads/main
       environment: prod
@@ -385,7 +389,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-38
-    match:
+    claims:
       repository_id: "200000038"
       ref: refs/heads/main
       environment: prod
@@ -395,7 +399,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-39
-    match:
+    claims:
       repository_id: "200000039"
       ref: refs/heads/main
       environment: prod

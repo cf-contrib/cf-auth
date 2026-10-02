@@ -1,13 +1,20 @@
 {
-  "version": 1,
-  "github": {
-    "audience": "http://localhost:8787",
-    "owner_id": "100000001"
-  },
+  "version": 2,
+  "issuer": "http://localhost:8787",
+  "providers": [
+    {
+      "name": "github",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "audience": "http://localhost:8787",
+      "claims": {
+        "repository_owner_id": "100000001"
+      }
+    }
+  ],
   "profiles": [
     {
       "name": "workers-deploy",
-      "match": {
+      "claims": {
         "repository_id": "200000002",
         "ref": "refs/heads/main"
       },

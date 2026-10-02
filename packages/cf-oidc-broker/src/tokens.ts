@@ -1,7 +1,7 @@
 import Cloudflare, { AuthenticationError, BadRequestError, NotFoundError, PermissionDeniedError } from "cloudflare";
 import { audit } from "./audit.js";
 import { HttpError } from "./errors.js";
-import type { Claims, Subject, TokenPolicy } from "./policy.js";
+import type { Claims, Provider, TokenPolicy } from "./policy.js";
 import { resolvePolicies } from "./resolve.js";
 
 /** Every minted token's name starts with this. Revoke and cleanup never touch anything else. */
@@ -9,20 +9,19 @@ export const TOKEN_PREFIX = "cf-oidc:";
 const NAME_MAX = 120;
 
 /**
- * `cf-oidc:<repo>:<run_id>:<attempt>` for a job and `cf-oidc:user:<login>:<repo>` for a
- * person, truncating the repo so the name fits in 120 chars. A repo name can't contain
- * `:`, so the two never collide.
+ * `cf-oidc:<repo>:<run_id>:<attempt>` for a GitHub Actions job, `cf-oidc:user:<login>:<repo>`
+ * for a person, and `cf-oidc:<provider>:<sub>` for any other issuer's caller, cut to fit 120
+ * characters. A repo name can't contain `:`, so the GitHub forms never collide.
  */
-export function tokenName(claims: Claims, subject: Subject): string {
+export function tokenName(claims: Claims, provider: Pick<Provider, "name" | "type">): string {
   const str = (key: string) => (typeof claims[key] === "string" ? (claims[key] as string) : "");
-  const repo = str("repository") || "unknown";
-  if (subject === "users") {
-    const who = `user:${str("actor") || "unknown"}:`;
-    return `${TOKEN_PREFIX}${who}${repo.slice(0, NAME_MAX - TOKEN_PREFIX.length - who.length)}`;
-  }
-  const run = `:${str("run_id") || "0"}:${str("run_attempt") || "0"}`;
-  const room = NAME_MAX - TOKEN_PREFIX.length - run.length;
-  return `${TOKEN_PREFIX}${repo.slice(0, room)}${run}`;
+  const named = (head: string, tail: string, body: string) =>
+    `${TOKEN_PREFIX}${head}${body.slice(0, NAME_MAX - TOKEN_PREFIX.length - head.length - tail.length)}${tail}`;
+  const repo = str("repository");
+  if (provider.type === "github-user") return named(`user:${str("actor") || "unknown"}:`, "", repo || "unknown");
+  // A GitHub Actions token names its repo and run; other issuers don't.
+  if (repo && str("run_id")) return named("", `:${str("run_id")}:${str("run_attempt") || "0"}`, repo);
+  return named(`${provider.name}:`, "", str("sub") || "unknown");
 }
 
 /** RFC 3339 without fractional seconds, which is what the tokens API accepts. */

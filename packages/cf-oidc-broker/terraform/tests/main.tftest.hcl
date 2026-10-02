@@ -123,7 +123,7 @@ run "workers_dev" {
   }
 
   assert {
-    condition     = jsondecode(local.policy_json).github.audience == "https://cf-auth.example.workers.dev"
+    condition     = jsondecode(local.policy_json).issuer == "https://cf-auth.example.workers.dev" && jsondecode(local.policy_json).providers[0].audience == "https://cf-auth.example.workers.dev"
     error_message = "the policy audience should be filled in with broker_url"
   }
 }
@@ -244,7 +244,7 @@ run "policy_vars" {
   }
 
   assert {
-    condition     = jsondecode(local.policy_json).profiles[0].match.repository_id == "200000002" && jsondecode(local.policy_json).github.owner_id == "100000001"
+    condition     = jsondecode(local.policy_json).profiles[0].claims.repository_id == "200000002" && jsondecode(local.policy_json).providers[0].claims.repository_owner_id == "100000001"
     error_message = "policy_vars should be filled into the policy"
   }
 }

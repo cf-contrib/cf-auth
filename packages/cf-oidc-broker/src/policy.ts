@@ -1,7 +1,11 @@
 import * as v from "valibot";
 import { HttpError } from "./errors.js";
 
-export const DEFAULT_ISSUER = "https://token.actions.githubusercontent.com";
+/** People's GitHub tokens: opaque, so the broker checks them with GitHub's API instead of a signature. */
+export const GITHUB_USERS_ISSUER = "https://github.com";
+
+/** GitHub Actions' OIDC issuer. GitHub Enterprise Cloud adds `/<enterprise>`. */
+export const GITHUB_ACTIONS_ISSUER = "https://token.actions.githubusercontent.com";
 
 /** The audience for Cloudflare API tokens and R2 credentials, and every profile's default. */
 export const CLOUDFLARE_AUDIENCE = "https://api.cloudflare.com";
@@ -43,9 +47,6 @@ const PREFIX_CLAIMS = {
 } as const;
 type PrefixClaim = keyof typeof PREFIX_CLAIMS;
 
-/** Who a profile is for: GitHub Actions jobs (OIDC JWT) or people (GitHub user token). */
-export type Subject = "actions" | "users";
-
 /**
  * GitHub's repo roles, least to most. `write` is GitHub's `push` and `read` its `pull`.
  * A user profile's `repository_permission` is the least it accepts.
@@ -53,7 +54,7 @@ export type Subject = "actions" | "users";
 export const REPOSITORY_PERMISSIONS = ["read", "triage", "write", "maintain", "admin"] as const;
 export type RepositoryPermission = (typeof REPOSITORY_PERMISSIONS)[number];
 
-/** What a user profile can match: what the broker looks up for a person, nothing Actions-specific. */
+/** What a profile for people can match: what the broker looks up for a person, nothing a job's token has. */
 const USER_MATCH = [
   "repository",
   "repository_id",
@@ -63,17 +64,20 @@ const USER_MATCH = [
   "repository_permission",
 ];
 
-/** Match keys the broker checks against GitHub for a person, rather than compares with a claim. */
+/** Claims the broker checks against GitHub for a person, rather than compares with a value. */
 const USER_ONLY_MATCH = ["team_id", "repository_permission"];
 
-/** Default `max_ttl` for user profiles, unless the profile sets its own. */
+/** Claims that only exist once a person names a repository, so they need a role on it. */
+const REPO_MATCH = ["repository", "repository_id", "repository_owner_id", "team_id"];
+
+/** What a provider for people can pin for every profile: the repo owner, and who. */
+const USER_PROVIDER_PINS = ["repository_owner_id", "actor_id"];
+
+/** Default `max_ttl` for profiles for people, unless the profile sets its own. */
 const USER_DEFAULT_MAX_TTL = HOUR;
 
 /** A `{claim}` placeholder. Not `${claim}`, which Terraform's templatefile would try to fill in. */
 const PLACEHOLDER = /\{([^{}]*)\}/g;
-
-/** Host of GitHub's default OIDC audience (`https://github.com/<owner>`), which other clouds' JWTs carry. */
-const GITHUB_DEFAULT_AUDIENCE_HOST = "github.com";
 
 /** Parses `90s`, `15m`, `1h`, `1h30m` into milliseconds. */
 export function parseDuration(value: string): number | undefined {
@@ -88,13 +92,11 @@ export function parseDuration(value: string): number | undefined {
 // ---------------------------------------------------------------------------
 
 // YAML turns unquoted IDs into numbers, so accept both and normalize to strings,
-// which is what GitHub puts in its claims.
+// which is what issuers put in their claims.
 const ClaimValue = v.union([
   v.pipe(v.string(), v.nonEmpty()),
   v.pipe(v.number(), v.integer(), v.minValue(0), v.transform(String)),
 ]);
-
-const NumericId = v.pipe(ClaimValue, v.regex(/^\d+$/, "must be a numeric ID"));
 
 const Duration = v.pipe(
   v.string(),
@@ -106,6 +108,26 @@ const Origin = v.pipe(
   v.string(),
   v.url(),
   v.check((s) => new URL(s).origin === s, "must be a bare origin such as https://cf-oidc-broker.example.com"),
+);
+
+/** An issuer or key URL: `https://`, or plain `http://` on loopback for local development. */
+const IssuerUrl = v.pipe(
+  v.string(),
+  v.url(),
+  v.check(isIssuerUrl, "must be an https:// URL (http:// only on 127.0.0.1, localhost or [::1])"),
+);
+
+const Name = v.pipe(v.string(), v.regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/, "must be 1-64 of [A-Za-z0-9_.-]"));
+
+// One value, or a list meaning any of them. Either way it's a list once loaded.
+const ClaimValues = v.pipe(
+  v.union([ClaimValue, v.pipe(v.array(ClaimValue), v.minLength(1, "must list at least one value"))]),
+  v.transform((value) => (Array.isArray(value) ? value : [value])),
+);
+
+const ClaimSet = v.optional(
+  v.record(v.pipe(v.string(), v.regex(/^[a-z_]+$/, "must be a claim name")), ClaimValues),
+  {},
 );
 
 /** Cloudflare's native token `resources`, e.g. `com.cloudflare.api.account.zone.<zone_id>: "*"`. */
@@ -129,36 +151,38 @@ const Bucket = v.strictObject({
   prefixes: v.optional(v.array(v.string()), []),
 });
 
-const Profile = v.strictObject({
-  name: v.pipe(v.string(), v.regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/, "must be 1-64 of [A-Za-z0-9_.-]")),
-  subject: v.optional(v.picklist(["actions", "users"], "must be actions or users"), "actions"),
+const ProviderSchema = v.strictObject({
+  name: Name,
+  // https://github.com for people's GitHub tokens; any other issuer's tokens are OIDC tokens.
+  issuer: IssuerUrl,
+  audience: v.optional(v.pipe(v.string(), v.nonEmpty())),
+  jwks_uri: v.optional(IssuerUrl),
+  // Every token from this provider must have these, whichever profile it gets.
+  claims: ClaimSet,
+});
+
+const ProfileSchema = v.strictObject({
+  name: Name,
+  // May be left out when the policy has exactly one provider.
+  provider: v.optional(Name),
   // Off switch for incidents: the profile stays in the policy but never matches.
   enabled: v.optional(v.boolean("must be true or false"), true),
   // Another service the broker issues its own token for, instead of Cloudflare credentials.
   audience: v.optional(Origin),
-  match: v.optional(v.record(v.pipe(v.string(), v.regex(/^[a-z_]+$/, "must be a claim name")), ClaimValue), {}),
+  claims: ClaimSet,
   // For everything the profile hands out: the token and the buckets' credentials.
   ttl: v.optional(Duration),
   max_ttl: v.optional(Duration),
-  token: v.optional(
-    v.strictObject({
-      // Where ttl and max_ttl went before they moved up to the profile. Still accepted.
-      ttl: v.optional(Duration),
-      max_ttl: v.optional(Duration),
-      policies: v.pipe(v.array(TokenPolicy), v.minLength(1)),
-    }),
-  ),
+  token: v.optional(v.strictObject({ policies: v.pipe(v.array(TokenPolicy), v.minLength(1)) })),
   // Each bucket gets its own credentials, which the action exports as an AWS profile named after it.
   buckets: v.optional(v.pipe(v.array(Bucket), v.minLength(1))),
 });
 
 const PolicySchema = v.strictObject({
-  version: v.literal(1),
-  github: v.strictObject({
-    issuer: v.optional(v.pipe(v.string(), v.url(), v.startsWith("https://")), DEFAULT_ISSUER),
-    audience: Origin,
-    owner_id: NumericId,
-  }),
+  version: v.literal(2),
+  // The broker's own URL: the issuer of the tokens it signs for other services.
+  issuer: Origin,
+  providers: v.pipe(v.array(ProviderSchema), v.minLength(1)),
   defaults: v.optional(
     v.strictObject({
       ttl: v.optional(Duration),
@@ -166,7 +190,7 @@ const PolicySchema = v.strictObject({
     }),
     {},
   ),
-  profiles: v.pipe(v.array(Profile), v.minLength(1)),
+  profiles: v.pipe(v.array(ProfileSchema), v.minLength(1)),
 });
 
 export type TokenPolicy = v.InferOutput<typeof TokenPolicy>;
@@ -179,16 +203,40 @@ export interface Bucket {
   prefixes: string[];
 }
 
+/**
+ * How a provider's tokens are checked, which follows from its issuer: a person's GitHub token
+ * with GitHub's API, any other issuer's as an OIDC token.
+ */
+export type ProviderType = "oidc" | "github-user";
+
+/** Claim name to the values it may have: any of them. */
+export type ClaimPatterns = Record<string, string[]>;
+
+export interface Provider {
+  name: string;
+  type: ProviderType;
+  /** The token's `iss`, exactly; `https://github.com` for people's GitHub tokens. */
+  issuer: string;
+  /** OIDC only: a value the token's `aud` must contain. */
+  audience?: string;
+  /** OIDC only: where the keys are, if not in the issuer's discovery document. */
+  jwks_uri?: string;
+  /** Every token from this provider must have these. */
+  claims: ClaimPatterns;
+}
+
 export interface Profile {
   name: string;
-  /** Only callers of this subject can use the profile. */
-  subject: Subject;
+  /** The provider whose tokens the profile is for. */
+  provider: string;
+  /** That provider's type, kept here for the checks that depend on it. */
+  type: ProviderType;
   /** A disabled profile never matches, even when a request names it. */
   enabled: boolean;
   /** What the profile issues for: Cloudflare credentials, or the broker's own token for this service. */
   audience: string;
-  /** All keys must match (AND). Always includes `repository_owner_id`. */
-  match: Record<string, string>;
+  /** All must match (AND), each any of its values: the profile's own claims and its provider's. */
+  claims: ClaimPatterns;
   ttl: number;
   max_ttl: number;
   /** The token's policies. Absent for a profile with only `buckets`. */
@@ -197,7 +245,9 @@ export interface Profile {
 }
 
 export interface Policy {
-  github: { issuer: string; audience: string; owner_id: string };
+  /** The broker's own URL. */
+  issuer: string;
+  providers: Provider[];
   profiles: Profile[];
 }
 
@@ -208,9 +258,116 @@ export class PolicyError extends Error {
   }
 }
 
+/** `https://`, or plain `http://` on loopback, as cf-nix-cache allows for its issuers. */
+export function isIssuerUrl(value: string): boolean {
+  const url = new URL(value);
+  if (url.protocol === "https:") return true;
+  return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+}
+
+/**
+ * Issuers that give a token to anyone's projects, and the claims that pin the tenant: a
+ * provider for one of them must pin at least one, exactly.
+ */
+function tenantClaims(issuer: string): string[] | undefined {
+  if (issuer === GITHUB_ACTIONS_ISSUER || issuer.startsWith(`${GITHUB_ACTIONS_ISSUER}/`)) {
+    return ["repository_owner_id"];
+  }
+  if (issuer === "https://gitlab.com") return ["namespace_id", "project_id"];
+  if (issuer === "https://app.terraform.io") return ["terraform_organization_id"];
+  return undefined;
+}
+
+/** Guardrail 2 for a claim set: patterns stay narrow, and IDs are exact. */
+function checkPatterns(at: string, claims: ClaimPatterns, issues: string[]) {
+  for (const [claim, values] of Object.entries(claims)) {
+    for (const value of values) {
+      if (claim.endsWith("_id") && value.includes("*")) {
+        issues.push(`${at}.${claim}: ID claims must be exact, globs are not allowed`);
+      } else if (value.includes("*") && !isPrefixPattern(value)) {
+        // A bare or leading `*` would match far more than intended; one in the middle needs a backtracking matcher.
+        issues.push(`${at}.${claim}: * is only allowed once, at the end, after a prefix (e.g. example-org/*)`);
+      }
+    }
+  }
+}
+
+/** Checks a claim set for people: only what the broker looks up for a person, with one valid role. */
+function checkUserClaims(at: string, claims: ClaimPatterns, issues: string[]) {
+  for (const claim of Object.keys(claims)) {
+    if (!USER_MATCH.includes(claim)) {
+      issues.push(`${at}.${claim}: not available for people; use ${USER_MATCH.join(", ")}`);
+    }
+  }
+  const roles = claims.repository_permission;
+  if (roles !== undefined && roles.length > 1) {
+    issues.push(`${at}.repository_permission: one role, the least the person must have`);
+  }
+  const role = roles?.[0];
+  if (role !== undefined && !(REPOSITORY_PERMISSIONS as readonly string[]).includes(role)) {
+    issues.push(`${at}.repository_permission: must be one of ${REPOSITORY_PERMISSIONS.join(", ")}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Loading and guardrails
 // ---------------------------------------------------------------------------
+
+/** Loads and checks the providers. Their issues go to `issues`. */
+function loadProviders(raw: v.InferOutput<typeof ProviderSchema>[], issues: string[]): Provider[] {
+  const names = new Set<string>();
+  const issuers = new Set<string>();
+  return raw.map((provider, i) => {
+    const at = `providers.${i} (${provider.name})`;
+    if (names.has(provider.name)) issues.push(`${at}: duplicate provider name`);
+    names.add(provider.name);
+    if (issuers.has(provider.issuer)) issues.push(`${at}.issuer: another provider has the same issuer`);
+    issuers.add(provider.issuer);
+    checkPatterns(`${at}.claims`, provider.claims, issues);
+
+    if (provider.issuer === GITHUB_USERS_ISSUER) {
+      // A person's GitHub token is checked with GitHub's API: it has no audience or keys.
+      for (const field of ["audience", "jwks_uri"] as const) {
+        if (provider[field] !== undefined)
+          issues.push(`${at}.${field}: not for ${GITHUB_USERS_ISSUER}, whose tokens aren't OIDC tokens`);
+      }
+      for (const claim of Object.keys(provider.claims)) {
+        if (!USER_PROVIDER_PINS.includes(claim)) {
+          issues.push(
+            `${at}.claims.${claim}: a provider for people pins ${USER_PROVIDER_PINS.join(" or ")}; the rest go on profiles`,
+          );
+        }
+      }
+      return { name: provider.name, type: "github-user", issuer: provider.issuer, claims: provider.claims };
+    }
+
+    if (provider.audience === undefined) issues.push(`${at}.audience: required for an OIDC issuer`);
+    for (const claim of USER_ONLY_MATCH) {
+      if (claim in provider.claims) issues.push(`${at}.claims.${claim}: only for people (${GITHUB_USERS_ISSUER})`);
+    }
+
+    // Guardrail 1: an issuer that gives anyone's projects a token needs the tenant pinned.
+    const tenant = tenantClaims(provider.issuer);
+    if (tenant && !tenant.some((claim) => provider.claims[claim] !== undefined)) {
+      issues.push(
+        `${at}.claims: must pin ${tenant.join(" or ")}: ${provider.issuer} issues tokens to anyone's projects`,
+      );
+    }
+    // Guardrail 5: a custom audience, so a GitHub token requested for AWS or GCP can't be replayed here.
+    const audience = provider.audience ?? "";
+    if (tenant?.includes("repository_owner_id") && /^https:\/\/github\.com(\/|$)/.test(audience)) {
+      issues.push(`${at}.audience: must not be GitHub's default audience; use the broker's URL`);
+    }
+    return {
+      name: provider.name,
+      type: "oidc",
+      issuer: provider.issuer,
+      audience,
+      ...(provider.jwks_uri ? { jwks_uri: provider.jwks_uri } : {}),
+      claims: provider.claims,
+    };
+  });
+}
 
 /**
  * Parses and validates a policy. Throws `PolicyError` listing every problem found,
@@ -226,6 +383,11 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       throw new PolicyError([`policy.json is not valid JSON: ${(err as Error).message}`]);
     }
   }
+  if ((raw as { version?: unknown } | null)?.version === 1) {
+    throw new PolicyError([
+      "version 1 is no longer supported: move github: to providers: and match: to claims: (see the broker README's migration table)",
+    ]);
+  }
 
   const parsed = v.safeParse(PolicySchema, raw);
   if (!parsed.success) {
@@ -237,13 +399,9 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
     );
   }
 
-  const { github, defaults, profiles } = parsed.output;
+  const { issuer, defaults, profiles } = parsed.output;
   const issues: string[] = [];
-
-  // Guardrail 5: custom audience, so JWTs minted for AWS/GCP can't be replayed here.
-  if (new URL(github.audience).hostname === GITHUB_DEFAULT_AUDIENCE_HOST) {
-    issues.push("github.audience: must not be GitHub's default audience; use the broker's URL");
-  }
+  const providers = loadProviders(parsed.output.providers, issues);
 
   const defaultMax = defaults.max_ttl ?? DEFAULT_MAX_TTL;
   const defaultTTL = defaults.ttl ?? Math.min(DEFAULT_TTL, defaultMax);
@@ -255,42 +413,56 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
     if (names.has(profile.name)) issues.push(`${at}: duplicate profile name`);
     names.add(profile.name);
 
-    for (const [claim, value] of Object.entries(profile.match)) {
-      // Guardrail 2: patterns stay narrow. IDs are exact, never globbed.
-      if (claim.endsWith("_id") && value.includes("*")) {
-        issues.push(`${at}.match.${claim}: ID claims must be exact, globs are not allowed`);
-      } else if (value.includes("*") && !isPrefixPattern(value)) {
-        // A bare or leading `*` would match far more than intended; one in the middle needs a backtracking matcher.
-        issues.push(`${at}.match.${claim}: * is only allowed once, at the end, after a prefix (e.g. example-org/*)`);
-      }
+    // With one provider, it's the only one a profile can be for.
+    const named = profile.provider ?? (providers.length === 1 ? providers[0]?.name : undefined);
+    const provider = providers.find((p) => p.name === named);
+    if (profile.provider === undefined && providers.length > 1) {
+      issues.push(`${at}.provider: required when the policy has several providers`);
+    } else if (!provider) {
+      issues.push(`${at}.provider: no provider named ${profile.provider}`);
     }
+    const type = provider?.type ?? "oidc";
 
-    // Guardrail 6: a person has no ref, environment or workflow, and the client picks the
-    // repo, so a user profile matches only what the broker looks up, and must require a
-    // role on that repo. Actions profiles can't use the keys only a person has.
-    if (profile.subject === "users") {
-      for (const claim of Object.keys(profile.match)) {
-        if (!USER_MATCH.includes(claim)) {
-          issues.push(`${at}.match.${claim}: not available for people; use ${USER_MATCH.join(", ")}`);
-        }
+    checkPatterns(`${at}.claims`, profile.claims, issues);
+    // The provider's claims every token for this profile must also have.
+    let inherited: ClaimPatterns = provider?.claims ?? {};
+    // Guardrail 6: a person has no ref, environment or workflow, and picks the repo, so a
+    // profile for people matches only what the broker looks up. It's pinned either to a role
+    // on the repo they ask for, which must belong to the provider's owner, or to who they are.
+    if (type === "github-user") {
+      checkUserClaims(`${at}.claims`, profile.claims, issues);
+      const repoScoped = profile.claims.repository_permission !== undefined;
+      if (repoScoped && provider?.claims.repository_owner_id === undefined) {
+        issues.push(
+          `${at}.claims.repository_permission: needs provider ${provider?.name} to pin repository_owner_id, the owner the repo must belong to`,
+        );
       }
-      if (profile.match.repository_permission === undefined) {
-        issues.push(`${at}.match.repository_permission: required for a user profile`);
+      if (!repoScoped) {
+        if (profile.claims.actor_id === undefined && provider?.claims.actor_id === undefined) {
+          issues.push(
+            `${at}.claims: a profile for people needs repository_permission (a role on the repo they ask for) or actor_id (who may use it)`,
+          );
+        }
+        for (const claim of REPO_MATCH) {
+          if (claim in profile.claims) issues.push(`${at}.claims.${claim}: needs repository_permission`);
+        }
+        // Without a repo, the owner pin has nothing to bound: it applies to repo-scoped profiles.
+        const { repository_owner_id: _, ...rest } = inherited;
+        inherited = rest;
       }
     } else {
       for (const claim of USER_ONLY_MATCH) {
-        if (claim in profile.match) issues.push(`${at}.match.${claim}: only for user profiles (subject: users)`);
+        if (claim in profile.claims) issues.push(`${at}.claims.${claim}: only for people (${GITHUB_USERS_ISSUER})`);
       }
     }
-    const role = profile.match.repository_permission;
-    if (role !== undefined && !(REPOSITORY_PERMISSIONS as readonly string[]).includes(role)) {
-      issues.push(`${at}.match.repository_permission: must be one of ${REPOSITORY_PERMISSIONS.join(", ")}`);
-    }
 
-    // Guardrail 1: the owner pin applies to every profile and can't be overridden.
-    const owner = profile.match.repository_owner_id;
-    if (owner !== undefined && owner !== github.owner_id) {
-      issues.push(`${at}.match.repository_owner_id: conflicts with github.owner_id`);
+    // Guardrail 1: a provider's claims apply to every profile for it. A profile can narrow
+    // them to some of their values, but not widen or change them.
+    for (const [claim, values] of Object.entries(inherited)) {
+      const own = profile.claims[claim];
+      if (own !== undefined && !own.every((value) => values.includes(value))) {
+        issues.push(`${at}.claims.${claim}: conflicts with provider ${provider?.name}`);
+      }
     }
 
     const { token, buckets } = profile;
@@ -300,7 +472,7 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
     } else {
       // The broker signs its own token for the service; Cloudflare credentials are another profile's job.
       if (token || buckets) issues.push(`${at}: a profile for ${audience} can't have a token or buckets`);
-      if (audience === github.audience) issues.push(`${at}.audience: must be another service, not the broker itself`);
+      if (audience === issuer) issues.push(`${at}.audience: must be another service, not the broker itself`);
     }
 
     token?.policies.forEach((p, j) => {
@@ -332,27 +504,22 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       });
     });
 
-    // Guardrail 4: TTL caps.
-    const legacy = token?.ttl !== undefined || token?.max_ttl !== undefined;
-    if (legacy && (profile.ttl !== undefined || profile.max_ttl !== undefined)) {
-      issues.push(`${at}: set ttl and max_ttl on the profile or on its token, not both`);
-    }
-    const lifetime = legacy ? token : profile;
-    // A stolen gh token never expires, so what it can mint for a person should.
-    const fallbackMax = profile.subject === "users" ? Math.min(defaultMax, USER_DEFAULT_MAX_TTL) : defaultMax;
-    const max_ttl = lifetime?.max_ttl ?? fallbackMax;
-    const ttl = lifetime?.ttl ?? Math.min(defaultTTL, max_ttl);
-    checkTTLs(legacy ? `${at}.token` : at, ttl, max_ttl, issues);
+    // Guardrail 4: TTL caps. A stolen gh token never expires, so what it can mint for a person should.
+    const fallbackMax = type === "github-user" ? Math.min(defaultMax, USER_DEFAULT_MAX_TTL) : defaultMax;
+    const max_ttl = profile.max_ttl ?? fallbackMax;
+    const ttl = profile.ttl ?? Math.min(defaultTTL, max_ttl);
+    checkTTLs(at, ttl, max_ttl, issues);
     if (buckets && (ttl < R2_MIN_TTL || max_ttl > R2_MAX_TTL)) {
       issues.push(`${at}: ttl and max_ttl must be within the 1m to 7 days R2 credentials accept`);
     }
 
     return {
       name: profile.name,
-      subject: profile.subject,
+      provider: provider?.name ?? "",
+      type,
       enabled: profile.enabled,
       audience,
-      match: { ...profile.match, repository_owner_id: github.owner_id },
+      claims: { ...inherited, ...profile.claims },
       ttl,
       max_ttl,
       ...(token ? { policies: token.policies } : {}),
@@ -361,7 +528,7 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
   });
 
   if (issues.length > 0) throw new PolicyError(issues);
-  return { github, profiles: out };
+  return { issuer, providers, profiles: out };
 }
 
 function checkTTLs(at: string, ttl: number, max: number, issues: string[]) {
@@ -459,37 +626,47 @@ function hasRole(role: unknown, required: string): boolean {
   return roles.includes(role) && roles.indexOf(role) >= roles.indexOf(required);
 }
 
+/** Whether one value of a token's claim matches one of the patterns. */
+function matchesValue(claim: string, patterns: string[], value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  return patterns.some((pattern) => (claim.endsWith("_id") ? value === pattern : glob(pattern, value)));
+}
+
+/** Whether every claim of the profile matches, each by any of its values. */
 export function matches(profile: Profile, claims: Claims): boolean {
-  return Object.entries(profile.match).every(([claim, pattern]) => {
+  return Object.entries(profile.claims).every(([claim, patterns]) => {
     // Only a person's claims carry these: the teams they're in and their role on the repo.
-    if (claim === "team_id") return Array.isArray(claims.team_ids) && claims.team_ids.includes(pattern);
-    if (claim === "repository_permission") return hasRole(claims.repository_permission, pattern);
+    if (claim === "team_id")
+      return Array.isArray(claims.team_ids) && claims.team_ids.some((id) => patterns.includes(id));
+    if (claim === "repository_permission") return hasRole(claims.repository_permission, patterns[0] as string);
     const value = claims[claim];
-    if (typeof value !== "string") return false;
-    return claim.endsWith("_id") ? value === pattern : glob(pattern, value);
+    // A claim that's a list in the token matches if any of its values does.
+    return Array.isArray(value)
+      ? value.some((v) => matchesValue(claim, patterns, v))
+      : matchesValue(claim, patterns, value);
   });
 }
 
 /**
- * Picks the profile to issue with, among those for `subject` and `audience` only, or throws
+ * Picks the profile to issue with, among those for `provider` and `audience` only, or throws
  * a `403` whose reason goes to the audit log.
  */
 export function selectProfile(
   policy: Policy,
-  subject: Subject,
+  provider: string,
   claims: Claims,
   requested?: string,
   audience = CLOUDFLARE_AUDIENCE,
 ): Profile {
-  const profiles = policy.profiles.filter((p) => p.subject === subject && p.audience === audience);
+  const profiles = policy.profiles.filter((p) => p.provider === provider && p.audience === audience);
   if (requested !== undefined) {
     const named = policy.profiles.find((p) => p.name === requested);
     const profile = profiles.find((p) => p.name === requested);
     if (!profile?.enabled || !matches(profile, claims)) {
       const detail = !named
         ? `unknown profile ${requested}`
-        : named.subject !== subject
-          ? `profile ${requested} isn't for ${subject}`
+        : named.provider !== provider
+          ? `profile ${requested} isn't for provider ${provider}`
           : named.audience !== audience
             ? `profile ${requested} isn't for ${audience}`
             : named.enabled

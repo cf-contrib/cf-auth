@@ -15,7 +15,7 @@
 #   scripts/test-user-tokens.sh [owner/repo]
 #
 # The repo (default cf-contrib/cf-oidc-auth) must be one you can write to. Its
-# owner becomes github.owner_id. Run it inside the dev shell (`nix develop`).
+# owner is pinned by both providers' claims. Run it inside the dev shell (`nix develop`).
 #
 # Needs:
 #   - CLOUDFLARE_ACCOUNT_ID: the account the broker mints in.
@@ -119,14 +119,23 @@ jq -n \
   --arg permission "$PERMISSION" --arg account "com.cloudflare.api.account.$CLOUDFLARE_ACCOUNT_ID" '
   { policies: [{ permissions: [$permission], resources: { ($account): "*" } }] } as $token
   | {
-      version: 1,
-      github: { audience: $audience, owner_id: $owner },
+      version: 2,
+      issuer: $audience,
+      providers: [
+        {
+          name: "github",
+          issuer: "https://token.actions.githubusercontent.com",
+          audience: $audience,
+          claims: { repository_owner_id: $owner }
+        },
+        { name: "people", issuer: "https://github.com", claims: { repository_owner_id: $owner } }
+      ],
       profiles: ([
-        { name: "ci", match: { repository_id: $repo }, token: $token },
-        { name: "me", subject: "users", match: { repository_permission: "write" }, token: $token },
-        { name: "me-bad-team", subject: "users", match: { team_id: "1", repository_permission: "read" }, token: $token }
+        { name: "ci", provider: "github", claims: { repository_id: $repo }, token: $token },
+        { name: "me", provider: "people", claims: { repository_permission: "write" }, token: $token },
+        { name: "me-bad-team", provider: "people", claims: { team_id: "1", repository_permission: "read" }, token: $token }
       ] + if $team == "" then [] else [
-        { name: "me-team", subject: "users", match: { team_id: $team, repository_permission: "read" }, token: $token }
+        { name: "me-team", provider: "people", claims: { team_id: $team, repository_permission: "read" }, token: $token }
       ] end)
     }' >"$POLICY"
 
@@ -237,7 +246,7 @@ fi
 user "not a member of the team" "{\"profile\":\"me-bad-team\",\"repository\":\"$REPO\"}" 403 profile_mismatch
 user "repo in another org (cli/cli)" '{"profile":"me","repository":"cli/cli"}' 403 repository_forbidden
 user "repo that doesn't exist" "{\"profile\":\"me\",\"repository\":\"$OWNER/does-not-exist-$RANDOM\"}" 403 repository_forbidden
-user "Actions profile, asked for by a person" "{\"profile\":\"ci\",\"repository\":\"$REPO\"}" 403 profile_mismatch
+user "a job's profile, asked for by a person" "{\"profile\":\"ci\",\"repository\":\"$REPO\"}" 403 profile_mismatch
 if [[ -n ${TEST_READ_ONLY_REPO:-} ]]; then
   user "write needed, only read on $TEST_READ_ONLY_REPO" "{\"profile\":\"me\",\"repository\":\"$TEST_READ_ONLY_REPO\"}" 403 profile_mismatch
 else

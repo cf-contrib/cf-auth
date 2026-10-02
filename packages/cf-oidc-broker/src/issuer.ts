@@ -9,8 +9,10 @@ export const ALGORITHM = "RS256";
 const MIN_MODULUS_BITS = 2048;
 
 /**
- * Verified claims copied into the broker's tokens under GitHub's own names, so a service's
- * existing rules keep working. None are secret; `team_ids` is left out, as it can be long.
+ * Verified claims always copied into the broker's tokens when the caller's token has them,
+ * under the issuer's own names, so a service's rules keep working: GitHub's. Other issuers'
+ * claims are copied when the policy matches on them. None are secret; `team_ids` is left
+ * out, as it can be long.
  */
 const COPIED = [
   "repository",
@@ -85,9 +87,13 @@ export interface IssueRequest {
   /** The broker's own URL. */
   issuer: string;
   audience: string;
-  /** GitHub's `sub` for a job, `user:<actor_id>` for a person. */
+  /** The caller's `sub` from its issuer, or `user:<actor_id>` for a person. */
   subject: string;
+  /** The provider the caller's token came from. */
+  provider: string;
   profile: string;
+  /** Claims the policy matched on, also copied, so a service can match on the same ones. */
+  matched: string[];
   claims: Claims;
   /** The profile's TTL, in milliseconds. */
   ttl: number;
@@ -103,12 +109,12 @@ export async function issueJwt(key: SigningKey, req: IssueRequest) {
   if (expiresAt <= now) throw new HttpError("unauthorized", "invalid_jwt", "subject token has expired");
 
   const copied: Record<string, string> = {};
-  for (const name of COPIED) {
+  for (const name of new Set<string>([...COPIED, ...req.matched])) {
     const value = req.claims[name];
     if (typeof value === "string" && value !== "") copied[name] = value;
   }
   const jti = crypto.randomUUID();
-  const jwt = await new SignJWT({ ...copied, profile: req.profile })
+  const jwt = await new SignJWT({ ...copied, provider: req.provider, profile: req.profile })
     .setProtectedHeader({ alg: ALGORITHM, kid: key.kid, typ: "JWT" })
     .setIssuer(req.issuer)
     .setAudience(req.audience)

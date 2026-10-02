@@ -6,12 +6,20 @@ import { defineConfig } from "vitest/config";
 
 // dist/broker.js imports ./policy.json, which a deploy puts next to it.
 const policy = {
-  version: 1,
-  github: { audience: "https://cf-auth.example.com", owner_id: "100000001" },
+  version: 2,
+  issuer: "https://cf-auth.example.com",
+  providers: [
+    {
+      name: "github",
+      issuer: "https://token.actions.githubusercontent.com",
+      audience: "https://cf-auth.example.com",
+      claims: { repository_owner_id: "100000001" },
+    },
+  ],
   profiles: [
     {
       name: "workers-deploy",
-      match: { repository_id: "200000002" },
+      claims: { repository_id: "200000002" },
       token: {
         policies: [
           {

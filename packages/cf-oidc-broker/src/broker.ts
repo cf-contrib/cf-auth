@@ -4,7 +4,7 @@ import { audit } from "./audit.js";
 import { HttpError } from "./errors.js";
 import { verifyGitHubUser } from "./github.js";
 import { ALGORITHM, issueJwt, signingKey } from "./issuer.js";
-import { verifyGitHubJWT } from "./jwt.js";
+import { providerFor, verifyOidcToken } from "./jwt.js";
 import {
   CLOUDFLARE_AUDIENCE,
   type Claims,
@@ -13,8 +13,8 @@ import {
   type Policy,
   PolicyError,
   type Profile,
+  type Provider,
   r2Prefixes,
-  type Subject,
   selectProfile,
 } from "./policy.js";
 import { issueR2 } from "./r2.js";
@@ -103,7 +103,7 @@ function published(body: unknown): Response {
  * tokens by exchange only, so there's no authorization endpoint: it isn't a login provider.
  */
 function discovery(policy: Policy) {
-  const issuer = policy.github.audience;
+  const { issuer } = policy;
   return {
     issuer,
     jwks_uri: `${issuer}/.well-known/jwks`,
@@ -132,25 +132,29 @@ function failure(err: unknown): Response {
   return json(500, { error: "internal" } satisfies ErrorResponse);
 }
 
-/** Ends with a `404` when no enabled profile is for people, so the broker doesn't call GitHub for them. */
-function userProfiles(policy: Policy) {
-  const users = policy.profiles.filter((p) => p.subject === "users" && p.enabled);
-  if (users.length === 0) throw new HttpError("not_found", "no_user_profiles");
-  return users;
+/**
+ * The github-user provider, and its enabled profiles. Ends with a `404` when there are none,
+ * so the broker doesn't call GitHub for people it serves nothing.
+ */
+function people(policy: Policy) {
+  const provider = policy.providers.find((p) => p.type === "github-user");
+  const profiles = policy.profiles.filter((p) => p.provider === provider?.name && p.enabled);
+  if (!provider || profiles.length === 0) throw new HttpError("not_found", "no_user_profiles");
+  return { provider, profiles };
 }
 
-/** Checks a person's GitHub token for the requested repo. */
-async function verifyUser(policy: Policy, token: string, fields: TokenFields): Promise<Claims> {
+/** Checks a person's GitHub token, and their role on the repo they ask for, if any. */
+async function verifyUser(provider: Provider, profiles: Profile[], token: string, fields: TokenFields) {
   // Teams cost extra GitHub calls, so they're only looked up if a profile that could match needs them.
-  const users = userProfiles(policy);
-  const candidates = fields.profile === undefined ? users : users.filter((p) => p.name === fields.profile);
-  const teams = candidates.some((p) => p.match.team_id !== undefined);
-  return verifyGitHubUser(token, fields.repository as string, { ownerId: policy.github.owner_id, teams });
+  const candidates = fields.profile === undefined ? profiles : profiles.filter((p) => p.name === fields.profile);
+  const teams = candidates.some((p) => p.claims.team_id !== undefined);
+  const ownerIds = provider.claims.repository_owner_id ?? [];
+  return verifyGitHubUser(token, fields.repository, { ownerIds, teams });
 }
 
 /** A verified caller of a token route. */
 interface Caller {
-  subject: Subject;
+  provider: Provider;
   claims: Claims;
   audience: string;
   fields: TokenFields;
@@ -161,32 +165,37 @@ interface Caller {
  * parses and the audience is one the policy knows.
  */
 async function authenticate(request: Request, policy: Policy): Promise<Caller> {
-  const { subject, token, audience, fields } = await readExchangeRequest(request);
+  const { type, token, audience, fields } = await readExchangeRequest(request);
   if (audience !== CLOUDFLARE_AUDIENCE && !policy.profiles.some((p) => p.audience === audience)) {
     throw new HttpError("bad_request", "invalid_target", audience);
   }
-  const claims =
-    subject === "actions" ? await verifyGitHubJWT(token, policy.github) : await verifyUser(policy, token, fields);
-  return { subject, claims, audience, fields };
+  if (type === "github-user") {
+    const { provider, profiles } = people(policy);
+    return { provider, claims: await verifyUser(provider, profiles, token, fields), audience, fields };
+  }
+  const provider = providerFor(token, policy.providers);
+  return { provider, claims: await verifyOidcToken(token, provider), audience, fields };
 }
 
 /** Issues the broker's own token for a profile with another service's `audience`. */
 async function serviceToken(env: Env, policy: Policy, caller: Caller, profile: Profile, ttl: number) {
   const key = await signingKey(env.CF_OIDC_BROKER_SIGNING_KEY);
-  const { claims } = caller;
-  const sub = caller.subject === "users" ? `user:${claims.actor_id}` : claims.sub;
+  const { claims, provider } = caller;
+  const sub = provider.type === "github-user" ? `user:${claims.actor_id}` : claims.sub;
   const issued = await issueJwt(key, {
-    issuer: policy.github.audience,
+    issuer: policy.issuer,
     audience: profile.audience,
-    subject: typeof sub === "string" ? sub : `repo:${claims.repository}`,
+    subject: typeof sub === "string" ? sub : `${provider.name}:unknown`,
+    provider: provider.name,
     profile: profile.name,
+    matched: Object.keys(profile.claims),
     claims,
     ttl,
     // A job's OIDC token has an expiry; a person's GitHub token doesn't.
     notAfter: typeof claims.exp === "number" ? claims.exp : undefined,
   });
   audit("token.issue", {
-    subject: caller.subject,
+    provider: provider.name,
     profile: profile.name,
     claims,
     audience: profile.audience,
@@ -230,16 +239,17 @@ function exchangeResponse(grant: Grant): TokenExchangeResponse {
 
 /** Serves `POST /oauth/token`. */
 async function handleToken(request: Request, env: Env, raw: unknown): Promise<Response> {
-  let subject: Subject | undefined;
+  let provider: string | undefined;
   let claims: Claims | undefined;
   let profile: string | undefined;
   try {
     const policy = config(raw, env);
     const caller = await authenticate(request, policy);
-    ({ subject, claims } = caller);
+    provider = caller.provider.name;
+    ({ claims } = caller);
     const { fields } = caller;
     profile = fields.profile;
-    const selected = selectProfile(policy, caller.subject, caller.claims, fields.profile, caller.audience);
+    const selected = selectProfile(policy, caller.provider.name, caller.claims, fields.profile, caller.audience);
     profile = selected.name;
     const ttl = clampTTL(fields.ttl, selected);
     if (selected.audience !== CLOUDFLARE_AUDIENCE)
@@ -253,8 +263,8 @@ async function handleToken(request: Request, env: Env, raw: unknown): Promise<Re
     const accountId = env.CF_OIDC_BROKER_ACCOUNT_ID;
     let token: MintedToken | undefined;
     if (selected.policies) {
-      token = await mint(cf, accountId, selected.policies, tokenName(verified, caller.subject), ttl);
-      audit("token.mint", { subject, profile, claims, token_id: token.token_id, expires_on: token.expires_on });
+      token = await mint(cf, accountId, selected.policies, tokenName(verified, caller.provider), ttl);
+      audit("token.mint", { provider, profile, claims, token_id: token.token_id, expires_on: token.expires_on });
     }
 
     const issued: BucketCredentials[] = [];
@@ -269,7 +279,7 @@ async function handleToken(request: Request, env: Env, raw: unknown): Promise<Re
         throw err;
       }
       audit("r2.issued", {
-        subject,
+        provider,
         profile,
         claims,
         bucket: creds.name,
@@ -286,9 +296,9 @@ async function handleToken(request: Request, env: Env, raw: unknown): Promise<Re
     return json(200, exchangeResponse(grant));
   } catch (err) {
     if (err instanceof HttpError) {
-      audit("token.deny", { subject, profile, claims, reason: err.reason, detail: err.detail });
+      audit("token.deny", { provider, profile, claims, reason: err.reason, detail: err.detail });
     } else if (err instanceof CloudflareError) {
-      audit("token.deny", { subject, profile, claims, reason: "cloudflare_error", detail: err.message });
+      audit("token.deny", { provider, profile, claims, reason: "cloudflare_error", detail: err.message });
     }
     return failure(err);
   }

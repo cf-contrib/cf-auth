@@ -6,6 +6,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { TokenExchangeResponse } from "../src/api.js";
 import { createBroker, type Env } from "../src/broker.js";
 import { clearSigningKey } from "../src/issuer.js";
+import { clearKeys } from "../src/jwt.js";
 import { clearParent } from "../src/r2.js";
 import { clearCache } from "../src/resolve.js";
 import { tokenName } from "../src/tokens.js";
@@ -20,6 +21,7 @@ import {
   githubClaims,
   installFetch,
   OWNER_ID,
+  PEOPLE,
   TEAM_ID,
   type TestPolicy,
   testPolicy,
@@ -307,7 +309,7 @@ describe("token exchange for jobs, with buckets", () => {
   it("issues prefix-limited credentials for a profile with only buckets", async () => {
     withProfiles({
       name: "terraform-state",
-      match: STATE,
+      claims: STATE,
       buckets: [
         { name: "org-terraform-state", permission: "object-read-write", prefixes: ["github.com/{repository}/"] },
       ],
@@ -359,7 +361,7 @@ describe("token exchange for jobs, with buckets", () => {
   it("covers the whole bucket without prefixes, and honours the requested ttl", async () => {
     withProfiles({
       name: "terraform-state",
-      match: STATE,
+      claims: STATE,
       max_ttl: "30m",
       buckets: [{ name: "org-terraform-state", permission: "object-read-only" }],
     });
@@ -377,7 +379,7 @@ describe("token exchange for jobs, with buckets", () => {
   it("mints a token and credentials that expire together for a profile with both", async () => {
     withProfiles({
       name: "state-and-deploy",
-      match: STATE,
+      claims: STATE,
       ttl: "10m",
       token: {
         policies: [
@@ -404,7 +406,7 @@ describe("token exchange for jobs, with buckets", () => {
   it("issues credentials for each bucket, in the policy's order", async () => {
     withProfiles({
       name: "state-and-artifacts",
-      match: STATE,
+      claims: STATE,
       buckets: [
         { name: "org-terraform-state", permission: "object-read-write", prefixes: ["github.com/{repository}/"] },
         { name: "org-artifacts", permission: "object-read-only" },
@@ -437,7 +439,7 @@ describe("token exchange for jobs, with buckets", () => {
   it("deletes the token and 502s when a later bucket's credentials can't be created", async () => {
     withProfiles({
       name: "state-and-artifacts",
-      match: STATE,
+      claims: STATE,
       token: {
         policies: [
           { permissions: ["Workers Scripts Write"], resources: { [`com.cloudflare.api.account.${ACCOUNT_ID}`]: "*" } },
@@ -462,7 +464,7 @@ describe("token exchange for jobs, with buckets", () => {
   it("deletes the token and 502s when the credentials can't be created", async () => {
     withProfiles({
       name: "state-and-deploy",
-      match: STATE,
+      claims: STATE,
       token: {
         policies: [
           { permissions: ["Workers Scripts Write"], resources: { [`com.cloudflare.api.account.${ACCOUNT_ID}`]: "*" } },
@@ -482,7 +484,7 @@ describe("token exchange for jobs, with buckets", () => {
   it("403s without calling Cloudflare when a claim can't be used in the prefix", async () => {
     withProfiles({
       name: "terraform-state",
-      match: STATE,
+      claims: STATE,
       buckets: [{ name: "org-terraform-state", permission: "object-read-write", prefixes: ["{repository_owner}/"] }],
     });
     const res = await jobToken(await stateRepo("state-app", { repository_owner: "../example-org" }));
@@ -498,7 +500,7 @@ describe("token exchange for jobs, with buckets", () => {
   it("writes an r2.issued audit line without secrets", async () => {
     withProfiles({
       name: "terraform-state",
-      match: STATE,
+      claims: STATE,
       buckets: [
         { name: "org-terraform-state", permission: "object-read-write", prefixes: ["github.com/{repository}/"] },
       ],
@@ -507,7 +509,7 @@ describe("token exchange for jobs, with buckets", () => {
     const { buckets } = (await res.json()) as TokenExchangeResponse;
     expect(auditLines().find((l) => l.event === "r2.issued")).toEqual({
       event: "r2.issued",
-      subject: "actions",
+      provider: "github",
       profile: "terraform-state",
       repository: "example-org/state-app",
       repository_id: "200000003",
@@ -531,7 +533,7 @@ describe("token exchange for jobs, with buckets", () => {
   it("looks up the parent access key ID once, and again after the broker token rotates", async () => {
     withProfiles({
       name: "terraform-state",
-      match: STATE,
+      claims: STATE,
       buckets: [{ name: "org-terraform-state", permission: "object-read-write" }],
     });
     const verifies = () => cf.requests.filter((r) => r.path.endsWith("/tokens/verify")).length;
@@ -555,11 +557,12 @@ describe("token exchange for people", () => {
   /** A person's profiles: a team's read-only state, and a token for one repo's writers. */
   function withUserProfiles(...extra: Partial<TestProfile>[]) {
     const policy = testPolicy(ISSUER);
+    policy.providers.push({ ...PEOPLE });
     const profiles = [
       {
         name: "tofu-plan",
-        subject: "users",
-        match: { team_id: TEAM_ID, repository_permission: "read" },
+        provider: "people",
+        claims: { team_id: TEAM_ID, repository_permission: "read" },
         ttl: "30m",
         buckets: [
           {
@@ -571,8 +574,8 @@ describe("token exchange for people", () => {
       },
       {
         name: "infra-dns",
-        subject: "users",
-        match: { repository_id: "200000002", repository_permission: "write" },
+        provider: "people",
+        claims: { repository_id: "200000002", repository_permission: "write" },
         token: {
           policies: [
             { permissions: ["DNS Write"], resources: { [`com.cloudflare.api.account.zone.${ZONE_ID}`]: "*" } },
@@ -622,7 +625,7 @@ describe("token exchange for people", () => {
   it("writes audit lines with the person, without the gh token", async () => {
     await mintFor({ profile: "infra-dns", repository: "example-org/infra" });
     expect(auditLines().find((l) => l.event === "token.mint")).toMatchObject({
-      subject: "users",
+      provider: "people",
       profile: "infra-dns",
       actor: "octocat",
       actor_id: USER_ID,
@@ -635,20 +638,23 @@ describe("token exchange for people", () => {
   it("403s when several user profiles match and none is named", async () => {
     // tofu-plan (team, read) and infra-dns (repo, write) both match example-org/infra.
     expect((await mintFor({ repository: "example-org/infra" })).status).toBe(403);
-    expect(deny()).toMatchObject({ subject: "users", reason: "ambiguous" });
+    expect(deny()).toMatchObject({ provider: "people", reason: "ambiguous" });
   });
 
-  it("never uses an Actions profile for a person", async () => {
+  it("never uses a job's profile for a person", async () => {
     // workers-deploy matches repository example-org/*, as this person's claims would.
     const res = await mintFor({ profile: "workers-deploy", repository: "example-org/api" });
     expect(res.status).toBe(403);
-    expect(deny()).toMatchObject({ reason: "profile_mismatch", detail: "profile workers-deploy isn't for users" });
+    expect(deny()).toMatchObject({
+      reason: "profile_mismatch",
+      detail: "profile workers-deploy isn't for provider people",
+    });
   });
 
-  it("never uses a user profile for a job", async () => {
+  it("never uses a person's profile for a job", async () => {
     const res = await jobToken(await issuer.sign(), { profile: "tofu-plan" });
     expect(res.status).toBe(403);
-    expect(deny()).toMatchObject({ subject: "actions", reason: "profile_mismatch" });
+    expect(deny()).toMatchObject({ provider: "github", reason: "profile_mismatch" });
   });
 
   it("403s without enough access to the repo", async () => {
@@ -703,13 +709,45 @@ describe("token exchange for people", () => {
     expect(github.requests).toEqual([]);
   });
 
-  it.each([[undefined], [{}], [{ repository: "example-org" }], [{ repository: "a/b/c" }], [{ repository: 200000003 }]])(
+  it.each([[{ repository: "example-org" }], [{ repository: "a/b/c" }], [{ repository: 200000003 }]])(
     "400s on body %j, without calling GitHub",
     async (body) => {
       expect((await mintFor(body)).status).toBe(400);
       expect(github.requests).toEqual([]);
     },
   );
+
+  it("without a repository, only asks GitHub who the person is", async () => {
+    // Every profile here needs a role on a repo, so none matches.
+    const res = await mintFor({});
+    expect(res.status).toBe(403);
+    expect(deny()).toMatchObject({ provider: "people", reason: "no_match", actor_id: USER_ID });
+    expect(github.requests).toEqual(["/user"]);
+  });
+
+  it("issues to a person on a profile's list, with one GitHub call", async () => {
+    withUserProfiles({
+      name: "on-call",
+      provider: "people",
+      claims: { actor_id: [USER_ID, "300000099"] },
+      buckets: [{ name: "org-terraform-state", permission: "object-read-only", prefixes: ["shared/"] }],
+    } as unknown as Partial<TestProfile>);
+    const res = await mintFor({ profile: "on-call" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as TokenExchangeResponse).buckets?.[0]?.prefixes).toEqual(["shared/"]);
+    expect(github.requests).toEqual(["/user"]);
+  });
+
+  it("refuses a person who isn't on the list", async () => {
+    withUserProfiles({
+      name: "on-call",
+      provider: "people",
+      claims: { actor_id: "300000099" },
+      buckets: [{ name: "org-terraform-state", permission: "object-read-only", prefixes: ["shared/"] }],
+    } as unknown as Partial<TestProfile>);
+    expect((await mintFor({ profile: "on-call" })).status).toBe(403);
+    expect(deny()).toMatchObject({ reason: "profile_mismatch" });
+  });
 
   it("404s when no profile is for people, without calling GitHub", async () => {
     policyFile = JSON.stringify(testPolicy(ISSUER));
@@ -719,7 +757,7 @@ describe("token exchange for people", () => {
 
   it("404s when every profile for people is disabled, without calling GitHub", async () => {
     const policy = JSON.parse(policyFile as string) as TestPolicy;
-    for (const p of policy.profiles) if (p.subject === "users") (p as Record<string, unknown>).enabled = false;
+    for (const p of policy.profiles) if (p.provider === "people") (p as Record<string, unknown>).enabled = false;
     policyFile = JSON.stringify(policy);
     expect((await mintFor({ repository: "example-org/api" })).status).toBe(404);
     expect(github.requests).toEqual([]);
@@ -883,9 +921,10 @@ describe("POST /oauth/token", () => {
   });
   const deny = () => auditLines().find((l) => l.event === "token.deny");
 
-  /** Adds `profiles` to the test policy. */
+  /** Adds `profiles` to the test policy, which also gets the people provider. */
   function withProfiles(...profiles: Record<string, unknown>[]) {
     const policy = testPolicy(ISSUER);
+    policy.providers.push({ ...PEOPLE });
     policy.profiles.push(...(profiles as TestProfile[]));
     policyFile = JSON.stringify(policy);
   }
@@ -914,7 +953,7 @@ describe("POST /oauth/token", () => {
     expect(body.expires_in).toBeGreaterThan(14 * 60);
     expect(body.expires_in).toBeLessThanOrEqual(15 * 60);
     expect(auditLines().find((l) => l.event === "token.mint")).toMatchObject({
-      subject: "actions",
+      provider: "github",
       profile: "workers-deploy",
       token_id: body.token_id,
     });
@@ -935,7 +974,8 @@ describe("POST /oauth/token", () => {
   it("returns only R2 credentials for a profile without a token", async () => {
     withProfiles({
       name: "terraform-state",
-      match: { environment: "state" },
+      provider: "github",
+      claims: { environment: "state" },
       buckets: [{ name: "org-terraform-state", permission: "object-read-write", prefixes: ["{repository_id}/"] }],
     });
     const res = await exchange({
@@ -962,8 +1002,8 @@ describe("POST /oauth/token", () => {
   it("exchanges a person's GitHub token for the requested repo", async () => {
     withProfiles({
       name: "tofu-plan",
-      subject: "users",
-      match: { team_id: TEAM_ID, repository_permission: "read" },
+      provider: "people",
+      claims: { team_id: TEAM_ID, repository_permission: "read" },
       buckets: [{ name: "org-terraform-state", permission: "object-read-only", prefixes: ["{repository_id}/"] }],
     });
     const res = await exchange({
@@ -976,7 +1016,7 @@ describe("POST /oauth/token", () => {
     const body = (await res.json()) as TokenExchangeResponse;
     expect(body.profile).toBe("tofu-plan");
     expect(body.buckets?.[0]?.prefixes).toEqual(["200000003/"]);
-    expect(auditLines().find((l) => l.event === "r2.issued")).toMatchObject({ subject: "users", actor_id: USER_ID });
+    expect(auditLines().find((l) => l.event === "r2.issued")).toMatchObject({ provider: "people", actor_id: USER_ID });
   });
 
   it.each([
@@ -994,7 +1034,6 @@ describe("POST /oauth/token", () => {
       { requested_token_type: "urn:ietf:params:oauth:token-type:refresh_token" },
       "unsupported_requested_token_type",
     ],
-    ["a person without a repository", { subject_token_type: ACCESS_TOKEN }, "invalid_body"],
   ])("400s on %s, without calling anyone", async (_, override, reason) => {
     const res = await exchange({
       grant_type: GRANT,
@@ -1031,7 +1070,133 @@ describe("POST /oauth/token", () => {
   it("403s on a profile that doesn't match the job", async () => {
     const res = await exchange(await forJob({ profile: "infra-cloudflare" }));
     expect(res.status).toBe(403);
-    expect(deny()).toMatchObject({ subject: "actions", reason: "profile_mismatch" });
+    expect(deny()).toMatchObject({ provider: "github", reason: "profile_mismatch" });
+  });
+});
+
+describe("providers", () => {
+  // A stand-in for GitLab, on loopback as a provider can be for local development.
+  const LOCAL = "http://127.0.0.1:8788";
+  const CACHE = "https://cf-nix-cache.example.com";
+  let gitlab: Awaited<ReturnType<typeof createIssuer>>;
+  let signingPem: string;
+
+  /** A GitLab CI job's claims, in GitLab's names. */
+  const gitlabClaims = (overrides: Record<string, unknown> = {}) => ({
+    sub: "project_path:group/app:ref_type:branch:ref:main",
+    namespace_id: "4000001",
+    project_id: "500000001",
+    project_path: "group/app",
+    ref: "main",
+    ref_protected: "true",
+    ...overrides,
+  });
+
+  const exchange = (subjectToken: string, fields: Record<string, unknown> = {}) =>
+    call("POST", "/oauth/token", {
+      body: { grant_type: GRANT, subject_token: subjectToken, subject_token_type: ID_TOKEN, ...fields },
+    });
+  const deny = () => auditLines().find((l) => l.event === "token.deny");
+
+  beforeAll(async () => {
+    gitlab = await createIssuer(LOCAL);
+    const { privateKey } = await generateKeyPair("RS256", { extractable: true });
+    signingPem = await exportPKCS8(privateKey);
+  });
+
+  beforeEach(() => {
+    clearKeys();
+    clearSigningKey();
+    installFetch([issuer, gitlab], cf, github);
+    env.CF_OIDC_BROKER_SIGNING_KEY = { get: async () => signingPem };
+    const policy = testPolicy(ISSUER);
+    policy.providers.push({ name: "gitlab", issuer: LOCAL, audience: AUDIENCE, claims: { namespace_id: "4000001" } });
+    const deploy = {
+      name: "gitlab-deploy",
+      provider: "gitlab",
+      claims: { project_path: "group/app", ref_protected: "true" },
+      token: (policy.profiles[1] as TestProfile).token,
+    };
+    const cache = { name: "gitlab-cache", provider: "gitlab", audience: CACHE, claims: { project_path: "group/*" } };
+    policy.profiles.push(deploy as TestProfile, cache as unknown as TestProfile);
+    policyFile = JSON.stringify(policy);
+  });
+
+  it("exchanges another issuer's token, found by its iss and checked with its keys", async () => {
+    const res = await exchange(await gitlab.sign(gitlabClaims()));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as WithToken;
+    expect(body.profile).toBe("gitlab-deploy");
+    // Named after the provider and the token's subject: GitLab's has no repo or run.
+    expect(cf.tokens.get(body.token_id)?.name).toBe("cf-oidc:gitlab:project_path:group/app:ref_type:branch:ref:main");
+    expect(auditLines().find((l) => l.event === "token.mint")).toMatchObject({
+      provider: "gitlab",
+      profile: "gitlab-deploy",
+      sub: "project_path:group/app:ref_type:branch:ref:main",
+    });
+  });
+
+  it("holds every token to its provider's claims", async () => {
+    const res = await exchange(await gitlab.sign(gitlabClaims({ namespace_id: "4000002" })));
+    expect(res.status).toBe(403);
+    expect(deny()).toMatchObject({ provider: "gitlab", reason: "no_match" });
+  });
+
+  it("never gives a token from one provider another's profile", async () => {
+    const res = await exchange(await gitlab.sign(gitlabClaims()), { profile: "workers-deploy" });
+    expect(res.status).toBe(403);
+    expect(deny()).toMatchObject({
+      reason: "profile_mismatch",
+      detail: "profile workers-deploy isn't for provider gitlab",
+    });
+  });
+
+  it("401s on a token from an issuer no provider is for, without fetching anything", async () => {
+    const other = await createIssuer("https://other.example.com");
+    const fetches = vi.mocked(globalThis.fetch).mock.calls.length;
+    const res = await exchange(await other.sign());
+    expect(res.status).toBe(401);
+    expect(deny()).toMatchObject({ reason: "unknown_issuer", detail: "https://other.example.com" });
+    expect(vi.mocked(globalThis.fetch).mock.calls.length).toBe(fetches);
+  });
+
+  it("502s when the discovery document names another issuer", async () => {
+    installFetch(
+      [issuer, { ...gitlab, discovery: { ...gitlab.discovery, issuer: "https://evil.example.com" } }],
+      cf,
+      github,
+    );
+    const res = await exchange(await gitlab.sign(gitlabClaims()));
+    expect(res.status).toBe(502);
+    expect(deny()).toMatchObject({ reason: "jwks_unavailable" });
+    expect(String(deny()?.detail)).toMatch(/is for issuer https:\/\/evil\.example\.com/);
+  });
+
+  it("takes the keys from jwks_uri when it's set, not from discovery", async () => {
+    // Discovery would fail; jwks_uri never reads it.
+    installFetch([issuer, { ...gitlab, discovery: { issuer: "https://evil.example.com" } }], cf, github);
+    const policy = JSON.parse(policyFile as string) as TestPolicy;
+    (policy.providers[1] as Record<string, unknown>).jwks_uri = `${LOCAL}/.well-known/jwks`;
+    policyFile = JSON.stringify(policy);
+    expect((await exchange(await gitlab.sign(gitlabClaims()))).status).toBe(200);
+  });
+
+  it("issues another provider's caller a service token with the provider and the matched claims", async () => {
+    const res = await exchange(await gitlab.sign(gitlabClaims()), { audience: CACHE });
+    expect(res.status).toBe(200);
+    const { access_token } = (await res.json()) as TokenExchangeResponse;
+    const keys = createLocalJWKSet((await (await call("GET", "/.well-known/jwks")).json()) as { keys: JWK[] });
+    const { payload } = await jwtVerify(access_token as string, keys, { issuer: AUDIENCE, audience: CACHE });
+    expect(payload).toMatchObject({
+      sub: "project_path:group/app:ref_type:branch:ref:main",
+      provider: "gitlab",
+      profile: "gitlab-cache",
+      // What the policy matched on, so the service can match on it too.
+      project_path: "group/app",
+      namespace_id: "4000001",
+    });
+    // Claims nobody matched on stay behind.
+    expect(payload.project_id).toBeUndefined();
   });
 });
 
@@ -1049,13 +1214,14 @@ describe("tokens for other services", () => {
     clearSigningKey();
     env.CF_OIDC_BROKER_SIGNING_KEY = { get: async () => signingPem };
     const policy = testPolicy(ISSUER);
+    policy.providers.push({ ...PEOPLE });
     const services = [
-      { name: "nix-push", audience: CACHE, match: { ref: "refs/heads/main" }, ttl: "15m" },
+      { name: "nix-push", provider: "github", audience: CACHE, claims: { ref: "refs/heads/main" }, ttl: "15m" },
       {
         name: "nix-push-people",
-        subject: "users",
+        provider: "people",
         audience: CACHE,
-        match: { repository_permission: "write" },
+        claims: { repository_permission: "write" },
         ttl: "30m",
       },
     ];
@@ -1097,6 +1263,7 @@ describe("tokens for other services", () => {
     expect(protectedHeader).toMatchObject({ alg: "RS256", typ: "JWT" });
     expect(payload).toMatchObject({
       sub,
+      provider: "github",
       profile: "nix-push",
       repository: "example-org/api",
       repository_owner_id: OWNER_ID,
@@ -1107,7 +1274,7 @@ describe("tokens for other services", () => {
     // Only the identity goes to Cloudflare's side: no API token, no R2 credentials.
     expect(cf.requests).toEqual([]);
     expect(auditLines().find((l) => l.event === "token.issue")).toMatchObject({
-      subject: "actions",
+      provider: "github",
       profile: "nix-push",
       audience: CACHE,
       jti: payload.jti,
@@ -1268,14 +1435,17 @@ describe("scheduled cleanup", () => {
 
 describe("tokenName", () => {
   it("fits in 120 characters", () => {
-    const name = tokenName(githubClaims({ repository: `example-org/${"x".repeat(200)}` }), "actions");
+    const name = tokenName(githubClaims({ repository: `example-org/${"x".repeat(200)}` }), {
+      name: "github",
+      type: "oidc",
+    });
     expect(name.length).toBe(120);
     expect(name).toMatch(/^cf-oidc:example-org\/x+:1234567890:1$/);
   });
 
   it("names a person's token after them, also within 120 characters", () => {
     const claims = { actor: "octocat", repository: `example-org/${"x".repeat(200)}` };
-    const name = tokenName(claims, "users");
+    const name = tokenName(claims, { name: "people", type: "github-user" });
     expect(name.length).toBe(120);
     expect(name).toMatch(/^cf-oidc:user:octocat:example-org\/x+$/);
   });

@@ -42,16 +42,21 @@ export function githubClaims(overrides: Record<string, unknown> = {}): Record<st
 /** Loosely typed so tests can break it in any way they like. */
 export interface TestPolicy {
   version: number;
-  github: { issuer?: string; audience?: string; owner_id?: string };
+  issuer?: string;
+  providers: {
+    name: string;
+    issuer?: string;
+    audience?: string;
+    jwks_uri?: string;
+    claims?: Record<string, unknown>;
+  }[];
   defaults?: { ttl?: string; max_ttl?: string };
   profiles: {
     name: string;
-    subject?: string;
-    match: Record<string, unknown>;
+    provider?: string;
+    claims: Record<string, unknown>;
     /** Always there in testPolicy's profiles; tests delete it to leave only `buckets`. */
     token: {
-      ttl?: string;
-      max_ttl?: string;
       policies: { effect?: string; permissions: string[]; resources: Record<string, unknown> }[];
     };
     ttl?: string;
@@ -61,17 +66,23 @@ export interface TestPolicy {
   [key: string]: unknown;
 }
 
+/** The provider for people's GitHub tokens, pinned to the test org. */
+export const PEOPLE = { name: "people", issuer: "https://github.com", claims: { repository_owner_id: OWNER_ID } };
+
+/** A version 2 policy: one GitHub Actions provider, `github`, and three profiles for it. */
 export function testPolicy(issuer: string): TestPolicy {
   return {
-    version: 1,
-    github: { issuer, audience: AUDIENCE, owner_id: OWNER_ID },
+    version: 2,
+    issuer: AUDIENCE,
+    providers: [{ name: "github", issuer, audience: AUDIENCE, claims: { repository_owner_id: OWNER_ID } }],
     defaults: { ttl: "15m", max_ttl: "1h" },
     profiles: [
       {
         name: "infra-cloudflare",
-        match: { repository_id: "200000002", ref: "refs/heads/main", environment: "prod" },
+        provider: "github",
+        claims: { repository_id: "200000002", ref: "refs/heads/main", environment: "prod" },
+        ttl: "15m",
         token: {
-          ttl: "15m",
           policies: [
             {
               effect: "allow",
@@ -83,7 +94,8 @@ export function testPolicy(issuer: string): TestPolicy {
       },
       {
         name: "workers-deploy",
-        match: { repository: "example-org/*", ref: "refs/heads/main", environment: "prod" },
+        provider: "github",
+        claims: { repository: "example-org/*", ref: "refs/heads/main", environment: "prod" },
         token: {
           policies: [
             {
@@ -96,9 +108,10 @@ export function testPolicy(issuer: string): TestPolicy {
       },
       {
         name: "service-dns",
-        match: { job_workflow_ref: "example-org/workflows/.github/workflows/deploy.yml@refs/heads/main" },
+        provider: "github",
+        claims: { job_workflow_ref: "example-org/workflows/.github/workflows/deploy.yml@refs/heads/main" },
+        ttl: "5m",
         token: {
-          ttl: "5m",
           policies: [
             {
               effect: "allow",
@@ -130,7 +143,9 @@ export async function createIssuer(issuer: string) {
       .sign(privateKey);
   }
 
-  return { issuer, jwks, sign };
+  // What the broker reads first, to find the keys.
+  const discovery = { issuer, jwks_uri: `${issuer}/.well-known/jwks` };
+  return { issuer, jwks, discovery, sign };
 }
 
 interface StoredToken {
@@ -305,10 +320,21 @@ export class FakeGitHub {
 }
 
 /** Routes the Worker's outbound `fetch` to the fake issuer, GitHub API and Cloudflare API. */
-export function installFetch(issuer: { issuer: string; jwks: unknown }, cf: FakeCloudflare, github?: FakeGitHub) {
+/** An issuer as the fake fetch serves it: its discovery document and its JWKS. */
+interface FakeIssuer {
+  issuer: string;
+  jwks: unknown;
+  discovery: unknown;
+}
+
+export function installFetch(issuers: FakeIssuer | FakeIssuer[], cf: FakeCloudflare, github?: FakeGitHub) {
+  const all = Array.isArray(issuers) ? issuers : [issuers];
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const req = new Request(input as RequestInfo, init as RequestInit);
-    if (req.url === `${issuer.issuer}/.well-known/jwks`) return Response.json(issuer.jwks);
+    for (const issuer of all) {
+      if (req.url === `${issuer.issuer}/.well-known/openid-configuration`) return Response.json(issuer.discovery);
+      if (req.url === `${issuer.issuer}/.well-known/jwks`) return Response.json(issuer.jwks);
+    }
     if (req.url.startsWith(API)) return cf.handle(req);
     if (github && req.url.startsWith("https://api.github.com/")) return github.handle(req);
     throw new TypeError(`unexpected fetch ${req.url}`);

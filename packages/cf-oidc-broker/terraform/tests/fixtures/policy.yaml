@@ -4,12 +4,16 @@
 # All IDs below are placeholders: find yours with
 #   gh api orgs/<org> --jq .id
 #   gh api repos/<org>/<repo> --jq .id
-version: 1
+version: 2
 
-github:
-  issuer: https://token.actions.githubusercontent.com
-  audience: ${broker_url} # the broker's URL, filled in by Terraform
-  owner_id: "100000001" # REQUIRED: numeric org/user ID, applied to every profile
+issuer: ${broker_url} # the broker's URL, filled in by Terraform
+
+providers:
+  - name: github # GitHub Actions
+    issuer: https://token.actions.githubusercontent.com
+    audience: ${broker_url} # what the action asks GitHub for: the broker's URL
+    claims:
+      repository_owner_id: "100000001" # REQUIRED: numeric org/user ID, applied to every profile
 
 defaults:
   ttl: 15m
@@ -17,7 +21,7 @@ defaults:
 
 profiles:
   - name: workers-deploy
-    match:
+    claims:
       repository_id: "200000002"
       ref: refs/heads/main
       environment: prod

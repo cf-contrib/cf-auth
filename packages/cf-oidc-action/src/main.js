@@ -9,7 +9,7 @@ import { brokerURL, fail, idToken, input, mask, write } from "./runner.js";
 
 /** Hints for the statuses a misconfigured workflow or policy usually produces. */
 const HINTS = /** @type {Record<number, string>} */ ({
-  401: "the broker rejected the OIDC token; check that broker-url matches github.audience in the policy",
+  401: "the broker rejected the OIDC token; check that broker-url matches the GitHub provider's audience in the policy",
   403: "no profile allows this workflow; the broker's audit log has the reason",
   404: "the broker doesn't serve /oauth/token; deploy the broker from the same release as the action",
   500: "the broker is misconfigured; check its /healthz and logs",
