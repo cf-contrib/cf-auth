@@ -21,25 +21,19 @@
 //! wraps them in `worker::send::SendFuture`.
 
 mod claims;
-mod signing;
+mod crypto;
 
 use std::{cell::RefCell, collections::HashMap, fmt};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use web_sys::{CryptoKey, WorkerGlobalScope};
-use worker::{
-    AbortSignal, Date, Fetch, Method, Request,
-    js_sys::{self, Uint8Array},
-    wasm_bindgen::{JsCast, JsValue},
-    wasm_bindgen_futures::JsFuture,
-};
+use worker::{AbortSignal, Date, Fetch, Method, Request};
 
 pub use crate::{
     claims::ClaimSet,
-    signing::{ALGORITHM, KeyError, SignedToken, SigningKey},
+    crypto::{ALGORITHM, KeyError, SignedToken, SigningKey},
 };
 
 /// Clock tolerance for `exp` and `nbf`.
@@ -430,47 +424,11 @@ struct Jwk {
 }
 
 impl Jwk {
-    /// Verifies an RS256 (RSASSA-PKCS1-v1_5 with SHA-256) signature with WebCrypto.
+    /// Verifies an RS256 signature with WebCrypto.
     async fn verify_rs256(&self, signing_input: &[u8], signature: &[u8]) -> Result<bool, Error> {
-        let webcrypto = |err: JsValue| Error::Upstream(format!("WebCrypto: {err:?}"));
-        let object = |value: Value| -> Result<js_sys::Object, Error> {
-            js_sys::JSON::parse(&value.to_string())
-                .map(JsCast::unchecked_into)
-                .map_err(webcrypto)
-        };
-
-        let subtle = js_sys::global()
-            .unchecked_into::<WorkerGlobalScope>()
-            .crypto()
-            .map_err(webcrypto)?
-            .subtle();
-        let algorithm = object(json!({ "name": "RSASSA-PKCS1-v1_5", "hash": "SHA-256" }))?;
-        let key_data = object(json!({ "kty": "RSA", "n": self.n, "e": self.e, "alg": "RS256" }))?;
-        let usages = js_sys::Array::of1(&JsValue::from_str("verify"));
-
-        let key: CryptoKey = JsFuture::from(
-            subtle
-                .import_key_with_object("jwk", &key_data, &algorithm, false, &usages)
-                .map_err(webcrypto)?,
-        )
-        .await
-        .map_err(webcrypto)?
-        .unchecked_into();
-
-        // A signature WebCrypto refuses to check (e.g. wrong length) is the
-        // caller's problem, not an upstream failure.
-        let verified = subtle
-            .verify_with_object_and_buffer_source_and_buffer_source(
-                &algorithm,
-                &key,
-                &Uint8Array::from(signature),
-                &Uint8Array::from(signing_input),
-            )
-            .map(JsFuture::from);
-        match verified {
-            Ok(future) => Ok(future.await.ok().and_then(|v| v.as_bool()) == Some(true)),
-            Err(_) => Ok(false),
-        }
+        crypto::verify_rs256(&self.n, &self.e, signing_input, signature)
+            .await
+            .map_err(|err| Error::Upstream(err.to_string()))
     }
 }
 
@@ -581,6 +539,8 @@ impl IdentityCache {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     const NOW: u64 = 1_800_000_000;
