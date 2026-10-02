@@ -152,8 +152,7 @@ impl HealthCheck for Readiness {
         // Like the flows, it reads secrets and runs WebCrypto, whose futures aren't `Send`.
         SendFuture::new(async move {
             let ready = async { exchange::ready(&Config::load(&env).await?).await }.await;
-            // The SDK's handler logs why through `tracing`, which this Worker has no
-            // subscriber for, so the reason goes to the console here.
+            // The SDK's handler answers with the status only, so why goes to the log.
             ready.map_err(|err| {
                 console_error!("not ready: {err}");
                 err.into()

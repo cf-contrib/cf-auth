@@ -26,8 +26,10 @@
 //! `openapi/oidc/exchange/v1/exchangev1.yaml` is the source. `build.rs` runs
 //! [openapi-to-rust](https://github.com/gpu-cli/openapi-to-rust) over it into
 //! `OUT_DIR`, so none of it is checked in or edited by hand. What is
-//! hand-written is `src/oidc.exchange.v1.extra.rs`, included into `v1` beside
-//! it: the health endpoints.
+//! hand-written is in `service/`, mounted into `v1` beside it: the health
+//! endpoints in `service/handler.rs`.
+
+mod service;
 
 /// Everything for `oidc.exchange.v1`: the types, and the server and client the
 /// crate's features enable.
@@ -44,8 +46,7 @@ pub mod v1 {
         clippy::result_large_err
     )]
 
-    // The generated code, and its hand-written companion: each `.extra.rs` is
-    // included into the module of the code it goes with.
     include!(concat!(env!("OUT_DIR"), "/exchangev1/mod.rs"));
-    include!("oidc.exchange.v1.extra.rs");
+
+    pub use crate::service::handler::*;
 }
