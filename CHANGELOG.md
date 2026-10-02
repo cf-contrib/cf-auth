@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.8.0](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.7.0...v0.8.0) (2026-10-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* version 1 policies are refused. The github: block becomes a list of providers (name, issuer, audience, jwks_uri, claims) with a top-level issuer (the broker's URL); issuer https://github.com means people's GitHub tokens. github.owner_id becomes the provider's claims.repository_owner_id, subject: users a profile for the https://github.com provider, match: is renamed claims: and takes one value or a list, and token.ttl/token.max_ttl move to the profile. See the broker README's migration table.
+* POST /v1/actions/token, /v1/users/token and /v1/revoke are removed. Get credentials with an RFC 8693 token exchange at POST /oauth/token and revoke them at POST /oauth/revoke (RFC 7009); the action from this release does. Deploy the broker and upgrade the action together.
+* a match pattern may only end in one * after a prefix, such as example-org/*. A bare *, a leading one or one in the middle is refused when the policy loads ("* is only allowed once, at the end, after a prefix").
+
+### Features
+
+* broker-issued tokens for other services, with discovery and JWKS ([#37](https://github.com/cf-contrib/cf-oidc-auth/issues/37)) ([d0bf8f7](https://github.com/cf-contrib/cf-oidc-auth/commit/d0bf8f76234917b7740708999ae703976fbcc992))
+* OAuth endpoints: token exchange at /oauth/token, revocation at /oauth/revoke ([bad9004](https://github.com/cf-contrib/cf-oidc-auth/commit/bad90041ebcb06e1b52ce77fc2f1d4120249c6da))
+* policy version 2, with identity providers ([#39](https://github.com/cf-contrib/cf-oidc-auth/issues/39)) ([dacaebc](https://github.com/cf-contrib/cf-oidc-auth/commit/dacaebc2e68067c07a69ad537e50f7ce75384831))
+* profiles can be switched off with enabled: false ([#35](https://github.com/cf-contrib/cf-oidc-auth/issues/35)) ([dcdfc0f](https://github.com/cf-contrib/cf-oidc-auth/commit/dcdfc0f90388672b50acba110f07e3b8f9798e88))
+* stricter match wildcards, and enabled: false on profiles ([#35](https://github.com/cf-contrib/cf-oidc-auth/issues/35)) ([dcdfc0f](https://github.com/cf-contrib/cf-oidc-auth/commit/dcdfc0f90388672b50acba110f07e3b8f9798e88))
+
 ## [0.7.0](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.6.0...v0.7.0) (2026-10-01)
 
 
