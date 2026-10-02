@@ -1,4 +1,5 @@
 // @ts-check
+/** @typedef {import("../../cf-oidc-broker/src/api.js").TokenRevocationRequest} TokenRevocationRequest */
 // Revokes the token and deletes the R2 credentials file at job end. Never fails the
 // job: the token expires on its own anyway.
 import { rmSync } from "node:fs";
@@ -25,12 +26,16 @@ if (r2ExpiresOn) {
 if (token) {
   try {
     const broker = brokerURL(input("broker-url"));
-    const response = await fetch(new URL("/v1/revoke", broker), {
+    /** @satisfies {TokenRevocationRequest} */
+    const body = { token, token_type_hint: "access_token" };
+    // RFC 7009: form-encoded, and 200 whether revoked now or already gone.
+    const response = await fetch(new URL("/oauth/revoke", broker), {
       method: "POST",
-      headers: { authorization: `Bearer ${token}` },
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(body),
       signal: AbortSignal.timeout(30_000),
     });
-    if (response.status === 204) {
+    if (response.status === 200) {
       console.log(`cf-oidc: revoked token ${id}`);
     } else {
       warning(`cf-oidc: revoking token ${id} returned ${response.status}; it expires on its own`);

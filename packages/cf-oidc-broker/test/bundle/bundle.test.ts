@@ -17,13 +17,19 @@ it("reads the broker token from Secrets Store and serves /healthz", async () => 
   expect(res.status).toBe(200);
 });
 
-it("rejects a mint without a JWT", async () => {
-  const res = await SELF.fetch("https://cf-auth.example.com/v1/actions/token", { method: "POST" });
-  expect(res.status).toBe(401);
-  expect(await res.json()).toEqual({ error: "unauthorized" });
+const form = { "content-type": "application/x-www-form-urlencoded" };
+
+it("refuses a token exchange without a subject token", async () => {
+  const res = await SELF.fetch("https://cf-auth.example.com/oauth/token", {
+    method: "POST",
+    headers: form,
+    body: "grant_type=urn:ietf:params:oauth:grant-type:token-exchange",
+  });
+  expect(res.status).toBe(400);
+  expect(await res.json()).toEqual({ error: "bad_request" });
 });
 
 it("refuses to revoke without a token", async () => {
-  const res = await SELF.fetch("https://cf-auth.example.com/v1/revoke", { method: "POST" });
-  expect(res.status).toBe(401);
+  const res = await SELF.fetch("https://cf-auth.example.com/oauth/revoke", { method: "POST", headers: form, body: "" });
+  expect(res.status).toBe(400);
 });

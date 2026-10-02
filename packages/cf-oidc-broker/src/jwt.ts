@@ -14,14 +14,6 @@ function remoteKeys(issuer: string): JWTVerifyGetKey {
   return keys;
 }
 
-/** Extracts the token from an `Authorization: Bearer <token>` header. `reason` is for the audit log when it's missing. */
-export function bearer(request: Request, reason = "invalid_jwt"): string {
-  const header = request.headers.get("authorization") ?? "";
-  const m = /^bearer\s+(\S+)$/i.exec(header);
-  if (!m) throw new HttpError("unauthorized", reason, "missing bearer token");
-  return m[1] as string;
-}
-
 /**
  * Verifies a GitHub Actions OIDC token: signature against the issuer's JWKS, plus
  * `iss`, `aud`, `exp` and `nbf` with 30s of clock tolerance.

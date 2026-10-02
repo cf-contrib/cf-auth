@@ -46,13 +46,13 @@ sequenceDiagram
 
     Job->>OIDC: 1. request JWT (aud = broker URL)
     OIDC-->>Job: JWT
-    Job->>Broker: POST /v1/actions/token (Bearer JWT)
+    Job->>Broker: POST /oauth/token (token exchange, JWT as subject_token)
     Broker->>Broker: 2. verify JWT, pick the matching profile
     Broker->>CF: 3. tokens.create (profile's permissions, expires_on)
     CF-->>Broker: token
     Broker-->>Job: token
     Note over Job: 4. mask and export CLOUDFLARE_API_TOKEN<br/>later steps use it
-    Job->>Broker: 5. POST /v1/revoke (post step)
+    Job->>Broker: 5. POST /oauth/revoke (post step)
     Broker->>CF: tokens.verify, tokens.get, tokens.delete
     Note over Broker,CF: hourly cron deletes expired cf-oidc:* tokens
 ```

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Checks POST /v1/users/token (#28) against the real GitHub API and a real
-# Cloudflare account, with the broker running under `wrangler dev`:
+# Checks the token exchange for people (#28, #34) against the real GitHub API
+# and a real Cloudflare account, with the broker running under `wrangler dev`:
 #   - A person with write access gets a token for a repo, by name and by ID,
 #     named cf-oidc:user:<login>:<repo>, and can revoke it.
 #   - team_id matches only a team they're in, in the pinned org.
 #   - Repos in another org, or that they can't see, are refused, and so is an
 #     Actions profile.
 #   - Installation tokens, rejected tokens, no token and bad bodies are refused,
-#     and a gh token doesn't work on /v1/actions/token.
-#   - The removed POST /v1/token is a 404.
+#     and a gh token doesn't pass as a job's OIDC token.
+#   - The removed /v1 routes are a 404.
 # Each case checks the HTTP status and the reason in the broker's audit log.
 #
 # Usage:
@@ -100,7 +100,7 @@ cleanup() {
   set +e
   local tok
   for tok in "${MINTED[@]}"; do
-    printf 'Authorization: Bearer %s\n' "$tok" | curl -s -o /dev/null -H @- -X POST "$BROKER/v1/revoke"
+    revoke "$tok" >/dev/null
   done
   if [[ -f $WORK/policy.json.saved ]]; then mv "$WORK/policy.json.saved" "$POLICY"; else rm -f "$POLICY"; fi
   if [[ -n $WRANGLER_PID ]]; then
@@ -164,44 +164,65 @@ done
 PASSED=0
 FAILED=0
 
-# request <path> <bearer|-> <body|-> sets STATUS, REASON and, on a 200, TOKEN_ID.
-# The bearer goes to curl on stdin, never on argv; the response stays in $WORK.
+GRANT=urn:ietf:params:oauth:grant-type:token-exchange
+ACCESS=urn:ietf:params:oauth:token-type:access_token
+ID_TOKEN=urn:ietf:params:oauth:token-type:id_token
+
+# request <subject_token|-> <subject_token_type> <fields|-> sets STATUS, REASON and,
+# on a 200, TOKEN_ID. <fields> is a JSON object of the broker's own parameters. The
+# token goes to curl on stdin, never on argv (printf is a builtin); the response
+# stays in $WORK.
 request() {
-  local path=$1 bearer=$2 body=$3 before
+  local token=$1 type=$2 fields=$3 before extra=""
   before=$(wc -l <"$LOG")
-  local args=(-s -o "$WORK/body" -w '%{http_code}' -X POST -H 'content-type: application/json')
-  [[ $body != - ]] && args+=(-d "$body")
-  if [[ $bearer != - ]]; then
-    STATUS=$(printf 'Authorization: Bearer %s\n' "$bearer" | curl "${args[@]}" -H @- "$BROKER$path")
-  else
-    STATUS=$(curl "${args[@]}" "$BROKER$path")
-  fi
+  [[ $fields != - ]] && { extra=${fields#\{}; extra=${extra%\}}; }
+  [[ -n $extra ]] && extra=",$extra"
+  local subject=""
+  [[ $token != - ]] && subject=$(printf ',"subject_token":"%s"' "$token")
+  STATUS=$(printf '{"grant_type":"%s","subject_token_type":"%s"%s%s}' "$GRANT" "$type" "$subject" "$extra" |
+    curl -s -o "$WORK/body" -w '%{http_code}' -X POST -H 'content-type: application/json' --data-binary @- "$BROKER/oauth/token")
   sleep 0.5 # let wrangler flush the audit line
   REASON=$(tail -n +"$((before + 1))" "$LOG" | sed -n 's/.*"event":"token.deny".*"reason":"\([^"]*\)".*/\1/p' | tail -1)
   TOKEN_ID=""
   if [[ $STATUS == 200 ]]; then
     local tok
-    tok=$(jq -r '.token // empty' "$WORK/body")
+    tok=$(jq -r '.access_token // empty' "$WORK/body")
     [[ -n $tok ]] && MINTED+=("$tok")
     TOKEN_ID=$(jq -r '.token_id // empty' "$WORK/body")
   fi
   rm -f "$WORK/body"
 }
 
-# check <description> <path> <bearer|-> <body|-> <status> [reason]
+# revoke <token> prints the status of POST /oauth/revoke. The token goes on stdin.
+revoke() {
+  printf 'token=%s' "$1" | curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'content-type: application/x-www-form-urlencoded' --data-binary @- "$BROKER/oauth/revoke"
+}
+
+pass() { PASSED=$((PASSED + 1)); printf 'PASS  %-62s %s %s\n' "$1" "$STATUS" "$REASON"; }
+fail() {
+  FAILED=$((FAILED + 1))
+  printf 'FAIL  %-62s got %s %s, want %s %s\n' "$1" "$STATUS" "${REASON:-(no reason)}" "$2" "${3:-}"
+}
+
+# check <description> <subject_token|-> <subject_token_type> <fields|-> <status> [reason]
 check() {
   local what=$1 want_status=$5 want_reason=${6:-}
   request "$2" "$3" "$4"
   if [[ $STATUS == "$want_status" && (-z $want_reason || $REASON == "$want_reason") ]]; then
-    PASSED=$((PASSED + 1))
-    printf 'PASS  %-62s %s %s\n' "$what" "$STATUS" "$REASON"
+    pass "$what"
   else
-    FAILED=$((FAILED + 1))
-    printf 'FAIL  %-62s got %s %s, want %s %s\n' "$what" "$STATUS" "${REASON:-(no reason)}" "$want_status" "$want_reason"
+    fail "$what" "$want_status" "$want_reason"
   fi
 }
 
-user() { check "$1" /v1/users/token "$GH_USER_TOKEN" "$2" "${@:3}"; }
+# gone <path> checks that a removed route is a 404.
+gone() {
+  STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BROKER$1") REASON=""
+  if [[ $STATUS == 404 ]]; then pass "removed POST $1"; else fail "removed POST $1" 404; fi
+}
+
+user() { check "$1" "$GH_USER_TOKEN" "$ACCESS" "$2" "${@:3}"; }
 
 echo
 user "writer gets a token for $REPO" "{\"profile\":\"me\",\"repository\":\"$REPO\"}" 200
@@ -222,22 +243,22 @@ if [[ -n ${TEST_READ_ONLY_REPO:-} ]]; then
 else
   echo "SKIP  write needed, only read (set TEST_READ_ONLY_REPO)"
 fi
-check "installation token (ghs_)" /v1/users/token ghs_notARealInstallationToken000000000000 \
+check "installation token (ghs_)" ghs_notARealInstallationToken000000000000 "$ACCESS" \
   "{\"repository\":\"$REPO\"}" 401 installation_token
-check "token GitHub rejects" /v1/users/token gho_notARealToken000000000000000000000000 \
+check "token GitHub rejects" gho_notARealToken000000000000000000000000 "$ACCESS" \
   "{\"repository\":\"$REPO\"}" 401 invalid_user_token
-check "no token" /v1/users/token - "{\"repository\":\"$REPO\"}" 401 invalid_user_token
+check "no token" - "$ACCESS" "{\"repository\":\"$REPO\"}" 400 invalid_body
 user "no repository" '{"profile":"me"}' 400 invalid_body
 user "malformed repository" '{"profile":"me","repository":"a/b/c"}' 400 invalid_body
-check "gh token on /v1/actions/token" /v1/actions/token "$GH_USER_TOKEN" '{"profile":"ci"}' 401 invalid_jwt
-check "removed POST /v1/token" /v1/token "$GH_USER_TOKEN" - 404
+check "gh token passed off as a job's OIDC token" "$GH_USER_TOKEN" "$ID_TOKEN" '{"profile":"ci"}' 401 invalid_jwt
+for path in /v1/token /v1/actions/token /v1/users/token /v1/revoke; do gone "$path"; done
 
 echo
 echo "revoking ${#MINTED[@]} minted token(s)"
 REVOKED=0
 for tok in "${MINTED[@]}"; do
-  code=$(printf 'Authorization: Bearer %s\n' "$tok" | curl -s -o /dev/null -w '%{http_code}' -H @- -X POST "$BROKER/v1/revoke")
-  if [[ $code == 204 ]]; then REVOKED=$((REVOKED + 1)); else echo "FAIL  revoke returned $code"; FAILED=$((FAILED + 1)); fi
+  code=$(revoke "$tok")
+  if [[ $code == 200 ]]; then REVOKED=$((REVOKED + 1)); else echo "FAIL  revoke returned $code"; FAILED=$((FAILED + 1)); fi
 done
 MINTED=()
 echo "revoked $REVOKED"

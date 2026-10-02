@@ -1,7 +1,7 @@
 import { createLocalJWKSet } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
 import { HttpError } from "../src/errors.js";
-import { bearer, verifyGitHubJWT } from "../src/jwt.js";
+import { verifyGitHubJWT } from "../src/jwt.js";
 import { AUDIENCE, createIssuer, githubClaims, OWNER_ID } from "./helpers.js";
 
 const github = { issuer: "https://token.actions.githubusercontent.com", audience: AUDIENCE, owner_id: OWNER_ID };
@@ -68,19 +68,5 @@ describe("verifyGitHubJWT", () => {
 
   it("rejects garbage", async () => {
     expect(await reason("not.a.jwt")).toMatch(/invalid_jwt/);
-  });
-});
-
-describe("bearer", () => {
-  const req = (authorization?: string) =>
-    new Request("https://x", authorization ? { headers: { authorization } } : undefined);
-
-  it("extracts the token", () => {
-    expect(bearer(req("Bearer abc"))).toBe("abc");
-    expect(bearer(req("bearer abc"))).toBe("abc");
-  });
-
-  it.each([undefined, "", "Basic abc", "Bearer", "Bearer a b"])("rejects %j", (header) => {
-    expect(() => bearer(req(header))).toThrow(HttpError);
   });
 });

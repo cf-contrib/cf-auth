@@ -1,9 +1,9 @@
 import Cloudflare, { CloudflareError } from "cloudflare";
-import type { BucketCredentials, ErrorResponse, TokenResponse, UserTokenRequest } from "./api.js";
+import type { BucketCredentials, ErrorResponse, TokenExchangeResponse } from "./api.js";
 import { audit } from "./audit.js";
 import { HttpError } from "./errors.js";
-import { REPOSITORY, verifyGitHubUser } from "./github.js";
-import { bearer, verifyGitHubJWT } from "./jwt.js";
+import { verifyGitHubUser } from "./github.js";
+import { verifyGitHubJWT } from "./jwt.js";
 import {
   type Claims,
   clampTTL,
@@ -15,6 +15,7 @@ import {
   selectProfile,
 } from "./policy.js";
 import { issueR2 } from "./r2.js";
+import { ACCESS_TOKEN, R2_CREDENTIALS, readExchangeRequest, readRevokeRequest, type TokenFields } from "./requests.js";
 import { cleanup, discard, type MintedToken, mint, revoke, tokenName } from "./tokens.js";
 
 export interface Env {
@@ -90,80 +91,85 @@ function failure(err: unknown): Response {
   return json(500, { error: "internal" } satisfies ErrorResponse);
 }
 
-/** Reads the body of either token route. `repository` is only read, and then required, for people. */
-async function readTokenRequest(request: Request, subject: Subject): Promise<Partial<UserTokenRequest>> {
-  const text = await request.text();
-  if (text.trim() === "") {
-    if (subject === "users") throw new HttpError("bad_request", "invalid_body", "repository is required");
-    return {};
-  }
-  let body: unknown;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    throw new HttpError("bad_request", "invalid_body", "not JSON");
-  }
-  if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    throw new HttpError("bad_request", "invalid_body", "not an object");
-  }
-  const { profile, ttl } = body as Record<string, unknown>;
-  if ((profile !== undefined && typeof profile !== "string") || (ttl !== undefined && typeof ttl !== "string")) {
-    throw new HttpError("bad_request", "invalid_body", "profile and ttl must be strings");
-  }
-  // Both end up in the audit log; profile names are at most 64 characters anyway.
-  if ((profile?.length ?? 0) > 64 || (ttl?.length ?? 0) > 16) {
-    throw new HttpError("bad_request", "invalid_body", "profile or ttl too long");
-  }
-  if (subject === "actions") return { profile, ttl };
-
-  const { repository } = body as Record<string, unknown>;
-  if (typeof repository !== "string" || repository.length > 200 || !REPOSITORY.test(repository)) {
-    throw new HttpError("bad_request", "invalid_body", "repository must be owner/name or a numeric ID");
-  }
-  return { profile, ttl, repository };
-}
-
-/** Authenticates the caller of a token route, and returns their claims and request. */
-async function authenticate(request: Request, policy: Policy, subject: Subject) {
-  if (subject === "actions") {
-    const claims = await verifyGitHubJWT(bearer(request), policy.github);
-    return { claims, req: await readTokenRequest(request, subject) };
-  }
-
-  // A broker without enabled user profiles serves no people, so it doesn't call GitHub for them.
+/** Ends with a `404` when no enabled profile is for people, so the broker doesn't call GitHub for them. */
+function userProfiles(policy: Policy) {
   const users = policy.profiles.filter((p) => p.subject === "users" && p.enabled);
   if (users.length === 0) throw new HttpError("not_found", "no_user_profiles");
-  const token = bearer(request, "invalid_user_token");
-  // The body first: a malformed request costs no GitHub calls.
-  const req = await readTokenRequest(request, subject);
-  // Teams cost extra GitHub calls, so they're only looked up if a profile that could match needs them.
-  const candidates = req.profile === undefined ? users : users.filter((p) => p.name === req.profile);
-  const teams = candidates.some((p) => p.match.team_id !== undefined);
-  const claims = await verifyGitHubUser(token, req.repository as string, { ownerId: policy.github.owner_id, teams });
-  return { claims, req };
+  return users;
 }
 
-async function handleToken(request: Request, env: Env, raw: unknown, subject: Subject): Promise<Response> {
+/** Checks a person's GitHub token for the requested repo. */
+async function verifyUser(policy: Policy, token: string, fields: TokenFields): Promise<Claims> {
+  // Teams cost extra GitHub calls, so they're only looked up if a profile that could match needs them.
+  const users = userProfiles(policy);
+  const candidates = fields.profile === undefined ? users : users.filter((p) => p.name === fields.profile);
+  const teams = candidates.some((p) => p.match.team_id !== undefined);
+  return verifyGitHubUser(token, fields.repository as string, { ownerId: policy.github.owner_id, teams });
+}
+
+/** A verified caller of a token route. */
+interface Caller {
+  subject: Subject;
+  claims: Claims;
+  fields: TokenFields;
+}
+
+/** Authenticates the caller, whose token is in the body. Nothing is verified before the body parses. */
+async function authenticate(request: Request, policy: Policy): Promise<Caller> {
+  const { subject, token, fields } = await readExchangeRequest(request);
+  const claims =
+    subject === "actions" ? await verifyGitHubJWT(token, policy.github) : await verifyUser(policy, token, fields);
+  return { subject, claims, fields };
+}
+
+/** What a token exchange hands out. */
+interface Grant {
+  profile: string;
+  accountId: string;
+  token?: MintedToken | undefined;
+  buckets: BucketCredentials[];
+  expiresOn: string;
+}
+
+/** The RFC 8693 response of `/oauth/token`, with the broker's own fields as extensions. */
+function exchangeResponse(grant: Grant): TokenExchangeResponse {
+  const expiresAt = Math.floor(Date.parse(grant.expiresOn) / 1000);
+  const { token } = grant;
+  return {
+    ...(token
+      ? { access_token: token.token, issued_token_type: ACCESS_TOKEN, token_type: "Bearer", token_id: token.token_id }
+      : { issued_token_type: R2_CREDENTIALS, token_type: "N_A" }),
+    expires_in: Math.max(0, expiresAt - Math.floor(Date.now() / 1000)),
+    expires_at: expiresAt,
+    account_id: grant.accountId,
+    profile: grant.profile,
+    ...(grant.buckets.length > 0 ? { buckets: grant.buckets } : {}),
+  };
+}
+
+/** Serves `POST /oauth/token`. */
+async function handleToken(request: Request, env: Env, raw: unknown): Promise<Response> {
+  let subject: Subject | undefined;
   let claims: Claims | undefined;
   let profile: string | undefined;
   try {
     const policy = config(raw, env);
-    const caller = await authenticate(request, policy, subject);
-    claims = caller.claims;
-    const { req } = caller;
-    profile = req.profile;
-    const selected = selectProfile(policy, subject, claims, req.profile);
+    const caller = await authenticate(request, policy);
+    ({ subject, claims } = caller);
+    const { fields } = caller;
+    profile = fields.profile;
+    const selected = selectProfile(policy, caller.subject, caller.claims, fields.profile);
     profile = selected.name;
-    const ttl = clampTTL(req.ttl, selected);
+    const ttl = clampTTL(fields.ttl, selected);
     // Filled in before anything is minted, so an unusable claim leaves nothing behind.
-    const verified = claims;
+    const verified = caller.claims;
     const buckets = (selected.buckets ?? []).map((bucket) => ({ bucket, prefixes: r2Prefixes(bucket, verified) }));
 
     const cf = await brokerClient(env);
     const accountId = env.CF_OIDC_BROKER_ACCOUNT_ID;
     let token: MintedToken | undefined;
     if (selected.policies) {
-      token = await mint(cf, accountId, selected.policies, tokenName(claims, subject), ttl);
+      token = await mint(cf, accountId, selected.policies, tokenName(verified, caller.subject), ttl);
       audit("token.mint", { subject, profile, claims, token_id: token.token_id, expires_on: token.expires_on });
     }
 
@@ -190,15 +196,10 @@ async function handleToken(request: Request, env: Env, raw: unknown, subject: Su
       issued.push(creds);
     }
 
-    const expires_on = token?.expires_on ?? issued[0]?.expires_on;
-    if (expires_on === undefined) throw new Error(`profile ${profile} has neither a token nor buckets`);
-    return json(200, {
-      ...token,
-      account_id: accountId,
-      expires_on,
-      profile: selected.name,
-      ...(issued.length > 0 ? { buckets: issued } : {}),
-    } satisfies TokenResponse);
+    const expiresOn = token?.expires_on ?? issued[0]?.expires_on;
+    if (expiresOn === undefined) throw new Error(`profile ${profile} has neither a token nor buckets`);
+    const grant: Grant = { profile: selected.name, accountId, token, buckets: issued, expiresOn };
+    return json(200, exchangeResponse(grant));
   } catch (err) {
     if (err instanceof HttpError) {
       audit("token.deny", { subject, profile, claims, reason: err.reason, detail: err.detail });
@@ -209,14 +210,15 @@ async function handleToken(request: Request, env: Env, raw: unknown, subject: Su
   }
 }
 
+/** Serves `POST /oauth/revoke`. Answers `200` whether the token was revoked or already gone, as RFC 7009 has it. */
 async function handleRevoke(request: Request, env: Env, raw: unknown): Promise<Response> {
   try {
     config(raw, env);
-    const presented = bearer(request);
+    const presented = await readRevokeRequest(request);
     const cf = await brokerClient(env);
     const id = await revoke(cf, env.CF_OIDC_BROKER_ACCOUNT_ID, presented);
     audit("token.revoke", id ? { token_id: id } : { reason: "already_gone" });
-    return new Response(null, { status: 204 });
+    return new Response(null, { status: 200, headers: { "cache-control": "no-store" } });
   } catch (err) {
     if (err instanceof HttpError) audit("token.revoke", { reason: err.reason, detail: err.detail });
     return failure(err);
@@ -233,11 +235,9 @@ export function createBroker(policy: unknown) {
       const { pathname } = new URL(request.url);
       const route = `${request.method} ${pathname}`;
       switch (route) {
-        case "POST /v1/actions/token":
-          return handleToken(request, env, policy, "actions");
-        case "POST /v1/users/token":
-          return handleToken(request, env, policy, "users");
-        case "POST /v1/revoke":
+        case "POST /oauth/token":
+          return handleToken(request, env, policy);
+        case "POST /oauth/revoke":
           return handleRevoke(request, env, policy);
         case "GET /healthz":
           try {
