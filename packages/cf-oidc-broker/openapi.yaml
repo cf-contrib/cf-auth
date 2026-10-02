@@ -284,21 +284,20 @@ components:
           type: array
           items:
             type: object
-            required: [kty, crv, x, kid, alg, use]
+            required: [kty, n, e, kid, alg, use]
             properties:
               kty:
                 type: string
-                const: OKP
-              crv:
+                const: RSA
+              n:
                 type: string
-                const: Ed25519
-              x:
+              e:
                 type: string
               kid:
                 type: string
               alg:
                 type: string
-                const: EdDSA
+                const: RS256
               use:
                 type: string
                 const: sig

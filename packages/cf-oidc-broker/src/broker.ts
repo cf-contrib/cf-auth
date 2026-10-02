@@ -39,8 +39,8 @@ export interface Env {
    */
   CF_OIDC_BROKER_TOKEN: SecretsStoreSecret;
   /**
-   * Ed25519 private key (PKCS#8 PEM) the broker signs its own tokens with, for profiles with
-   * an `audience`. Optional: without it, the broker issues none and publishes no keys. Must be
+   * RSA private key (PKCS#8 PEM, at least 2048 bits) the broker signs its own tokens with,
+   * for profiles with an `audience`. Optional: without it, the broker issues none and publishes no keys. Must be
    * a Secrets Store binding.
    */
   CF_OIDC_BROKER_SIGNING_KEY?: SecretsStoreSecret;

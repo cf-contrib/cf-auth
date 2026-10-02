@@ -2,8 +2,11 @@ import { calculateJwkThumbprint, exportJWK, importPKCS8, type JWK, SignJWT } fro
 import { HttpError } from "./errors.js";
 import type { Claims } from "./policy.js";
 
-/** RFC 8037's name for Ed25519 in JWS headers, which every JOSE library understands. */
-export const ALGORITHM = "EdDSA";
+/** RS256: what OIDC verifiers support by default, cf-nix-cache included. Signed with Workers' WebCrypto. */
+export const ALGORITHM = "RS256";
+
+/** The smallest RSA key accepted, as NIST and jose require. */
+const MIN_MODULUS_BITS = 2048;
 
 /**
  * Verified claims copied into the broker's tokens under GitHub's own names, so a service's
@@ -44,8 +47,8 @@ export function clearSigningKey() {
 }
 
 /**
- * The Ed25519 signing key, from a Secrets Store binding holding a PKCS#8 PEM (as
- * `openssl genpkey -algorithm ed25519` writes it). Its `kid` is the public key's RFC 7638
+ * The RSA signing key, from a Secrets Store binding holding a PKCS#8 PEM (as
+ * `openssl genpkey -algorithm RSA` writes it). Its `kid` is the public key's RFC 7638
  * thumbprint, so a new key gets a new `kid` without any configuration.
  */
 export async function signingKey(secret: SecretsStoreSecret | undefined): Promise<SigningKey> {
@@ -66,12 +69,14 @@ export async function signingKey(secret: SecretsStoreSecret | undefined): Promis
   try {
     privateKey = await importPKCS8(pem, ALGORITHM, { extractable: true });
   } catch {
-    throw unavailable("not an Ed25519 private key in PKCS#8 PEM");
+    throw unavailable("not an RSA private key in PKCS#8 PEM");
   }
-  // The private JWK carries the public `x` alongside `d`; only the public members are published.
-  const { kty, crv, x } = await exportJWK(privateKey);
-  const kid = await calculateJwkThumbprint({ kty, crv, x } as JWK);
-  const key = { privateKey, publicJwk: { kty, crv, x, kid, alg: ALGORITHM, use: "sig" } as JWK, kid };
+  const bits = (privateKey.algorithm as { modulusLength: number }).modulusLength;
+  if (bits < MIN_MODULUS_BITS) throw unavailable(`RSA key is ${bits} bits, at least ${MIN_MODULUS_BITS} needed`);
+  // The private JWK carries the public `n` and `e` alongside the private members; only those two are published.
+  const { kty, n, e } = await exportJWK(privateKey);
+  const kid = await calculateJwkThumbprint({ kty, n, e } as JWK);
+  const key = { privateKey, publicJwk: { kty, n, e, kid, alg: ALGORITHM, use: "sig" } as JWK, kid };
   cached = { pem, key };
   return key;
 }

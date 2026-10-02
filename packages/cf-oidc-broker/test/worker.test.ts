@@ -1041,7 +1041,7 @@ describe("tokens for other services", () => {
   let signingPem: string;
 
   beforeAll(async () => {
-    const { privateKey } = await generateKeyPair("EdDSA", { crv: "Ed25519", extractable: true });
+    const { privateKey } = await generateKeyPair("RS256", { extractable: true });
     signingPem = await exportPKCS8(privateKey);
   });
 
@@ -1092,9 +1092,9 @@ describe("tokens for other services", () => {
     const { payload, protectedHeader } = await jwtVerify(body.access_token as string, await brokerKeys(), {
       issuer: AUDIENCE,
       audience: CACHE,
-      algorithms: ["EdDSA"],
+      algorithms: ["RS256"],
     });
-    expect(protectedHeader).toMatchObject({ alg: "EdDSA", typ: "JWT" });
+    expect(protectedHeader).toMatchObject({ alg: "RS256", typ: "JWT" });
     expect(payload).toMatchObject({
       sub,
       profile: "nix-push",
@@ -1151,12 +1151,13 @@ describe("tokens for other services", () => {
       token_endpoint: `${AUDIENCE}/oauth/token`,
       revocation_endpoint: `${AUDIENCE}/oauth/revoke`,
       grant_types_supported: [GRANT],
-      id_token_signing_alg_values_supported: ["EdDSA"],
+      id_token_signing_alg_values_supported: ["RS256"],
     });
 
     const { keys } = (await (await call("GET", "/.well-known/jwks")).json()) as { keys: JWK[] };
+    // Only the public members: no d, p, q or the CRT values.
     expect(keys).toEqual([
-      { kty: "OKP", crv: "Ed25519", x: expect.any(String), kid: expect.any(String), alg: "EdDSA", use: "sig" },
+      { kty: "RSA", n: expect.any(String), e: "AQAB", kid: expect.any(String), alg: "RS256", use: "sig" },
     ]);
     const res2 = await forCache(await issuer.sign());
     const { access_token } = (await res2.json()) as TokenExchangeResponse;
@@ -1206,12 +1207,29 @@ describe("tokens for other services", () => {
     expect(await (await call("GET", "/.well-known/jwks")).json()).toEqual({ keys: [] });
   });
 
-  it("fails closed on a signing key that isn't an Ed25519 PKCS#8 PEM", async () => {
+  it("fails closed on a signing key that isn't an RSA PKCS#8 PEM", async () => {
     env.CF_OIDC_BROKER_SIGNING_KEY = { get: async () => "not a key" };
     expect((await forCache(await issuer.sign())).status).toBe(500);
     expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({
       reason: "signing_key_unavailable",
-      detail: "not an Ed25519 private key in PKCS#8 PEM",
+      detail: "not an RSA private key in PKCS#8 PEM",
+    });
+  });
+
+  it("fails closed on an RSA key under 2048 bits", async () => {
+    // jose won't generate one this small, so WebCrypto does.
+    const weak = (await crypto.subtle.generateKey(
+      { name: "RSASSA-PKCS1-v1_5", modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true,
+      ["sign", "verify"],
+    )) as CryptoKeyPair;
+    const der = new Uint8Array((await crypto.subtle.exportKey("pkcs8", weak.privateKey)) as ArrayBuffer);
+    const pem = `-----BEGIN PRIVATE KEY-----\n${btoa(String.fromCharCode(...der))}\n-----END PRIVATE KEY-----`;
+    env.CF_OIDC_BROKER_SIGNING_KEY = { get: async () => pem };
+    expect((await forCache(await issuer.sign())).status).toBe(500);
+    expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({
+      reason: "signing_key_unavailable",
+      detail: "RSA key is 1024 bits, at least 2048 needed",
     });
   });
 

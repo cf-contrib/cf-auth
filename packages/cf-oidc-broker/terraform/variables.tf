@@ -42,7 +42,7 @@ variable "signing_key_secret" {
     secret_store_id = string
     secret_name     = string
   })
-  description = "Secrets Store secret holding the Ed25519 private key (PKCS#8 PEM, e.g. from `openssl genpkey -algorithm ed25519`) the broker signs its own tokens with. Needed only for profiles with an audience. Terraform only references it; the value never enters state."
+  description = "Secrets Store secret holding the RSA private key (PKCS#8 PEM, at least 2048 bits, e.g. from `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072`) the broker signs its own tokens with. Needed only for profiles with an audience. Terraform only references it; the value never enters state."
   default     = null
 }
 

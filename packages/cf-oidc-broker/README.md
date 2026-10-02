@@ -60,7 +60,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 |---|---|---|---|
 | `CF_OIDC_BROKER_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
 | `CF_OIDC_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 permissions covering what profiles' `buckets` delegate. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
-| `CF_OIDC_BROKER_SIGNING_KEY` | Secrets Store secret | for profiles with an `audience` | Ed25519 private key, as a PKCS#8 PEM, the broker signs [its own tokens](#tokens-for-other-services) with. Without it the broker issues none, publishes no keys, and those profiles fail closed with `500`. |
+| `CF_OIDC_BROKER_SIGNING_KEY` | Secrets Store secret | for profiles with an `audience` | RSA private key (at least 2048 bits), as a PKCS#8 PEM, the broker signs [its own tokens](#tokens-for-other-services) with. Without it the broker issues none, publishes no keys, and those profiles fail closed with `500`. |
 
 The hourly cron (`17 * * * *` in the examples) deletes expired `cf-oidc:*` tokens.
 
@@ -250,18 +250,18 @@ A profile with `audience: <service URL>` gives the caller a token the broker sig
     ttl: 15m
 ```
 
-The caller asks for it with [`audience`](#token-exchange) set to the service's URL, and gets an Ed25519-signed JWT (`alg: EdDSA`):
+The caller asks for it with [`audience`](#token-exchange) set to the service's URL, and gets a JWT the broker signed (`alg: RS256`, which OIDC verifiers support by default):
 
 - `iss` is the broker's URL (`github.audience`), `aud` the service, and `sub` GitHub's `sub` for a job or `user:<actor_id>` for a person.
 - The verified claims are copied under GitHub's names, so a service can keep matching on them: `repository`, `repository_id`, `repository_owner`, `repository_owner_id`, `ref`, `ref_type`, `environment`, `event_name`, `workflow_ref`, `job_workflow_ref`, `run_id`, `run_attempt`, `runner_environment`, `actor`, `actor_id` and, for a person, `repository_permission`. Plus `profile` and a unique `jti`.
 - It lasts the profile's `ttl`, but never past the job's OIDC token, which lasts minutes. Exchange again for a fresh one: there are no refresh tokens.
 
-Services find the public key at [`/.well-known/jwks`](#http-api), or through [`/.well-known/openid-configuration`](#http-api), and should check `iss`, `aud`, `exp` and the `EdDSA` algorithm.
+Services find the public key at [`/.well-known/jwks`](#http-api), or through [`/.well-known/openid-configuration`](#http-api), and should check `iss`, `aud`, `exp` and the `RS256` algorithm.
 
-The key is an Ed25519 private key in Secrets Store, bound as `CF_OIDC_BROKER_SIGNING_KEY` (`signing_key_secret` in the [Terraform module](terraform)):
+The key is an RSA private key, at least 2048 bits, in Secrets Store, bound as `CF_OIDC_BROKER_SIGNING_KEY` (`signing_key_secret` in the [Terraform module](terraform)):
 
 ```sh
-openssl genpkey -algorithm ed25519 -out signing-key.pem
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out signing-key.pem
 wrangler secrets-store secret create <store-id> --name cf-auth-signing-key --scopes workers   # paste the PEM
 rm signing-key.pem
 ```
