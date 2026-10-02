@@ -30,6 +30,14 @@ jobs:
         run: nix develop --command pnpm build
       - name: Check Bundle
         run: nix develop --command pnpm --filter cf-oidc-broker check:bundle
+      # The Rust Worker, which replaces the TypeScript broker once it passes the same tests.
+      - name: Check Rust Formatting
+        run: nix develop --command cargo fmt --all --check
+      - name: Test Rust
+        run: nix develop --command cargo test --workspace
+      - name: Build Rust Worker
+        working-directory: crates/cf-oidc-exchange-api
+        run: nix develop --command worker-build --release
       - name: Validate Terraform Module
         working-directory: packages/cf-oidc-broker/terraform
         run: |

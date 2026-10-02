@@ -49,10 +49,13 @@ try {
   };
 
   // No retry: minting isn't idempotent. A token orphaned by a failed request is removed by the broker's cron cleanup.
+  // Form-encoded, as RFC 8693 has it; parameters left unset aren't sent.
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(body)) if (value !== undefined) form.set(key, value);
   const response = await fetch(new URL("/oauth/token", broker), {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: form,
     signal: AbortSignal.timeout(30_000),
   });
   if (!response.ok) {
