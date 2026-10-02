@@ -40,6 +40,8 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 web-sys = { version = "0.3", features = ["Crypto", "CryptoKey", "SubtleCrypto", "WorkerGlobalScope"] }
 
 [dev-dependencies]
+# The integration tests ask the health endpoints with the SDK's client.
+cf-oidc-exchange-sdk = { path = "../cf-oidc-exchange-sdk", features = ["client"] }
 # The integration tests' stand-ins for the OIDC issuers, GitHub and Cloudflare,
 # served over axum on tokio, and their calls to the Worker over reqwest.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
