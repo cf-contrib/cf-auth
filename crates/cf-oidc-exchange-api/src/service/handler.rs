@@ -26,16 +26,12 @@
 
 use std::sync::Arc;
 
-use base64::{
-    Engine,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
+use cf_oidc_core::{ALGORITHM, Identity, SigningKey};
 use cf_oidc_exchange_sdk::v1::{
     self, BucketCredentials, Discovery, Error, ErrorCode, ExchangeServiceApi, IssuedTokenType,
     Jwks, TokenExchangeRequest, TokenExchangeRequestSubjectTokenType as SubjectTokenType,
     TokenExchangeResponse, TokenExchangeResponseTokenType as TokenType, TokenRevocationRequest,
 };
-use cf_oidc_jwt::Identity;
 use chrono::{DateTime, Utc};
 use cloudflare::v4::{
     ApiOpError, HttpClient, IamCreatePayload, IamEffect, IamPermissionGroup,
@@ -44,14 +40,7 @@ use cloudflare::v4::{
 };
 use serde_json::{Map, Value, json};
 use tracing::{error, info, warn};
-use web_sys::{CryptoKey, SubtleCrypto, WorkerGlobalScope};
-use worker::{
-    Date,
-    js_sys::{self, Uint8Array},
-    send::SendFuture,
-    wasm_bindgen::{JsCast, JsValue},
-    wasm_bindgen_futures::JsFuture,
-};
+use worker::{Date, send::SendFuture};
 
 use super::config::{
     BucketConfig, BucketPermission, CLOUDFLARE_AUDIENCE, Config, Effect, PolicyConfig,
@@ -60,13 +49,6 @@ use super::config::{
 
 /// The token exchange grant, RFC 8693's.
 const TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
-
-/// What the broker signs its own tokens with, which OIDC verifiers support by
-/// default, cf-nix-cache included.
-const ALGORITHM: &str = "RS256";
-
-/// The smallest RSA signing key accepted, as NIST requires.
-const MIN_MODULUS_BITS: usize = 2048;
 
 /// Every minted token's name starts with this. Revocation and the cleanup
 /// never touch anything else.
@@ -112,7 +94,9 @@ impl ExchangeServiceHandler {
             .await
             .map_err(|err| Error::new(ErrorCode::Misconfigured, err.to_string()))?
         {
-            Some(pem) => SigningKey::import(&pem).await.map(Some),
+            Some(pem) => SigningKey::import(&pem).await.map(Some).map_err(|err| {
+                Error::new(ErrorCode::Misconfigured, format!("the signing key: {err}"))
+            }),
             None => Ok(None),
         }
     }
@@ -142,9 +126,11 @@ impl ExchangeServiceHandler {
             ));
         };
         let now = Date::now().as_millis() / 1000;
-        let issued = key
-            .issue(&self.config.policy().issuer, caller, profile, ttl, now)
-            .await?;
+        let (claims, expires_at) =
+            payload(&self.config.policy().issuer, caller, profile, ttl, now)?;
+        let signed = key.sign(claims).await.map_err(|err| {
+            Error::new(ErrorCode::InternalError, format!("signing a token: {err}"))
+        })?;
         info!(
             event = "token.issue",
             provider = %caller.provider.name,
@@ -152,15 +138,15 @@ impl ExchangeServiceHandler {
             sub = caller.identity.subject(),
             claims = %serde_json::Value::Object(caller.matched(Some(profile))),
             audience = %profile.audience,
-            jti = %issued.jti,
-            expires_at = issued.expires_at,
+            jti = %signed.jti,
+            expires_at,
         );
         Ok(TokenExchangeResponse {
-            access_token: Some(issued.jwt),
+            access_token: Some(signed.jwt),
             account_id: None,
             buckets: None,
-            expires_at: issued.expires_at as i64,
-            expires_in: issued.expires_at.saturating_sub(now) as i64,
+            expires_at: expires_at as i64,
+            expires_in: expires_at.saturating_sub(now) as i64,
             issued_token_type: IssuedTokenType::UrnIetfParamsOauthTokenTypeJwt,
             profile: profile.name.clone(),
             token_id: None,
@@ -517,7 +503,7 @@ impl<'p> Caller<'p> {
     /// The caller presenting `token`, as the auth layer verified it.
     fn of(token: &str, policy: &'p PolicyConfig) -> Result<Self, Error> {
         let unauthorized = |why: &str| Error::new(ErrorCode::Unauthorized, why);
-        let identity = cf_oidc_jwt::verified(token)
+        let identity = cf_oidc_core::verified(token)
             .ok_or_else(|| unauthorized("the subject token wasn't verified"))?;
         let provider = policy
             .provider_for(&identity.claims)
@@ -895,165 +881,18 @@ fn pick_group<'g>(groups: &'g [Group], name: &str, scope: &str) -> Result<&'g Gr
     ))
 }
 
-/// The RSA key the broker signs its own tokens with, imported into WebCrypto,
-/// so it never leaves the runtime's crypto.
-struct SigningKey {
-    key: CryptoKey,
-    /// The public key, base64url.
-    n: String,
-    e: String,
-    /// The public key's RFC 7638 thumbprint, so a new key gets a new `kid`
-    /// without any configuration.
-    kid: String,
-}
-
-/// A token for another service, signed.
-struct Issued {
-    jwt: String,
-    jti: String,
-    /// Seconds since the epoch.
-    expires_at: u64,
-}
-
-fn webcrypto(err: JsValue) -> Error {
-    let why = err
-        .dyn_ref::<js_sys::Error>()
-        .map(|err| String::from(err.message()))
-        .unwrap_or_else(|| format!("{err:?}"));
-    Error::new(ErrorCode::InternalError, format!("WebCrypto: {why}"))
-}
-
-fn subtle() -> Result<SubtleCrypto, Error> {
-    let scope = js_sys::global().unchecked_into::<WorkerGlobalScope>();
-    Ok(scope.crypto().map_err(webcrypto)?.subtle())
-}
-
-async fn promised(promise: Result<js_sys::Promise, JsValue>) -> Result<JsValue, Error> {
-    JsFuture::from(promise.map_err(webcrypto)?)
-        .await
-        .map_err(webcrypto)
-}
-
-fn rs256() -> Result<js_sys::Object, Error> {
-    js_sys::JSON::parse(r#"{"name":"RSASSA-PKCS1-v1_5","hash":"SHA-256"}"#)
-        .map(JsCast::unchecked_into)
-        .map_err(webcrypto)
-}
-
-/// The DER inside a PKCS#8 PEM, as `openssl genpkey -algorithm RSA` writes it.
-fn pkcs8_der(pem: &str) -> Option<Vec<u8>> {
-    let body = pem
-        .trim()
-        .strip_prefix("-----BEGIN PRIVATE KEY-----")?
-        .strip_suffix("-----END PRIVATE KEY-----")?;
-    let base64: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-    STANDARD.decode(base64).ok()
-}
-
-impl SigningKey {
-    /// The RSA key in `pem`, a PKCS#8 PEM.
-    async fn import(pem: &str) -> Result<Self, Error> {
-        let unusable =
-            |why: &str| Error::new(ErrorCode::Misconfigured, format!("the signing key: {why}"));
-        let not_rsa = || unusable("not an RSA private key in PKCS#8 PEM");
-        let der = pkcs8_der(pem).ok_or_else(not_rsa)?;
-
-        let subtle = subtle()?;
-        let usages = js_sys::Array::of1(&JsValue::from_str("sign"));
-        // Extractable, so its public half can be exported to publish.
-        let imported = subtle.import_key_with_object(
-            "pkcs8",
-            &Uint8Array::from(&der[..]),
-            &rs256()?,
-            true,
-            &usages,
-        );
-        let key: CryptoKey = promised(imported)
-            .await
-            .map_err(|_| not_rsa())?
-            .unchecked_into();
-        let jwk = promised(subtle.export_key("jwk", &key)).await?;
-        let jwk: String = js_sys::JSON::stringify(&jwk).map_err(webcrypto)?.into();
-        let jwk: Value = serde_json::from_str(&jwk).unwrap_or_default();
-        let (Some(n), Some(e)) = (jwk["n"].as_str(), jwk["e"].as_str()) else {
-            return Err(not_rsa());
-        };
-
-        let bits = URL_SAFE_NO_PAD.decode(n).map_or(0, |n| n.len() * 8);
-        if bits < MIN_MODULUS_BITS {
-            return Err(unusable(&format!(
-                "RSA key is {bits} bits, at least {MIN_MODULUS_BITS} needed"
-            )));
-        }
-        // RFC 7638: the required members, in lexicographic order, without
-        // whitespace.
-        let canonical = format!(r#"{{"e":"{e}","kty":"RSA","n":"{n}"}}"#);
-        let digest =
-            promised(subtle.digest_with_str_and_buffer_source(
-                "SHA-256",
-                &Uint8Array::from(canonical.as_bytes()),
-            ))
-            .await?;
-        Ok(Self {
-            key,
-            n: n.to_string(),
-            e: e.to_string(),
-            kid: URL_SAFE_NO_PAD.encode(Uint8Array::new(&digest).to_vec()),
-        })
-    }
-
-    /// The public half, as the JWKS publishes it.
-    fn public_jwk(&self) -> Value {
-        json!({ "kty": "RSA", "n": self.n, "e": self.e, "kid": self.kid, "alg": ALGORITHM, "use": "sig" })
-    }
-
-    /// Signs a token for the service `profile` is for, issued at `now`
-    /// (seconds since the epoch).
-    async fn issue(
-        &self,
-        issuer: &str,
-        caller: &Caller<'_>,
-        profile: &ProfileConfig,
-        ttl: u64,
-        now: u64,
-    ) -> Result<Issued, Error> {
-        let scope = js_sys::global().unchecked_into::<WorkerGlobalScope>();
-        let jti = scope.crypto().map_err(webcrypto)?.random_uuid();
-        let (claims, expires_at) = payload(issuer, caller, profile, ttl, &jti, now)?;
-        let header = json!({ "alg": ALGORITHM, "kid": self.kid, "typ": "JWT" });
-        let signing_input = format!(
-            "{}.{}",
-            URL_SAFE_NO_PAD.encode(header.to_string()),
-            URL_SAFE_NO_PAD.encode(Value::Object(claims).to_string())
-        );
-        let signature = promised(subtle()?.sign_with_object_and_buffer_source(
-            &rs256()?,
-            &self.key,
-            &Uint8Array::from(signing_input.as_bytes()),
-        ))
-        .await?;
-        let signature = URL_SAFE_NO_PAD.encode(Uint8Array::new(&signature).to_vec());
-        Ok(Issued {
-            jwt: format!("{signing_input}.{signature}"),
-            jti,
-            expires_at,
-        })
-    }
-}
-
 /// The claims of a token for another service, issued at `now` (seconds since
 /// the epoch), and when it expires. It never outlives the token the caller
 /// presented.
 ///
 /// It has the claims the policy matched on, under the issuer's names, so the
 /// service can match on the same ones. Nothing else: an issuer's other claims,
-/// such as an email, stay behind.
+/// such as an email, stay behind. Signing adds its `jti`.
 fn payload(
     issuer: &str,
     caller: &Caller,
     profile: &ProfileConfig,
     ttl: u64,
-    jti: &str,
     now: u64,
 ) -> Result<(Map<String, Value>, u64), Error> {
     let claims = &caller.identity.claims;
@@ -1085,7 +924,6 @@ fn payload(
         ("iat", json!(now)),
         ("nbf", json!(now)),
         ("exp", json!(expires_at)),
-        ("jti", json!(jti)),
     ] {
         payload.insert(name.into(), value);
     }
@@ -1171,7 +1009,6 @@ mod tests {
             &caller(&policy, matched),
             &policy.profiles[1],
             15 * 60_000,
-            "jti-1",
             NOW,
         )
         .unwrap();
@@ -1189,7 +1026,6 @@ mod tests {
                 "iat": NOW,
                 "nbf": NOW,
                 "exp": NOW + 300,
-                "jti": "jti-1",
             })
         );
 
@@ -1200,22 +1036,10 @@ mod tests {
             &caller(&policy, expired),
             &policy.profiles[1],
             60_000,
-            "j",
             NOW,
         )
         .unwrap_err();
         assert_eq!(err.message, "the subject token has expired");
-    }
-
-    #[test]
-    fn reads_a_pkcs8_pem() {
-        let pem = "-----BEGIN PRIVATE KEY-----\nAAEC\nAwQ=\n-----END PRIVATE KEY-----\n";
-        assert_eq!(pkcs8_der(pem), Some(vec![0, 1, 2, 3, 4]));
-        assert_eq!(
-            pkcs8_der("-----BEGIN RSA PRIVATE KEY-----\nAAEC\n-----END RSA PRIVATE KEY-----"),
-            None
-        );
-        assert_eq!(pkcs8_der("not a pem"), None);
     }
 
     #[test]

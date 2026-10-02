@@ -13,8 +13,8 @@ worker = { version = "0.8", features = ["http", "axum"] }
 
 # The API: its types, and the traits and router the Worker implements.
 cf-oidc-exchange-sdk = { path = "../cf-oidc-exchange-sdk", features = ["server"] }
-# Verifies the OIDC tokens exchanges present.
-cf-oidc-jwt = { path = "../cf-oidc-jwt" }
+# Verifies the OIDC tokens exchanges present, and signs the broker's own.
+cf-oidc-core = { path = "../cf-oidc-core" }
 # Named by the generated traits and router; the versions the SDK builds with.
 async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["json"] }
@@ -32,13 +32,8 @@ cloudflare = { git = "https://github.com/cf-contrib/cloudflare-rs", rev = "bf8bd
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# The broker's own tokens: JWT segments, the signing key's PEM, and their
-# timestamps and the tokens API's.
-base64 = "0.22"
+# Expiry, as the tokens API and the responses take it.
 chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
-# WebCrypto bindings for signing the broker's own tokens with RS256, so no RSA
-# crate ends up in the wasm bundle.
-web-sys = { version = "0.3", features = ["Crypto", "CryptoKey", "SubtleCrypto", "WorkerGlobalScope"] }
 
 # Logs, as JSON lines to the console, which Workers Logs indexes.
 tracing = "0.1"
@@ -56,6 +51,7 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync",
 # Signs the stand-in issuers' tokens and verifies the broker's, with keys made
 # from fixed seeds. Only in the tests: the Worker signs with WebCrypto.
 rand_chacha = "0.3"
+base64 = "0.22"
 rsa = { version = "0.9", features = ["sha2"] }
 
 [features]

@@ -1,5 +1,6 @@
-//! OIDC token verification for Cloudflare Workers, for any issuer: GitHub
-//! Actions, GitLab, Cloudflare Access, or a broker that issues its own tokens.
+//! OIDC tokens in Cloudflare Workers: verifying them, for any issuer (GitHub
+//! Actions, GitLab, Cloudflare Access, or a broker that issues its own), and
+//! signing them, for a Worker that is an issuer.
 //!
 //! A token picks its [`Provider`] by its `iss` claim, which must be one a
 //! provider names exactly. Its RS256 signature is checked with the runtime's
@@ -12,11 +13,15 @@
 //! expires: [`verified`] reads it back, so whoever verified a token can hand
 //! its [`Identity`] to whatever runs next without verifying it again.
 //!
+//! A Worker that issues its own tokens signs them with a [`SigningKey`], an RSA
+//! key imported into WebCrypto, and publishes its [`SigningKey::public_jwk`].
+//!
 //! The futures aren't `Send`: they hold JavaScript values. A Worker is
 //! single-threaded, so a caller that needs `Send`, such as an axum handler,
 //! wraps them in `worker::send::SendFuture`.
 
 mod claims;
+mod signing;
 
 use std::{cell::RefCell, collections::HashMap, fmt};
 
@@ -32,7 +37,10 @@ use worker::{
     wasm_bindgen_futures::JsFuture,
 };
 
-pub use crate::claims::ClaimSet;
+pub use crate::{
+    claims::ClaimSet,
+    signing::{ALGORITHM, KeyError, SignedToken, SigningKey},
+};
 
 /// Clock tolerance for `exp` and `nbf`.
 const LEEWAY_SECS: u64 = 60;
@@ -381,7 +389,7 @@ impl<'a> Jwt<'a> {
         let header: JwtHeader =
             serde_json::from_slice(&segment(header)?).map_err(|_| not_a_jwt())?;
         let claims = serde_json::from_slice(&segment(payload)?).map_err(|_| not_a_jwt())?;
-        if header.alg != "RS256" {
+        if header.alg != ALGORITHM {
             return Err(invalid("alg must be RS256"));
         }
 
