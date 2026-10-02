@@ -1,7 +1,7 @@
 # Plans the module with mocked providers: no credentials or network needed.
 # Covers the broker token binding, URL modes, the release and local artifacts, their
-# checksums, the policy template,
-# bucket prefix placeholders and the policy module.
+# checksums, the policy template and its size,
+# and bucket prefix placeholders.
 mock_provider "cloudflare" {}
 mock_provider "github" {}
 mock_provider "http" {}
@@ -10,18 +10,6 @@ override_data {
   target = data.github_release.this
   values = {
     assets = [
-      {
-        name                 = "entry.js"
-        browser_download_url = "https://example.com/entry.js"
-        content_type         = "application/octet-stream"
-        created_at           = "2026-10-02T00:00:00Z"
-        id                   = 1
-        label                = ""
-        node_id              = "RA_test1"
-        size                 = 1
-        updated_at           = "2026-10-02T00:00:00Z"
-        url                  = "https://api.github.com/repos/cf-contrib/cf-oidc-exchange/releases/assets/1"
-      },
       {
         name                 = "index.js"
         browser_download_url = "https://example.com/index.js"
@@ -64,11 +52,6 @@ override_data {
 
 # A release whose files match its SHA256SUMS.
 override_data {
-  target = data.http.entry_js
-  values = { response_body = "export { default } from \"./index.js\";" }
-}
-
-override_data {
   target = data.http.index_js
   values = { response_body = "export default {};" }
 }
@@ -82,7 +65,6 @@ override_data {
   target = data.http.sha256sums
   values = {
     response_body = <<-EOT
-      6e7039cd217402fb94990d0ce98aabf5d6f7452777d3f00ba115658fa0e0aa42  entry.js
       9f085b1079ab38f776bbb3930dfd067a838ca3e0483aff8625f88837e8ed964c  index.js
       037e64cdc23d28f2d300b10174f8398968910e7520c8e68ad5eaa581f05a0137  index_bg.wasm.base64
     EOT
@@ -142,32 +124,23 @@ run "signing_key_binding" {
 run "policy_is_templated" {
   command = plan
 
-
   assert {
     condition = anytrue([
-      for m in cloudflare_worker_version.this.modules :
-      m.name == "policy.json" && m.content_type == "text/plain" && strcontains(base64decode(m.content_base64), "com.cloudflare.api.account.0123456789abcdef0123456789abcdef")
+      for b in cloudflare_worker_version.this.bindings :
+      b.name == "CF_OIDC_EXCHANGE_API_POLICY" && b.type == "plain_text" && strcontains(b.text, "com.cloudflare.api.account.0123456789abcdef0123456789abcdef")
     ])
-    error_message = "the policy should be a policy.json text module with account_id filled in"
-  }
-
-  assert {
-    condition     = length([for b in cloudflare_worker_version.this.bindings : b if b.name == "CF_AUTH_BROKER_POLICY"]) == 0
-    error_message = "the policy should not be a binding"
+    error_message = "the policy should be a plain_text binding with account_id filled in"
   }
 }
 
-run "accepts_a_large_policy" {
+run "rejects_a_policy_over_5_kb" {
   command = plan
 
   variables {
     policy_file = "tests/fixtures/large-policy.yaml"
   }
 
-  assert {
-    condition     = length(local.policy_json) > 5000
-    error_message = "the fixture should be over the old 5 KB binding limit"
-  }
+  expect_failures = [cloudflare_worker_version.this]
 }
 
 run "workers_dev" {
@@ -266,20 +239,18 @@ run "uploads_the_release" {
   command = plan
 
   assert {
-    condition     = cloudflare_worker_version.this.main_module == "entry.js"
-    error_message = "entry.js should be the main module"
+    condition     = cloudflare_worker_version.this.main_module == "index.js"
+    error_message = "index.js should be the main module"
   }
 
   assert {
     condition = alltrue([
       for name, type in {
-        "entry.js"      = "application/javascript+module"
         "index.js"      = "application/javascript+module"
         "index_bg.wasm" = "application/wasm"
-        "policy.json"   = "text/plain"
       } : anytrue([for m in cloudflare_worker_version.this.modules : m.name == name && m.content_type == type])
     ])
-    error_message = "entry.js, index.js, index_bg.wasm and policy.json should be uploaded"
+    error_message = "index.js and index_bg.wasm should be uploaded"
   }
 
   assert {
@@ -292,7 +263,7 @@ run "pins_the_release" {
   command = plan
 
   variables {
-    checksums_sha256 = "8cc9e69af40b7d72ad3b9993031e1b710697b1c727d3347c593043c975b31af2"
+    checksums_sha256 = "c153336c0d57f29adad2594f0d9203287fc5ba40a8649cfe54fb4120f09fa797"
   }
 }
 

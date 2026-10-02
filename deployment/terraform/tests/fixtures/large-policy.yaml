@@ -1,4 +1,4 @@
-# Over the 5 KB Worker binding limit, to show the policy module has no such cap.
+# Over the 5 KB Worker variable limit, which the module refuses to deploy.
 version: 3
 issuer: https://cf-oidc-exchange.example.com
 providers:

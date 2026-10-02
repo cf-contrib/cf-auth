@@ -34,7 +34,7 @@ jobs:
         working-directory: crates/cf-oidc-exchange-api
         run: nix develop --command worker-build --release
       # The Worker's flows end to end, under wrangler dev, against the tests'
-      # stand-ins for the OIDC issuers, GitHub and Cloudflare.
+      # stand-ins for the OIDC issuers and Cloudflare.
       - name: Integration Test Rust Worker
         run: nix develop --command crates/cf-oidc-exchange-api/tests/run.sh
       - name: Validate Terraform Module
@@ -165,22 +165,21 @@ jobs:
           ref: ${{ needs.release.outputs.tag_name }}
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v23
-      # The Worker as deployment/terraform uploads it: the entry module, worker-build's
-      # index.js, and the wasm as base64 text, so Terraform can check its checksum.
+      # The Worker as deployment/terraform uploads it: worker-build's index.js, and
+      # the wasm as base64 text, so Terraform can check its checksum.
       - name: Build
         working-directory: crates/cf-oidc-exchange-api
         run: |
           nix develop --command worker-build --release
           mkdir -p "$RUNNER_TEMP/release"
-          cp worker/entry.js build/index.js "$RUNNER_TEMP/release/"
+          cp build/index.js "$RUNNER_TEMP/release/"
           base64 -w0 build/index_bg.wasm > "$RUNNER_TEMP/release/index_bg.wasm.base64"
-          cd "$RUNNER_TEMP/release" && sha256sum entry.js index.js index_bg.wasm.base64 > SHA256SUMS
+          cd "$RUNNER_TEMP/release" && sha256sum index.js index_bg.wasm.base64 > SHA256SUMS
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release.outputs.tag_name }}
           files: |
-            ${{ runner.temp }}/release/entry.js
             ${{ runner.temp }}/release/index.js
             ${{ runner.temp }}/release/index_bg.wasm.base64
             ${{ runner.temp }}/release/SHA256SUMS

@@ -65,7 +65,7 @@ variable "release_tag" {
 
 variable "worker_dir" {
   type        = string
-  description = "Path to a locally built Worker: a directory with entry.js, index.js and index_bg.wasm (worker-build --release, then copy worker/entry.js in). Deploys it instead of downloading a release."
+  description = "Path to a locally built Worker: a directory with index.js and index_bg.wasm, as worker-build --release writes them. Deploys it instead of downloading a release."
   default     = null
 }
 

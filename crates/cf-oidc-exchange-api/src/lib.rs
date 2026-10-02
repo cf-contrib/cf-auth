@@ -1,12 +1,14 @@
-//! The broker as a Rust Worker: the `oidc.exchange.v1` API, generated from the
-//! spec in `cf-oidc-exchange-sdk`, served over the Workers runtime.
+//! The Worker half of cf-oidc-exchange: a broker that exchanges OIDC tokens
+//! for short-lived Cloudflare credentials, or its own tokens for other
+//! services.
+//!
+//! Each request reads the Worker's configuration from its bindings, then
+//! serves the SDK's router over it: the exchange API, with the auth layer
+//! authenticating every exchange before its handler, and the health endpoints
+//! beside it. A configuration that can't be read, an unset account or an
+//! invalid policy, fails every request instead.
 
-mod audit;
-mod cloudflare;
-mod issuer;
-mod oidc;
 mod service;
-mod webcrypto;
 
 use std::sync::Arc;
 
@@ -17,21 +19,27 @@ use axum::{
     response::{IntoResponse, Response as HttpResponse},
 };
 use cf_oidc_exchange_sdk::v1::{self, ErrorCode};
-use serde_json::json;
 use tower_service::Service;
 use worker::*;
 
-use crate::service::{config::Config, handler::ExchangeServiceHandler, layer};
+use crate::service::{
+    config::Config,
+    handler::ExchangeServiceHandler,
+    layer::{self, AuthenticateLayer},
+};
 
 #[event(fetch)]
 async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<HttpResponse> {
-    let mut router = match Config::from_env(&env).await {
+    let mut router = match Config::from_env(&env) {
         // The router checks each request against the spec, form bodies
-        // included, before it reaches a handler. The layer gives every
-        // response the contract's error body and its Cache-Control.
+        // included, before it reaches a handler; the auth layer
+        // authenticates every exchange first.
         Ok(config) => {
-            v1::exchange_service_api_router(ExchangeServiceHandler::new(Arc::new(config)))
-                // Not in the spec: they're for whoever deploys the Worker, not its clients.
+            let config = Arc::new(config);
+            v1::exchange_service_api_router(ExchangeServiceHandler::new(config.clone()))
+                .layer(AuthenticateLayer::new(config))
+                // Merged after the layer, so outside it. Not in the spec:
+                // they're for whoever deploys the Worker, not its clients.
                 .merge(v1::HealthHandler::new().into_router())
                 .layer(middleware::from_fn(layer::respond))
         }
@@ -40,11 +48,8 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<HttpResponse
         Err(err) => {
             let msg = err.to_string();
             axum::Router::new().fallback(move || async move {
-                console_error!("{msg}");
-                let body = v1::Error::new(
-                    ErrorCode::Misconfigured,
-                    "the broker is misconfigured; its logs say why",
-                );
+                console_error!("misconfigured: {msg}");
+                let body = v1::Error::new(ErrorCode::Misconfigured, "the broker is misconfigured");
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
             })
         }
@@ -55,19 +60,16 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<HttpResponse
 /// The hourly cleanup of expired `cf-oidc:` tokens.
 #[event(scheduled)]
 async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    let deleted = match Config::from_env(&env).await {
+    let deleted = match Config::from_env(&env) {
         Ok(config) => {
             ExchangeServiceHandler::new(Arc::new(config))
                 .cleanup()
                 .await
         }
-        Err(err) => Err(err),
+        Err(err) => Err(v1::Error::new(ErrorCode::Misconfigured, err.to_string())),
     };
     match deleted {
-        Ok(deleted) => console_log!("{}", json!({ "event": "cleanup.done", "deleted": deleted })),
-        Err(err) => console_error!(
-            "{}",
-            json!({ "event": "cleanup.failed", "error": err.error.as_str(), "message": err.message })
-        ),
+        Ok(deleted) => console_log!("cleanup: {deleted} expired tokens deleted"),
+        Err(err) => console_error!("cleanup failed: {err}"),
     }
 }

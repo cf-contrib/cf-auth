@@ -1,0 +1,1378 @@
+//! The Worker's configuration, read from its bindings.
+//!
+//! [`Config::from_env`] is the only place that reads `Env`: the crate root
+//! builds one per request and hands it to the handler and the auth layer,
+//! which take what they need from it.
+//!
+//! An unset account, an invalid policy, or a Cloudflare token that isn't a
+//! Secrets Store binding fails it, and the Worker serves nothing until it's
+//! fixed. The secrets' values are read only when they're used, since reading
+//! them is async, so a rotated one takes effect on the next request.
+//!
+//! The policy's format is here too: [`PolicyConfig`], its providers and
+//! profiles, their claim sets and bucket prefixes, and what parsing checks,
+//! the guardrails among it. Checking a token against a provider is in the auth
+//! [`layer`](super::layer); what a caller gets, in the
+//! [`handler`](super::handler).
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::{Map, Value};
+use worker::{Env, Error, SecretStore, js_sys, wasm_bindgen::JsValue};
+
+/// The binding of the account the Cloudflare token belongs to, and tokens are
+/// minted in.
+pub const ACCOUNT_KEY: &str = "CF_OIDC_EXCHANGE_API_ACCOUNT_ID";
+
+/// The binding of the policy, as JSON.
+pub const POLICY_KEY: &str = "CF_OIDC_EXCHANGE_API_POLICY";
+
+/// The binding of the Cloudflare token: account-owned, with "Account API Tokens
+/// Write", plus R2 permissions covering what profiles' `buckets` delegate.
+pub const CLOUDFLARE_TOKEN_KEY: &str = "CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN";
+
+/// The binding of the RSA private key (PKCS#8 PEM, at least 2048 bits) the
+/// broker signs its own tokens with. Optional: without it, the broker issues
+/// none and publishes no keys.
+pub const SIGNING_KEY_KEY: &str = "CF_OIDC_EXCHANGE_API_SIGNING_KEY";
+
+/// Where Cloudflare's API is.
+const CLOUDFLARE_API: &str = "https://api.cloudflare.com/client/v4";
+
+/// The audience for Cloudflare API tokens and R2 credentials, and every
+/// profile's default.
+pub const CLOUDFLARE_AUDIENCE: &str = "https://api.cloudflare.com";
+
+const SECOND: u64 = 1000;
+const MINUTE: u64 = 60 * SECOND;
+const HOUR: u64 = 60 * MINUTE;
+
+/// The shortest TTL anything is issued for.
+pub const MIN_TTL: u64 = MINUTE;
+const MAX_TTL: u64 = 24 * HOUR;
+const DEFAULT_TTL: u64 = 15 * MINUTE;
+const DEFAULT_MAX_TTL: u64 = HOUR;
+
+/// What the Worker is configured with, from its bindings.
+pub struct Config {
+    /// `CF_OIDC_EXCHANGE_API_ACCOUNT_ID`.
+    account_id: String,
+    /// `CF_OIDC_EXCHANGE_API_POLICY`, checked against the account.
+    policy: PolicyConfig,
+    /// `CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN`'s binding, not yet its value.
+    cloudflare_token: SecretConfig,
+    /// `CF_OIDC_EXCHANGE_API_SIGNING_KEY`'s binding. None issues no tokens of
+    /// the broker's own.
+    signing_key: Option<SecretConfig>,
+    /// Where Cloudflare's API is.
+    cloudflare_api: String,
+}
+
+impl Config {
+    /// Reads the Worker's bindings.
+    ///
+    /// # Errors
+    ///
+    /// When the account isn't set, the policy is invalid, or a secret isn't a
+    /// Secrets Store binding.
+    pub fn from_env(env: &Env) -> worker::Result<Self> {
+        let var = |key| env.var(key).map(|value| value.to_string()).ok();
+        let Some(account_id) = var(ACCOUNT_KEY).filter(|id| !id.is_empty()) else {
+            return Err(Error::RustError(format!("{ACCOUNT_KEY} must be set")));
+        };
+        let policy = PolicyConfig::parse(&var(POLICY_KEY).unwrap_or_default(), &account_id)
+            .map_err(|why| Error::RustError(format!("{POLICY_KEY}: {why}")))?;
+        let cloudflare_token =
+            SecretConfig::from_env(env, CLOUDFLARE_TOKEN_KEY)?.ok_or_else(|| {
+                Error::RustError(format!(
+                    "{CLOUDFLARE_TOKEN_KEY} must be a Secrets Store binding"
+                ))
+            })?;
+
+        // Only a `stand-ins` build, for the integration tests, takes Cloudflare's
+        // API from anywhere but Cloudflare.
+        #[cfg(feature = "stand-ins")]
+        let cloudflare_api = var("CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL")
+            .unwrap_or_else(|| CLOUDFLARE_API.to_string());
+        #[cfg(not(feature = "stand-ins"))]
+        let cloudflare_api = CLOUDFLARE_API.to_string();
+
+        Ok(Self {
+            account_id,
+            policy,
+            cloudflare_token,
+            signing_key: SecretConfig::from_env(env, SIGNING_KEY_KEY)?,
+            cloudflare_api,
+        })
+    }
+
+    /// The account tokens are minted in.
+    pub fn account_id(&self) -> &str {
+        &self.account_id
+    }
+
+    /// The policy.
+    pub fn policy(&self) -> &PolicyConfig {
+        &self.policy
+    }
+
+    /// Where Cloudflare's API is.
+    pub fn cloudflare_api(&self) -> &str {
+        &self.cloudflare_api
+    }
+
+    /// Reads the Cloudflare token.
+    pub async fn cloudflare_token(&self) -> worker::Result<String> {
+        self.cloudflare_token.read().await
+    }
+
+    /// Reads the signing key, a PKCS#8 PEM, or `None` if none is bound.
+    pub async fn signing_key(&self) -> worker::Result<Option<String>> {
+        match &self.signing_key {
+            Some(secret) => secret.read().await.map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+/// A secret in Secrets Store, read when it's used.
+///
+/// Bound as anything else, a plain Worker secret say, it's refused rather than
+/// taken as a weaker setup: a Secrets Store secret never passes through
+/// Terraform.
+struct SecretConfig {
+    key: &'static str,
+    store: SecretStore,
+}
+
+impl SecretConfig {
+    /// The secret bound as `key`, or `None` if nothing is.
+    fn from_env(env: &Env, key: &'static str) -> worker::Result<Option<Self>> {
+        if let Ok(store) = env.secret_store(key) {
+            return Ok(Some(Self { key, store }));
+        }
+        let bound = js_sys::Reflect::get(env.as_ref(), &JsValue::from_str(key))
+            .is_ok_and(|binding| !binding.is_undefined());
+        if bound {
+            return Err(Error::RustError(format!(
+                "{key} must be a Secrets Store binding"
+            )));
+        }
+        Ok(None)
+    }
+
+    async fn read(&self) -> worker::Result<String> {
+        let key = self.key;
+        match self.store.get().await {
+            Ok(Some(value)) if !value.is_empty() => Ok(value),
+            Ok(_) => Err(Error::RustError(format!("{key} is empty"))),
+            Err(err) => Err(Error::RustError(format!("{key} can't be read: {err}"))),
+        }
+    }
+}
+
+/// The policy: the OIDC issuers the broker trusts, its providers, and what
+/// their callers may get, its profiles.
+///
+/// It knows no issuer by name: who may do what is in the claim sets, as in
+/// cf-nix-cache.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyConfig {
+    /// The policy format's version: 3.
+    version: u64,
+    /// The broker's own URL: the issuer of the tokens it signs for other
+    /// services.
+    pub issuer: String,
+    pub providers: Vec<ProviderConfig>,
+    /// The TTLs of profiles that don't set their own.
+    #[serde(default)]
+    defaults: Ttls,
+    pub profiles: Vec<ProfileConfig>,
+}
+
+impl PolicyConfig {
+    /// The policy in `json`, checked against the account tokens are minted in.
+    ///
+    /// # Errors
+    ///
+    /// The first problem found: the guardrails are checked here, so an unsafe
+    /// policy never serves a request.
+    pub fn parse(json: &str, account_id: &str) -> Result<Self, String> {
+        let mut policy: Self = serde_json::from_str(json).map_err(|err| {
+            format!("must be a JSON policy of {{ version, issuer, providers, defaults?, profiles }}: {err}")
+        })?;
+        policy.check(account_id)?;
+        Ok(policy)
+    }
+
+    /// What deserializing can't check, filling in each profile's provider and
+    /// TTLs on the way.
+    fn check(&mut self, account_id: &str) -> Result<(), String> {
+        if self.version != 3 {
+            return Err("version must be 3".to_string());
+        }
+        check_origin(&self.issuer).map_err(|why| format!("issuer {why}"))?;
+
+        if self.providers.is_empty() {
+            return Err("providers must name at least one provider".to_string());
+        }
+        for (index, provider) in self.providers.iter().enumerate() {
+            let at = format!("providers[{index}]");
+            provider.check(&at)?;
+            let earlier = &self.providers[..index];
+            if earlier.iter().any(|other| other.name == provider.name) {
+                return Err(format!("{at}: {} is named twice", provider.name));
+            }
+            if earlier.iter().any(|other| other.issuer == provider.issuer) {
+                return Err(format!("{at}: {} is configured twice", provider.issuer));
+            }
+        }
+
+        let defaults = self.defaults.resolve(&Ttls::default());
+        defaults.check("defaults")?;
+
+        if self.profiles.is_empty() {
+            return Err("profiles must name at least one profile".to_string());
+        }
+        // With one provider, it's the only one a profile can be for.
+        let only = match self.providers.as_slice() {
+            [only] => Some(only.name.clone()),
+            _ => None,
+        };
+        for index in 0..self.profiles.len() {
+            let at = format!("profiles[{index}]");
+            let (earlier, rest) = self.profiles.split_at_mut(index);
+            let profile = &mut rest[0];
+            if earlier.iter().any(|other| other.name == profile.name) {
+                return Err(format!("{at}: {} is named twice", profile.name));
+            }
+            if profile.provider.is_empty() {
+                profile.provider = only
+                    .clone()
+                    .ok_or_else(|| format!("{at}.provider is required with several providers"))?;
+            }
+            if !self.providers.iter().any(|p| p.name == profile.provider) {
+                return Err(format!(
+                    "{at}.provider: no provider is named {}",
+                    profile.provider
+                ));
+            }
+            let ttls = Ttls {
+                ttl: profile.ttl,
+                max_ttl: profile.max_ttl,
+            }
+            .resolve(&defaults);
+            (profile.ttl, profile.max_ttl) = (ttls.ttl, ttls.max_ttl);
+            profile.check(&at, &self.issuer, account_id)?;
+        }
+        Ok(())
+    }
+}
+
+/// An OIDC issuer the broker trusts, and which of its tokens.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderConfig {
+    /// What profiles name it by, and minted tokens are named after.
+    pub name: String,
+    /// Matched exactly against a token's `iss`.
+    pub issuer: String,
+    /// A value the token's `aud` must have.
+    pub audience: String,
+    /// Where its keys are. `None` means its discovery document says.
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+    /// Every token from it must match one of these, whichever profile it gets.
+    pub claims: Vec<ClaimSet>,
+}
+
+impl ProviderConfig {
+    fn check(&self, at: &str) -> Result<(), String> {
+        check_name(&self.name).map_err(|why| format!("{at}.name {why}"))?;
+        check_url(&self.issuer).map_err(|why| format!("{at}.issuer {why}"))?;
+        if let Some(jwks_uri) = &self.jwks_uri {
+            check_url(jwks_uri).map_err(|why| format!("{at}.jwks_uri {why}"))?;
+        }
+        if self.audience.is_empty() {
+            return Err(format!("{at}.audience must not be empty"));
+        }
+        // Guardrail 1: the provider is pinned. An issuer that gives anyone's
+        // projects a token, as GitHub Actions does, would otherwise let them
+        // all in.
+        if self.claims.is_empty() {
+            return Err(format!("{at}.claims must contain at least one claim set"));
+        }
+        Ok(())
+    }
+}
+
+/// What a caller may get, and who may get it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileConfig {
+    pub name: String,
+    /// The provider whose tokens it's for. May be left out when the policy
+    /// has only one, which it's then filled in with.
+    #[serde(default)]
+    pub provider: String,
+    /// Off switch for incidents: a disabled profile never matches, even when
+    /// a request names it.
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+    /// What it issues for: Cloudflare credentials, or the broker's own token
+    /// for another service.
+    #[serde(default = "cloudflare_audience")]
+    pub audience: String,
+    /// A token must match one of these, as well as one of its provider's.
+    pub claims: Vec<ClaimSet>,
+    /// For everything it hands out, the token and the buckets' credentials,
+    /// in milliseconds. Taken from the defaults when unset.
+    #[serde(default, deserialize_with = "duration")]
+    pub ttl: u64,
+    /// The longest TTL a request can ask for, in milliseconds.
+    #[serde(default, deserialize_with = "duration")]
+    pub max_ttl: u64,
+    pub token: Option<TokenConfig>,
+    /// Each bucket gets its own credentials, which the action exports as an
+    /// AWS profile named after it.
+    pub buckets: Option<Vec<BucketConfig>>,
+}
+
+fn enabled() -> bool {
+    true
+}
+
+fn cloudflare_audience() -> String {
+    CLOUDFLARE_AUDIENCE.to_string()
+}
+
+impl ProfileConfig {
+    fn check(&self, at: &str, issuer: &str, account_id: &str) -> Result<(), String> {
+        check_name(&self.name).map_err(|why| format!("{at}.name {why}"))?;
+        if self.claims.is_empty() {
+            return Err(format!("{at}.claims must contain at least one claim set"));
+        }
+
+        // Guardrail 5: audiences are kept apart. The broker signs its own
+        // token for another service; Cloudflare credentials are another
+        // profile's job.
+        let credentials = self.token.is_some() || self.buckets.is_some();
+        if self.audience == CLOUDFLARE_AUDIENCE {
+            if !credentials {
+                return Err(format!("{at} must have a token, buckets or both"));
+            }
+        } else {
+            check_origin(&self.audience).map_err(|why| format!("{at}.audience {why}"))?;
+            if self.audience == issuer {
+                return Err(format!(
+                    "{at}.audience must be another service, not the broker"
+                ));
+            }
+            if credentials {
+                return Err(format!(
+                    "{at}: a profile for {} can't have a token or buckets",
+                    self.audience
+                ));
+            }
+        }
+
+        if let Some(token) = &self.token {
+            token.check(&format!("{at}.token"), account_id)?;
+        }
+        if let Some(buckets) = &self.buckets {
+            if buckets.is_empty() {
+                return Err(format!("{at}.buckets must name at least one bucket"));
+            }
+            for (index, bucket) in buckets.iter().enumerate() {
+                check_bucket_name(&bucket.name)
+                    .map_err(|why| format!("{at}.buckets[{index}].name {why}"))?;
+                // The name is also the AWS profile's, so it can only appear once.
+                if buckets[..index]
+                    .iter()
+                    .any(|other| other.name == bucket.name)
+                {
+                    return Err(format!(
+                        "{at}.buckets[{index}]: {} is named twice",
+                        bucket.name
+                    ));
+                }
+            }
+        }
+
+        // Guardrail 4: TTLs are capped, well within the 7 days R2 credentials
+        // can live.
+        Ttls {
+            ttl: self.ttl,
+            max_ttl: self.max_ttl,
+        }
+        .check(at)
+    }
+}
+
+/// A TTL and the longest one a request can ask for, in milliseconds. Written
+/// as durations: `90s`, `15m`, `1h30m`. Zero is unset until resolved.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Ttls {
+    #[serde(default, deserialize_with = "duration")]
+    ttl: u64,
+    #[serde(default, deserialize_with = "duration")]
+    max_ttl: u64,
+}
+
+impl Ttls {
+    /// These, with what's unset taken from `defaults`, or the broker's own.
+    fn resolve(&self, defaults: &Ttls) -> Ttls {
+        let or = |value: u64, default: u64| if value == 0 { default } else { value };
+        let max_ttl = or(self.max_ttl, or(defaults.max_ttl, DEFAULT_MAX_TTL));
+        let ttl = or(self.ttl, or(defaults.ttl, DEFAULT_TTL.min(max_ttl)));
+        Ttls { ttl, max_ttl }
+    }
+
+    fn check(&self, at: &str) -> Result<(), String> {
+        if self.max_ttl > MAX_TTL {
+            return Err(format!("{at}.max_ttl must be at most 24h"));
+        }
+        if self.ttl < MIN_TTL {
+            return Err(format!("{at}.ttl must be at least 1m"));
+        }
+        if self.ttl > self.max_ttl {
+            return Err(format!("{at}.ttl must not exceed max_ttl"));
+        }
+        Ok(())
+    }
+}
+
+fn duration<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    parse_duration(&value).ok_or_else(|| {
+        serde::de::Error::custom(format!("{value} must be a duration such as 15m or 1h30m"))
+    })
+}
+
+/// `90s`, `15m`, `1h30m` in milliseconds, or `None` for anything else, zero
+/// included.
+pub fn parse_duration(value: &str) -> Option<u64> {
+    let mut units = [('h', HOUR), ('m', MINUTE), ('s', SECOND)].into_iter();
+    let mut rest = value;
+    let mut total: u64 = 0;
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .filter(|&at| at > 0)?;
+        let count: u64 = rest[..digits].parse().ok()?;
+        let unit = rest[digits..].chars().next()?;
+        // Each unit once, largest first.
+        let (_, ms) = units.find(|(name, _)| *name == unit)?;
+        total = total.checked_add(count.checked_mul(ms)?)?;
+        rest = &rest[digits + 1..];
+    }
+    (total > 0).then_some(total)
+}
+
+/// A Cloudflare API token: its policies, in Cloudflare's own format, with
+/// permission groups by name.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenConfig {
+    pub policies: Vec<TokenPolicy>,
+}
+
+impl TokenConfig {
+    fn check(&self, at: &str, account_id: &str) -> Result<(), String> {
+        if self.policies.is_empty() {
+            return Err(format!("{at}.policies must contain at least one policy"));
+        }
+        for (index, policy) in self.policies.iter().enumerate() {
+            let at = format!("{at}.policies[{index}]");
+            if policy.permissions.is_empty() || policy.permissions.iter().any(String::is_empty) {
+                return Err(format!(
+                    "{at}.permissions must name at least one permission group"
+                ));
+            }
+            // Guardrail 3: no token-management permissions, or a caller could
+            // mint itself tokens the policy never allowed.
+            if policy.effect == Effect::Allow
+                && let Some(name) = policy
+                    .permissions
+                    .iter()
+                    .find(|name| name.to_lowercase().contains("api tokens"))
+            {
+                return Err(format!(
+                    "{at}.permissions: {name} isn't grantable: it manages tokens"
+                ));
+            }
+
+            if policy.resources.is_empty() {
+                return Err(format!("{at}.resources must name at least one resource"));
+            }
+            let nested = |value: &ResourceValue| matches!(value, ResourceValue::Nested(_));
+            if policy.resources.values().any(nested) && !policy.resources.values().all(nested) {
+                return Err(format!(
+                    "{at}.resources must be all \"*\" values or all nested maps, as Cloudflare takes them"
+                ));
+            }
+            for key in policy.resources.keys() {
+                if !key.starts_with("com.cloudflare.") {
+                    return Err(format!("{at}.resources: {key} isn't a Cloudflare resource"));
+                }
+                // Tokens are minted in one account; another account's ID is a
+                // copy-paste mistake.
+                let account = key.strip_prefix("com.cloudflare.api.account.");
+                if account.is_some_and(|id| is_id(id) && id != account_id) {
+                    return Err(format!("{at}.resources: {key} isn't the broker's account"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One of a token's policies.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenPolicy {
+    #[serde(default)]
+    pub effect: Effect,
+    /// Permission-group names, resolved to IDs when a token is minted.
+    pub permissions: Vec<String>,
+    /// Cloudflare's own token `resources`, e.g.
+    /// `com.cloudflare.api.account.zone.<zone_id>: "*"`.
+    pub resources: BTreeMap<String, ResourceValue>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Effect {
+    #[default]
+    Allow,
+    Deny,
+}
+
+/// A resource in Cloudflare's own token format: `"*"`, or a nested map.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ResourceValue {
+    Scope(String),
+    Nested(BTreeMap<String, String>),
+}
+
+/// A bucket a profile's caller gets R2 credentials for.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BucketConfig {
+    pub name: String,
+    pub permission: BucketPermission,
+    /// What the credentials are limited to. None means the whole bucket.
+    #[serde(default)]
+    pub prefixes: Vec<Prefix>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BucketPermission {
+    ObjectReadWrite,
+    ObjectReadOnly,
+}
+
+/// A bucket prefix, its path segments filled in from the caller's claims:
+/// `github.com/{repository}/`.
+///
+/// The prefix is all that keeps one caller out of another's keys, so a
+/// placeholder fills whole path segments, the template ends with `/`, and
+/// what fills it is checked as strictly as the template was.
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "String")]
+pub struct Prefix(Vec<Segment>);
+
+#[derive(Debug, PartialEq)]
+enum Segment {
+    Text(String),
+    Claim(String),
+}
+
+impl TryFrom<String> for Prefix {
+    type Error = String;
+
+    fn try_from(template: String) -> Result<Self, String> {
+        let invalid = |why: &str| format!("prefix {template} {why}");
+        if template.contains("${") {
+            // Terraform's templatefile would fill those in.
+            return Err(invalid("must use {claim} placeholders, not ${claim}"));
+        }
+        // Without it, github.com/org/site would also cover github.com/org/site-old/.
+        let Some(path) = template.strip_suffix('/') else {
+            return Err(invalid("must end with /"));
+        };
+        path.split('/')
+            .map(|segment| {
+                let placeholder = segment.strip_prefix('{').and_then(|s| s.strip_suffix('}'));
+                if let Some(claim) = placeholder.filter(|claim| !claim.contains(['{', '}'])) {
+                    let named = (1..=64).contains(&claim.len())
+                        && claim.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    if !named {
+                        return Err(invalid("has a placeholder that doesn't name a claim"));
+                    }
+                    return Ok(Segment::Claim(claim.to_string()));
+                }
+                // Otherwise two callers could get the same prefix: {owner}{id}
+                // is "a1"+"23" and "a"+"123" alike.
+                if segment.contains(['{', '}']) {
+                    return Err(invalid("must have placeholders as whole path segments, e.g. github.com/{repository}/"));
+                }
+                if !is_segment(segment) {
+                    return Err(invalid("must have path segments of letters, digits, ., _ and -, other than . and .."));
+                }
+                Ok(Segment::Text(segment.to_string()))
+            })
+            .collect::<Result<_, _>>()
+            .map(Self)
+    }
+}
+
+impl Prefix {
+    /// The prefix for a caller with `claims`.
+    ///
+    /// A value can span path segments, `owner/repo`, only when it fills the
+    /// template's one placeholder. With several, each fills exactly one, so two
+    /// callers can never fill a template to the same prefix.
+    ///
+    /// # Errors
+    ///
+    /// The claim that's missing or can't be used in a key.
+    pub fn fill(&self, claims: &Map<String, Value>) -> Result<String, String> {
+        let placeholders = self
+            .0
+            .iter()
+            .filter(|s| matches!(s, Segment::Claim(_)))
+            .count();
+        let mut prefix = String::new();
+        for segment in &self.0 {
+            match segment {
+                Segment::Text(text) => prefix.push_str(text),
+                Segment::Claim(claim) => {
+                    let value = match claims.get(claim) {
+                        Some(Value::String(text)) => text.clone(),
+                        Some(Value::Number(number)) => number.to_string(),
+                        _ => String::new(),
+                    };
+                    let usable = !value.is_empty()
+                        && value.split('/').all(is_segment)
+                        && (placeholders == 1 || !value.contains('/'));
+                    if !usable {
+                        return Err(format!(
+                            "the {claim} claim is missing or can't be used in a prefix"
+                        ));
+                    }
+                    prefix.push_str(&value);
+                }
+            }
+            prefix.push('/');
+        }
+        Ok(prefix)
+    }
+}
+
+/// A path segment a prefix may have: letters, digits, `.`, `_` and `-`, other
+/// than `.` and `..`.
+fn is_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && !segment.contains("..")
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Claim name to pattern. Matches when every claim matches.
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "Map<String, Value>")]
+pub struct ClaimSet(BTreeMap<String, Pattern>);
+
+impl TryFrom<Map<String, Value>> for ClaimSet {
+    type Error = String;
+
+    fn try_from(raw: Map<String, Value>) -> Result<Self, String> {
+        if raw.is_empty() {
+            return Err("a claim set must match at least one claim".to_string());
+        }
+
+        let mut claims = BTreeMap::new();
+        for (claim, value) in raw {
+            // IDs may be written as JSON numbers; most issuers send strings.
+            let pattern = match value {
+                Value::String(s) if !s.is_empty() => s,
+                Value::Number(n) if n.is_u64() => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                _ => {
+                    return Err(format!(
+                        "claim {claim} must be a non-empty string, a number or a boolean"
+                    ));
+                }
+            };
+            // Guardrail 2: patterns stay narrow.
+            let pattern = Pattern::parse(&pattern)
+                .filter(|pattern| !is_id_claim(&claim) || matches!(pattern, Pattern::Exact(_)))
+                .ok_or_else(|| {
+                    if is_id_claim(&claim) {
+                        format!("claim {claim}: ID claims must match exactly")
+                    } else {
+                        format!("claim {claim}: * may only end a pattern, after a prefix")
+                    }
+                })?;
+            claims.insert(claim, pattern);
+        }
+        Ok(Self(claims))
+    }
+}
+
+impl ClaimSet {
+    pub fn matches(&self, claims: &Map<String, Value>) -> bool {
+        self.0
+            .iter()
+            .all(|(claim, pattern)| match claims.get(claim) {
+                // A list claim (`groups`, `amr`) matches if any entry does.
+                Some(Value::Array(values)) => {
+                    values.iter().any(|value| pattern.matches_value(value))
+                }
+                Some(value) => pattern.matches_value(value),
+                None => false,
+            })
+    }
+
+    /// The claims it matches on.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+}
+
+/// A claim's expected value: exact, or a prefix written with one trailing
+/// `*` (`example-org/*`). `*_id` claims must be exact.
+#[derive(Debug, PartialEq)]
+enum Pattern {
+    Exact(String),
+    Prefix(String),
+}
+
+impl Pattern {
+    /// `None` for a `*` anywhere but at the end of a non-empty prefix.
+    fn parse(pattern: &str) -> Option<Self> {
+        match pattern.strip_suffix('*') {
+            Some(prefix) if !prefix.is_empty() && !prefix.contains('*') => {
+                Some(Self::Prefix(prefix.to_string()))
+            }
+            Some(_) => None,
+            None if pattern.contains('*') => None,
+            None => Some(Self::Exact(pattern.to_string())),
+        }
+    }
+
+    fn matches(&self, value: &str) -> bool {
+        match self {
+            Self::Exact(expected) => value == expected,
+            Self::Prefix(prefix) => value.starts_with(prefix.as_str()),
+        }
+    }
+
+    /// Numbers and booleans compare as they're written in JSON.
+    fn matches_value(&self, value: &Value) -> bool {
+        match value {
+            Value::String(s) => self.matches(s),
+            Value::Number(n) => self.matches(&n.to_string()),
+            Value::Bool(b) => self.matches(if *b { "true" } else { "false" }),
+            _ => false,
+        }
+    }
+}
+
+fn is_id_claim(claim: &str) -> bool {
+    claim.ends_with("_id")
+}
+
+/// A Cloudflare ID: 32 lowercase hex digits.
+fn is_id(value: &str) -> bool {
+    value.len() == 32 && value.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+/// Whether `name` can name a provider or profile.
+fn check_name(name: &str) -> Result<(), &'static str> {
+    let first = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric());
+    let rest = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    if !(first && rest && name.len() <= 64) {
+        return Err("must be 1-64 of [A-Za-z0-9_.-], starting with a letter or digit");
+    }
+    Ok(())
+}
+
+/// R2's bucket name rules: 3-63 lowercase letters, digits and hyphens,
+/// starting and ending with a letter or digit.
+fn check_bucket_name(name: &str) -> Result<(), &'static str> {
+    let allowed = name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !(allowed
+        && (3..=63).contains(&name.len())
+        && !name.starts_with('-')
+        && !name.ends_with('-'))
+    {
+        return Err("must be a valid R2 bucket name");
+    }
+    Ok(())
+}
+
+/// Whether `url` is somewhere keys may be fetched from: HTTPS, or plain HTTP
+/// on a loopback address, for a local issuer in development.
+pub(super) fn check_url(url: &str) -> Result<(), &'static str> {
+    let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
+        .iter()
+        .any(|prefix| {
+            url.strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '/']))
+        });
+    let https = url
+        .strip_prefix("https://")
+        .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'));
+    if url.contains(char::is_whitespace) || !(https || loopback) {
+        return Err("must be an https:// URL");
+    }
+    Ok(())
+}
+
+/// Whether `url` is a bare origin, as an issuer or audience is: an
+/// [`check_url`] URL without a path.
+fn check_origin(url: &str) -> Result<(), &'static str> {
+    check_url(url)?;
+    let host = url.split_once("://").map_or("", |(_, host)| host);
+    if host.contains(['/', '?', '#', '@']) || host.ends_with(':') {
+        return Err("must be a bare origin such as https://cf-oidc-exchange.example.com");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    pub(crate) const NOW: u64 = 1_800_000_000;
+    pub(crate) const ACCOUNT_ID: &str = "0123456789abcdef0123456789abcdef";
+    pub(crate) const ISSUER: &str = "https://token.actions.githubusercontent.com";
+    pub(crate) const BROKER: &str = "https://cf-oidc-exchange.example.com";
+    pub(crate) const CACHE: &str = "https://cf-nix-cache.example.com";
+
+    /// A policy: one provider, pinned to the test org, a profile for
+    /// Cloudflare, and one for the cache.
+    pub(crate) fn policy() -> Value {
+        json!({
+            "version": 3,
+            "issuer": BROKER,
+            "providers": [{ "name": "github", "issuer": ISSUER, "audience": BROKER, "claims": [{ "repository_owner_id": "100000001" }] }],
+            "profiles": [
+                {
+                    "name": "deploy",
+                    "claims": [{ "repository": "example-org/*", "ref": "refs/heads/main" }],
+                    "token": { "policies": [{ "permissions": ["Workers Scripts Write"], "resources": { (format!("com.cloudflare.api.account.{ACCOUNT_ID}")): "*" } }] },
+                },
+                { "name": "nix-push", "audience": CACHE, "claims": [{ "ref": "refs/heads/main" }] },
+            ],
+        })
+    }
+
+    pub(crate) fn parse(policy: &Value) -> PolicyConfig {
+        PolicyConfig::parse(&policy.to_string(), ACCOUNT_ID).expect("the policy should parse")
+    }
+
+    fn parse_err(policy: &Value) -> String {
+        PolicyConfig::parse(&policy.to_string(), ACCOUNT_ID).unwrap_err()
+    }
+
+    /// The test policy, with `pointer` set to `value`.
+    fn with(pointer: &str, value: Value) -> Value {
+        let mut policy = policy();
+        let (parent, key) = pointer.rsplit_once('/').unwrap();
+        match policy.pointer_mut(parent).unwrap() {
+            Value::Object(map) => map.insert(key.to_string(), value),
+            Value::Array(list) => {
+                list.push(value);
+                None
+            }
+            _ => unreachable!(),
+        };
+        policy
+    }
+
+    /// The test policy with one more profile.
+    fn with_profile(profile: Value) -> Value {
+        with("/profiles/-", profile)
+    }
+
+    fn token() -> Value {
+        policy()["profiles"][0]["token"].clone()
+    }
+
+    pub(crate) fn claims() -> Map<String, Value> {
+        json!({
+            "iss": ISSUER,
+            "aud": BROKER,
+            "sub": "repo:example-org/app:ref:refs/heads/main",
+            "exp": NOW + 300,
+            "iat": NOW - 10,
+            "repository": "example-org/app",
+            "repository_id": "200000002",
+            "repository_owner_id": "100000001",
+            "ref": "refs/heads/main",
+            "groups": ["cache-readers", "cache-uploaders"],
+            "email_verified": true,
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    #[test]
+    fn fills_in_the_provider_and_the_ttls() {
+        let policy = parse(&with("/defaults", json!({ "max_ttl": "2h" })));
+        let deploy = &policy.profiles[0];
+        assert_eq!(deploy.provider, "github");
+        assert_eq!(deploy.audience, CLOUDFLARE_AUDIENCE);
+        assert!(deploy.enabled);
+        assert_eq!((deploy.ttl, deploy.max_ttl), (15 * MINUTE, 2 * HOUR));
+
+        let policy = parse(&with_profile(
+            json!({ "name": "short", "claims": [{ "ref": "x" }], "ttl": "90s", "max_ttl": "5m", "token": token() }),
+        ));
+        let short = &policy.profiles[2];
+        assert_eq!((short.ttl, short.max_ttl), (90 * SECOND, 5 * MINUTE));
+    }
+
+    #[test]
+    fn parses_durations() {
+        for (value, ms) in [
+            ("90s", 90 * SECOND),
+            ("15m", 15 * MINUTE),
+            ("1h30m", 90 * MINUTE),
+        ] {
+            assert_eq!(parse_duration(value), Some(ms), "{value}");
+        }
+        for value in ["", "0s", "600", "m", "1m1h", "1h1h", "1d", " 1m", "-1m"] {
+            assert_eq!(parse_duration(value), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn rejects_bad_policies() {
+        let gitlab = json!({ "name": "gitlab", "issuer": "https://gitlab.com", "audience": BROKER, "claims": [{ "namespace_id": "4000001" }] });
+        let cases = [
+            (json!("not a policy"), "must be a JSON policy"),
+            (with("/version", json!(2)), "version must be 3"),
+            (with("/extra", json!(1)), "unknown field `extra`"),
+            (
+                with("/issuer", json!("https://broker.example.com/x")),
+                "issuer must be a bare origin",
+            ),
+            (
+                with("/providers", json!([])),
+                "providers must name at least one provider",
+            ),
+            (
+                with("/providers/-", gitlab.clone()),
+                "profiles[0].provider is required with several providers",
+            ),
+            (
+                with("/profiles/0/provider", json!("gitlab")),
+                "profiles[0].provider: no provider is named gitlab",
+            ),
+            (
+                with("/profiles", json!([])),
+                "profiles must name at least one profile",
+            ),
+            (
+                with("/profiles/1/name", json!("deploy")),
+                "profiles[1]: deploy is named twice",
+            ),
+            (
+                with("/profiles/0/name", json!("-x")),
+                "profiles[0].name must be 1-64",
+            ),
+            (
+                with("/profiles/0/claims", json!([])),
+                "profiles[0].claims must contain at least one claim set",
+            ),
+            (
+                with("/profiles/0/ttl", json!("forever")),
+                "forever must be a duration",
+            ),
+            (
+                with("/profiles/0/token/policies/0/effect", json!("maybe")),
+                "unknown variant `maybe`",
+            ),
+        ];
+        for (policy, expected) in cases {
+            let err = parse_err(&policy);
+            assert!(err.contains(expected), "{expected}: {err}");
+        }
+    }
+
+    #[test]
+    fn rejects_bad_providers() {
+        let cases = [
+            (
+                with("/providers/0/claims", json!([])),
+                "providers[0].claims must contain at least one claim set",
+            ),
+            (
+                with("/providers/0/audience", json!("")),
+                "providers[0].audience must not be empty",
+            ),
+            (
+                with("/providers/0/issuer", json!("http://issuer.example.com")),
+                "providers[0].issuer must be an https:// URL",
+            ),
+            (
+                with("/providers/0/jwks_uri", json!("http://keys.example.com")),
+                "providers[0].jwks_uri must be an https:// URL",
+            ),
+            (
+                with(
+                    "/providers/-",
+                    json!({ "name": "github", "issuer": "https://gitlab.com", "audience": BROKER, "claims": [{ "x": "y" }] }),
+                ),
+                "github is named twice",
+            ),
+            (
+                with(
+                    "/providers/-",
+                    json!({ "name": "again", "issuer": ISSUER, "audience": BROKER, "claims": [{ "x": "y" }] }),
+                ),
+                "is configured twice",
+            ),
+        ];
+        for (policy, expected) in cases {
+            let err = parse_err(&policy);
+            assert!(err.contains(expected), "{expected}: {err}");
+        }
+    }
+
+    #[test]
+    fn allows_http_only_on_loopback() {
+        for issuer in [
+            "http://127.0.0.1:8791/issuers/actions",
+            "http://localhost",
+            "http://[::1]:9000/oidc",
+        ] {
+            parse(&with("/providers/0/issuer", json!(issuer)));
+        }
+        for issuer in [
+            "http://127.0.0.1.example.com",
+            "http://localhost.example.com",
+        ] {
+            let err = parse_err(&with("/providers/0/issuer", json!(issuer)));
+            assert!(err.contains("https://"), "{issuer}: {err}");
+        }
+    }
+
+    #[test]
+    fn keeps_token_policies_to_the_guardrails() {
+        let resources = |resources: Value| {
+            with(
+                "/profiles/0/token",
+                json!({ "policies": [{ "permissions": ["DNS Write"], "resources": resources }] }),
+            )
+        };
+        let cases = [
+            (
+                with("/profiles/0/token/policies", json!([])),
+                "policies must contain at least one policy",
+            ),
+            (
+                with("/profiles/0/token/policies/0/permissions", json!([])),
+                "must name at least one permission group",
+            ),
+            (
+                with(
+                    "/profiles/0/token/policies/0/permissions",
+                    json!(["Account API Tokens Write"]),
+                ),
+                "Account API Tokens Write isn't grantable",
+            ),
+            (resources(json!({})), "must name at least one resource"),
+            (
+                resources(json!({ "zone.x": "*" })),
+                "zone.x isn't a Cloudflare resource",
+            ),
+            (
+                resources(
+                    json!({ "com.cloudflare.api.account.ffffffffffffffffffffffffffffffff": "*" }),
+                ),
+                "isn't the broker's account",
+            ),
+            (
+                resources(
+                    json!({ "com.cloudflare.api.account.a": { "x": "*" }, "com.cloudflare.api.account.zone.z": "*" }),
+                ),
+                "must be all \"*\" values or all nested maps",
+            ),
+        ];
+        for (policy, expected) in cases {
+            let err = parse_err(&policy);
+            assert!(err.contains(expected), "{expected}: {err}");
+        }
+
+        // Denying token management is fine; so is a zone of any account.
+        let deny = json!({ "effect": "deny", "permissions": ["API Tokens Write"], "resources": { (format!("com.cloudflare.api.account.{ACCOUNT_ID}")): "*" } });
+        parse(&with("/profiles/0/token/policies/-", deny));
+        parse(&resources(
+            json!({ "com.cloudflare.api.account.zone.fedcba9876543210fedcba9876543210": "*" }),
+        ));
+        parse(&resources(
+            json!({ (format!("com.cloudflare.api.account.{ACCOUNT_ID}")): { "com.cloudflare.api.account.zone.*": "*" } }),
+        ));
+    }
+
+    #[test]
+    fn caps_ttls() {
+        let cases = [
+            (
+                with("/defaults", json!({ "max_ttl": "25h" })),
+                "defaults.max_ttl must be at most 24h",
+            ),
+            (
+                with("/profiles/0/ttl", json!("30s")),
+                "profiles[0].ttl must be at least 1m",
+            ),
+            (
+                with("/profiles/0/ttl", json!("2h")),
+                "profiles[0].ttl must not exceed max_ttl",
+            ),
+            (
+                with("/profiles/0/max_ttl", json!("25h")),
+                "profiles[0].max_ttl must be at most 24h",
+            ),
+        ];
+        for (policy, expected) in cases {
+            let err = parse_err(&policy);
+            assert!(err.contains(expected), "{expected}: {err}");
+        }
+    }
+
+    #[test]
+    fn keeps_audiences_apart() {
+        let cases = [
+            (
+                json!({ "name": "nothing", "claims": [{ "ref": "x" }] }),
+                "profiles[2] must have a token, buckets or both",
+            ),
+            (
+                json!({ "name": "both", "audience": CACHE, "claims": [{ "ref": "x" }], "token": token() }),
+                "a profile for https://cf-nix-cache.example.com can't have a token or buckets",
+            ),
+            (
+                json!({ "name": "self", "audience": BROKER, "claims": [{ "ref": "x" }] }),
+                "must be another service, not the broker",
+            ),
+            (
+                json!({ "name": "path", "audience": format!("{CACHE}/x"), "claims": [{ "ref": "x" }] }),
+                "must be a bare origin",
+            ),
+        ];
+        for (profile, expected) in cases {
+            let err = parse_err(&with_profile(profile));
+            assert!(err.contains(expected), "{expected}: {err}");
+        }
+    }
+
+    #[test]
+    fn checks_buckets() {
+        let bucket = |bucket: Value| json!({ "name": "state", "claims": [{ "ref": "x" }], "buckets": [bucket] });
+        let cases = [
+            (
+                bucket(json!({ "name": "Org_State", "permission": "object-read-write" })),
+                "must be a valid R2 bucket name",
+            ),
+            (
+                bucket(json!({ "name": "org-state", "permission": "admin" })),
+                "unknown variant `admin`",
+            ),
+            (
+                json!({ "name": "state", "claims": [{ "ref": "x" }], "buckets": [{ "name": "org-state", "permission": "object-read-only" }, { "name": "org-state", "permission": "object-read-write" }] }),
+                "org-state is named twice",
+            ),
+            (
+                json!({ "name": "state", "claims": [{ "ref": "x" }], "buckets": [] }),
+                "must name at least one bucket",
+            ),
+        ];
+        for (profile, expected) in cases {
+            let err = parse_err(&with_profile(profile));
+            assert!(err.contains(expected), "{expected}: {err}");
+        }
+    }
+
+    fn prefix(template: &str) -> Result<Prefix, String> {
+        Prefix::try_from(template.to_string())
+    }
+
+    #[test]
+    fn rejects_bad_prefixes() {
+        let cases = [
+            (
+                "github.com/${repository}/",
+                "{claim} placeholders, not ${claim}",
+            ),
+            ("github.com/{repository}", "must end with /"),
+            ("/github.com/", "path segments of"),
+            ("a//b/", "path segments of"),
+            ("a/../b/", "path segments of"),
+            ("a/./b/", "path segments of"),
+            ("a/*/", "path segments of"),
+            ("{owner}{id}/", "placeholders as whole path segments"),
+            ("x{owner}/", "placeholders as whole path segments"),
+            ("{}/", "doesn't name a claim"),
+            ("{repo-sitory}/", "doesn't name a claim"),
+        ];
+        for (template, expected) in cases {
+            let err = prefix(template).unwrap_err();
+            assert!(err.contains(expected), "{template}: {err}");
+        }
+    }
+
+    #[test]
+    fn fills_prefixes_from_the_claims() {
+        let fill = |template: &str| prefix(template).unwrap().fill(&claims());
+        assert_eq!(
+            fill("github.com/{repository}/").unwrap(),
+            "github.com/example-org/app/"
+        );
+        assert_eq!(
+            fill("{repository_owner_id}/{repository_id}/").unwrap(),
+            "100000001/200000002/"
+        );
+        assert_eq!(fill("shared/").unwrap(), "shared/");
+
+        let mut claims = claims();
+        claims.insert("project_id".into(), json!(500000001));
+        let numbered = prefix("{project_id}/").unwrap().fill(&claims);
+        assert_eq!(numbered.unwrap(), "500000001/");
+    }
+
+    #[test]
+    fn refuses_claims_a_prefix_cant_use() {
+        let refused = |template: &str, value: Value| {
+            let mut claims = claims();
+            claims.insert("repository".into(), value);
+            prefix(template).unwrap().fill(&claims).unwrap_err()
+        };
+        for value in [
+            json!("../other-org/app"),
+            json!("org/./app"),
+            json!("org//app"),
+            json!("a b"),
+            json!(""),
+            json!(true),
+            json!(["a"]),
+        ] {
+            assert_eq!(
+                refused("{repository}/", value.clone()),
+                "the repository claim is missing or can't be used in a prefix",
+                "{value}"
+            );
+        }
+        // Spanning segments only as the one placeholder: otherwise
+        // {owner}/{repository} could be filled the same by two callers.
+        assert!(prefix("{repository}/").unwrap().fill(&claims()).is_ok());
+        refused(
+            "{repository_owner_id}/{repository}/",
+            json!("example-org/app"),
+        );
+        assert!(prefix("{missing}/").unwrap().fill(&claims()).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_claim_sets() {
+        let cases = [
+            (json!([{}]), "a claim set must match at least one claim"),
+            (
+                json!([{ "repository_id": "2000*" }]),
+                "claim repository_id: ID claims must match exactly",
+            ),
+            (json!([{ "ref": "" }]), "non-empty string"),
+            (json!([{ "ref": null }]), "non-empty string"),
+            (json!([{ "ref": -1 }]), "non-empty string"),
+            (
+                json!([{ "ref": "*" }]),
+                "claim ref: * may only end a pattern",
+            ),
+            (json!([{ "ref": "*main" }]), "may only end a pattern"),
+            (json!([{ "ref": "refs/*/main" }]), "may only end a pattern"),
+            (json!([{ "ref": "refs/**" }]), "may only end a pattern"),
+        ];
+        for (claims, expected) in cases {
+            for pointer in ["/providers/0/claims", "/profiles/0/claims"] {
+                let err = parse_err(&with(pointer, claims.clone()));
+                assert!(err.contains(expected), "{pointer} {claims}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn pattern_is_exact_or_a_trailing_prefix() {
+        let parse = |p| Pattern::parse(p).unwrap();
+        assert!(parse("example-org/*").matches("example-org/app"));
+        assert!(parse("refs/heads/*").matches("refs/heads/feature/x"));
+        assert!(parse("refs/heads/main").matches("refs/heads/main"));
+        assert!(!parse("refs/heads/main").matches("refs/heads/main2"));
+        assert!(!parse("example-org/*").matches("other-org/app"));
+        // Regex metacharacters are literal.
+        assert!(parse("a.b*").matches("a.bc"));
+        assert!(!parse("a.b*").matches("axbc"));
+        for pattern in ["*", "*x", "a*b", "a**"] {
+            assert_eq!(Pattern::parse(pattern), None, "{pattern}");
+        }
+    }
+
+    fn set(value: Value) -> ClaimSet {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn claim_set_needs_every_claim_to_match() {
+        let set = set(json!({ "repository": "example-org/*", "ref": "refs/heads/main" }));
+        assert!(set.matches(&claims()));
+
+        let mut other_ref = claims();
+        other_ref.insert("ref".into(), "refs/heads/dev".into());
+        assert!(!set.matches(&other_ref));
+        other_ref.remove("ref");
+        assert!(!set.matches(&other_ref), "a missing claim never matches");
+    }
+
+    #[test]
+    fn claim_set_matches_lists_numbers_and_booleans() {
+        let matches = |value: Value| set(value).matches(&claims());
+        assert!(
+            matches(json!({ "groups": "cache-uploaders" })),
+            "a list matches if any entry does"
+        );
+        assert!(
+            matches(json!({ "email_verified": true })),
+            "booleans compare as written"
+        );
+        assert!(
+            matches(json!({ "repository_id": 200000002 })),
+            "numbers compare as written"
+        );
+        assert!(!matches(json!({ "groups": "admins" })));
+        assert!(
+            !matches(json!({ "repository_id": "2000000021" })),
+            "IDs compare exactly"
+        );
+    }
+}

@@ -1,15 +1,11 @@
 # Local development of the Worker. Production deploys use the release's
-# entry.js, index.js and index_bg.wasm, with deployment/terraform.
-#
-# The policy is policy.json, beside this file, copied into the build. It isn't
-# committed:
-#   cp policy.example.json policy.json
+# index.js and index_bg.wasm, with deployment/terraform.
 name = "cf-oidc-exchange"
-main = "build/entry.js"
+main = "build/index.js"
 compatibility_date = "2026-08-15"
 
 [build]
-command = "worker-build --dev && cp worker/entry.js policy.json build/"
+command = "worker-build --dev"
 
 [observability]
 enabled = true
@@ -17,8 +13,8 @@ enabled = true
 [triggers]
 crons = ["17 * * * *"] # hourly cleanup of expired cf-oidc:* tokens
 
-# The broker token must come from Secrets Store; a plain `wrangler secret` is
-# refused. For `wrangler dev`, create it in the local store:
+# The Cloudflare token must come from Secrets Store; a plain `wrangler secret`
+# is refused. For `wrangler dev`, create it in the local store:
 #   wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-cloudflare-token --scopes workers
 [[secrets_store_secrets]]
 binding = "CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN"
@@ -37,3 +33,18 @@ secret_name = "cf-oidc-exchange-cloudflare-token"
 
 [vars]
 CF_OIDC_EXCHANGE_API_ACCOUNT_ID = "00000000000000000000000000000000"
+# Who may get what: see the README's policy reference. This one gives one
+# repository's main branch a token that deploys Workers.
+CF_OIDC_EXCHANGE_API_POLICY = '''
+{
+  "version": 3,
+  "issuer": "http://localhost:8787",
+  "providers": [
+    { "name": "github", "issuer": "https://token.actions.githubusercontent.com", "audience": "http://localhost:8787", "claims": [{ "repository_owner_id": "100000001" }] }
+  ],
+  "profiles": [
+    { "name": "workers-deploy", "claims": [{ "repository_id": "200000002", "ref": "refs/heads/main" }],
+      "token": { "policies": [{ "permissions": ["Workers Scripts Write"], "resources": { "com.cloudflare.api.account.00000000000000000000000000000000": "*" } }] } }
+  ]
+}
+'''
