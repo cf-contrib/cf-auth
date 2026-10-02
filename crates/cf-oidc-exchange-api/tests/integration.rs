@@ -649,7 +649,7 @@ mod exchange_requests {
     #[tokio::test]
     async fn rejects_what_it_doesnt_support_without_calling_anyone() {
         type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str);
-        let cases: [Case; 7] = [
+        let cases: [Case; 9] = [
             (
                 "another grant type",
                 &[("grant_type", "client_credentials")],
@@ -683,6 +683,12 @@ mod exchange_requests {
                 &[("actor_token", "x"), ("actor_token_type", ID_TOKEN)],
                 "",
             ),
+            (
+                "a JWT for Cloudflare",
+                &[("requested_token_type", JWT_TYPE)],
+                "can't be issued for https://api.cloudflare.com",
+            ),
+            ("an empty audience", &[("audience", "")], ""),
             (
                 "an unsupported requested token type",
                 &[(

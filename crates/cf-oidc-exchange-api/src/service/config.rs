@@ -17,6 +17,10 @@
 
 use std::collections::BTreeMap;
 
+use cloudflare::v4::{
+    IamResources, IamResourcesTypeObjectNested, IamResourcesTypeObjectNestedAdditionalProperty,
+    IamResourcesTypeObjectString,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use worker::{Env, Error, SecretStore, js_sys, wasm_bindgen::JsValue};
@@ -44,12 +48,18 @@ const CLOUDFLARE_API: &str = "https://api.cloudflare.com/client/v4";
 /// profile's default.
 pub const CLOUDFLARE_AUDIENCE: &str = "https://api.cloudflare.com";
 
+/// The scopes of Cloudflare's permission groups, which a token policy's
+/// resources fall under.
+pub const ACCOUNT_SCOPE: &str = "com.cloudflare.api.account";
+pub const ZONE_SCOPE: &str = "com.cloudflare.api.account.zone";
+pub const R2_SCOPE: &str = "com.cloudflare.edge.r2.bucket";
+
 const SECOND: u64 = 1000;
 const MINUTE: u64 = 60 * SECOND;
 const HOUR: u64 = 60 * MINUTE;
 
 /// The shortest TTL anything is issued for.
-pub const MIN_TTL: u64 = MINUTE;
+const MIN_TTL: u64 = MINUTE;
 const MAX_TTL: u64 = 24 * HOUR;
 const DEFAULT_TTL: u64 = 15 * MINUTE;
 const DEFAULT_MAX_TTL: u64 = HOUR;
@@ -271,6 +281,82 @@ impl PolicyConfig {
     }
 }
 
+impl PolicyConfig {
+    /// The provider a token's claims say it comes from, by its `iss`.
+    ///
+    /// # Errors
+    ///
+    /// When no provider is for that issuer.
+    pub fn provider_for(&self, claims: &Map<String, Value>) -> Result<&ProviderConfig, String> {
+        let iss = claims
+            .get("iss")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        self.providers
+            .iter()
+            .find(|provider| provider.issuer == iss)
+            .ok_or_else(|| {
+                let shown: String = iss.chars().take(200).collect();
+                format!("no provider is for issuer {shown}")
+            })
+    }
+
+    /// The profile a token from `provider` with `claims` gets for
+    /// `audience`: the one `requested`, or else the only one that matches.
+    /// The token must match one of the profile's claim sets; its provider's
+    /// are checked when it's verified.
+    ///
+    /// # Errors
+    ///
+    /// Why it gets none.
+    pub fn profile_for(
+        &self,
+        provider: &str,
+        claims: &Map<String, Value>,
+        requested: Option<&str>,
+        audience: &str,
+    ) -> Result<&ProfileConfig, String> {
+        let matches =
+            |p: &ProfileConfig| p.enabled && p.claims.iter().any(|set| set.matches(claims));
+        let mut profiles = self
+            .profiles
+            .iter()
+            .filter(|p| p.provider == provider && p.audience == audience);
+
+        if let Some(requested) = requested {
+            if let Some(profile) = profiles.find(|p| p.name == requested)
+                && matches(profile)
+            {
+                return Ok(profile);
+            }
+            return Err(match self.profiles.iter().find(|p| p.name == requested) {
+                None => format!("unknown profile {requested}"),
+                Some(named) if named.provider != provider => {
+                    format!("profile {requested} isn't for provider {provider}")
+                }
+                Some(named) if named.audience != audience => {
+                    format!("profile {requested} isn't for {audience}")
+                }
+                Some(named) if !named.enabled => format!("profile {requested} is disabled"),
+                Some(_) => format!("profile {requested} doesn't match the token"),
+            });
+        }
+
+        let candidates: Vec<&ProfileConfig> = profiles.filter(|p| matches(p)).collect();
+        match candidates.as_slice() {
+            [] => Err("no profile matches the token".into()),
+            [profile] => Ok(profile),
+            several => {
+                let names: Vec<&str> = several.iter().map(|p| p.name.as_str()).collect();
+                Err(format!(
+                    "profiles {} all match the token: name one",
+                    names.join(", ")
+                ))
+            }
+        }
+    }
+}
+
 /// An OIDC issuer the broker trusts, and which of its tokens.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -349,6 +435,22 @@ fn cloudflare_audience() -> String {
 }
 
 impl ProfileConfig {
+    /// The TTL to issue with, in milliseconds: the requested one, clamped to
+    /// `max_ttl` rather than refused, or the profile's.
+    ///
+    /// # Errors
+    ///
+    /// When the requested one isn't a duration of at least a minute.
+    pub fn ttl_for(&self, requested: Option<&str>) -> Result<u64, String> {
+        let Some(requested) = requested else {
+            return Ok(self.ttl);
+        };
+        match parse_duration(requested) {
+            Some(ttl) if ttl >= MIN_TTL => Ok(ttl.min(self.max_ttl)),
+            _ => Err(format!("ttl {requested} isn't a duration of at least 1m")),
+        }
+    }
+
     fn check(&self, at: &str, issuer: &str, account_id: &str) -> Result<(), String> {
         check_name(&self.name).map_err(|why| format!("{at}.name {why}"))?;
         if self.claims.is_empty() {
@@ -454,7 +556,7 @@ fn duration<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error>
 
 /// `90s`, `15m`, `1h30m` in milliseconds, or `None` for anything else, zero
 /// included.
-pub fn parse_duration(value: &str) -> Option<u64> {
+fn parse_duration(value: &str) -> Option<u64> {
     let mut units = [('h', HOUR), ('m', MINUTE), ('s', SECOND)].into_iter();
     let mut rest = value;
     let mut total: u64 = 0;
@@ -477,7 +579,7 @@ pub fn parse_duration(value: &str) -> Option<u64> {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TokenConfig {
-    pub policies: Vec<TokenPolicy>,
+    pub policies: Vec<TokenPolicyConfig>,
 }
 
 impl TokenConfig {
@@ -533,7 +635,7 @@ impl TokenConfig {
 /// One of a token's policies.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TokenPolicy {
+pub struct TokenPolicyConfig {
     #[serde(default)]
     pub effect: Effect,
     /// Permission-group names, resolved to IDs when a token is minted.
@@ -541,6 +643,62 @@ pub struct TokenPolicy {
     /// Cloudflare's own token `resources`, e.g.
     /// `com.cloudflare.api.account.zone.<zone_id>: "*"`.
     pub resources: BTreeMap<String, ResourceValue>,
+}
+
+impl TokenPolicyConfig {
+    /// The resources in the API's shape: all `"*"`-style values, or all nested
+    /// maps, as the policy's checks made sure.
+    pub fn iam_resources(&self) -> IamResources {
+        let flat: Option<_> = self
+            .resources
+            .iter()
+            .map(|(key, value)| match value {
+                ResourceValue::Scope(scope) => Some((key.clone(), scope.clone())),
+                ResourceValue::Nested(_) => None,
+            })
+            .collect();
+        if let Some(additional_properties) = flat {
+            return IamResources::IamResourcesTypeObjectString(IamResourcesTypeObjectString {
+                additional_properties,
+            });
+        }
+        let additional_properties = self
+            .resources
+            .iter()
+            .filter_map(|(key, value)| match value {
+                ResourceValue::Nested(nested) => Some((
+                    key.clone(),
+                    IamResourcesTypeObjectNestedAdditionalProperty {
+                        additional_properties: nested.clone(),
+                    },
+                )),
+                ResourceValue::Scope(_) => None,
+            })
+            .collect();
+        IamResources::IamResourcesTypeObjectNested(IamResourcesTypeObjectNested {
+            additional_properties,
+        })
+    }
+
+    /// The scope a permission group needs for the resources, used to pick
+    /// between same-named groups.
+    pub fn scope(&self) -> &'static str {
+        let zone = format!("{ZONE_SCOPE}.");
+        let keys = || self.resources.keys();
+        if keys().any(|k| k.starts_with(R2_SCOPE)) {
+            return R2_SCOPE;
+        }
+        if keys().any(|k| k.starts_with(&zone)) {
+            return ZONE_SCOPE;
+        }
+        // Nested form: `account.<id>: { "account.zone.*": "*" }` grants every zone
+        // in the account.
+        let nested = self.resources.values().any(|value| match value {
+            ResourceValue::Nested(nested) => nested.keys().any(|k| k.starts_with(&zone)),
+            ResourceValue::Scope(_) => false,
+        });
+        if nested { ZONE_SCOPE } else { ACCOUNT_SCOPE }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
@@ -1374,5 +1532,171 @@ pub(super) mod tests {
             !matches(json!({ "repository_id": "2000000021" })),
             "IDs compare exactly"
         );
+    }
+
+    #[test]
+    fn picks_the_provider_by_the_tokens_issuer() {
+        let policy = parse(&policy());
+        assert_eq!(policy.provider_for(&claims()).unwrap().name, "github");
+
+        let mut other = claims();
+        other.insert("iss".into(), "https://other.example.com".into());
+        assert_eq!(
+            policy.provider_for(&other).unwrap_err(),
+            "no provider is for issuer https://other.example.com"
+        );
+    }
+
+    /// The profile a caller with `claims` gets, or why not.
+    fn selected(
+        policy: &Value,
+        claims: Map<String, Value>,
+        requested: Option<&str>,
+        audience: &str,
+    ) -> Result<String, String> {
+        parse(policy)
+            .profile_for("github", &claims, requested, audience)
+            .map(|profile| profile.name.clone())
+    }
+
+    fn ok(name: &str) -> Result<String, String> {
+        Ok(name.to_string())
+    }
+
+    fn err(message: &str) -> Result<String, String> {
+        Err(message.to_string())
+    }
+
+    #[test]
+    fn selects_the_one_matching_profile_or_says_why_not() {
+        let policy = policy();
+        let main = claims();
+        assert_eq!(
+            selected(&policy, main.clone(), None, CLOUDFLARE_AUDIENCE),
+            ok("deploy")
+        );
+        assert_eq!(selected(&policy, main.clone(), None, CACHE), ok("nix-push"));
+
+        let mut dev = claims();
+        dev.insert("ref".into(), "refs/heads/dev".into());
+        let cases = [
+            (
+                dev.clone(),
+                None,
+                CLOUDFLARE_AUDIENCE,
+                "no profile matches the token",
+            ),
+            (
+                dev,
+                Some("deploy"),
+                CLOUDFLARE_AUDIENCE,
+                "profile deploy doesn't match the token",
+            ),
+            (
+                main.clone(),
+                Some("nope"),
+                CLOUDFLARE_AUDIENCE,
+                "unknown profile nope",
+            ),
+            (
+                main,
+                Some("deploy"),
+                CACHE,
+                "profile deploy isn't for https://cf-nix-cache.example.com",
+            ),
+        ];
+        for (claims, requested, audience, expected) in cases {
+            assert_eq!(
+                selected(&policy, claims, requested, audience),
+                err(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_when_several_profiles_match_and_none_is_named() {
+        let mut policy = policy();
+        let mut again = policy["profiles"][0].clone();
+        again["name"] = json!("deploy-again");
+        policy["profiles"].as_array_mut().unwrap().push(again);
+        assert_eq!(
+            selected(&policy, claims(), None, CLOUDFLARE_AUDIENCE),
+            err("profiles deploy, deploy-again all match the token: name one")
+        );
+        assert_eq!(
+            selected(&policy, claims(), Some("deploy-again"), CLOUDFLARE_AUDIENCE),
+            ok("deploy-again")
+        );
+    }
+
+    #[test]
+    fn never_matches_a_disabled_profile_even_by_name() {
+        let mut policy = policy();
+        policy["profiles"][0]["enabled"] = json!(false);
+        assert_eq!(
+            selected(&policy, claims(), Some("deploy"), CLOUDFLARE_AUDIENCE),
+            err("profile deploy is disabled")
+        );
+        assert_eq!(
+            selected(&policy, claims(), None, CLOUDFLARE_AUDIENCE),
+            err("no profile matches the token")
+        );
+    }
+
+    #[test]
+    fn never_gives_one_providers_token_anothers_profile() {
+        let mut policy = policy();
+        policy["providers"].as_array_mut().unwrap().push(json!({ "name": "gitlab", "issuer": "https://gitlab.com", "audience": "https://cf-oidc-exchange.example.com", "claims": [{ "ref": "refs/heads/main" }] }));
+        policy["profiles"][0]["provider"] = json!("gitlab");
+        policy["profiles"][1]["provider"] = json!("github");
+        assert_eq!(
+            selected(&policy, claims(), Some("deploy"), CLOUDFLARE_AUDIENCE),
+            err("profile deploy isn't for provider github")
+        );
+    }
+
+    #[test]
+    fn clamps_the_ttl_to_max_ttl_and_rejects_nonsense() {
+        let policy = parse(&policy());
+        let profile = &policy.profiles[0];
+        assert_eq!(profile.ttl_for(None).ok(), Some(15 * 60_000));
+        assert_eq!(profile.ttl_for(Some("5m")).ok(), Some(5 * 60_000));
+        assert_eq!(profile.ttl_for(Some("12h")).ok(), Some(60 * 60_000));
+        for ttl in ["30s", "forever", "600"] {
+            assert!(profile.ttl_for(Some(ttl)).is_err(), "{ttl}");
+        }
+    }
+
+    fn token_policy(resources: Value) -> TokenPolicyConfig {
+        serde_json::from_value(json!({ "permissions": ["x"], "resources": resources })).unwrap()
+    }
+
+    #[test]
+    fn picks_the_scope_from_the_resources() {
+        let zone = "com.cloudflare.api.account.zone.fedcba9876543210fedcba9876543210";
+        let account = "com.cloudflare.api.account.0123456789abcdef0123456789abcdef";
+        let scope = |resources: Value| token_policy(resources).scope();
+        assert_eq!(scope(json!({ zone: "*" })), ZONE_SCOPE);
+        assert_eq!(scope(json!({ account: "*" })), ACCOUNT_SCOPE);
+        assert_eq!(
+            scope(json!({ account: { "com.cloudflare.api.account.zone.*": "*" } })),
+            ZONE_SCOPE
+        );
+        assert_eq!(
+            scope(json!({ "com.cloudflare.edge.r2.bucket.x_default_y": "*" })),
+            R2_SCOPE
+        );
+    }
+
+    #[test]
+    fn passes_resources_through_in_either_form() {
+        let json = |resources: Value| {
+            serde_json::to_value(token_policy(resources).iam_resources()).unwrap()
+        };
+        let flat = json!({ "com.cloudflare.api.account.zone.z": "*" });
+        let nested =
+            json!({ "com.cloudflare.api.account.a": { "com.cloudflare.api.account.zone.*": "*" } });
+        assert_eq!(json(flat.clone()), flat);
+        assert_eq!(json(nested.clone()), nested);
     }
 }

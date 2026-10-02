@@ -219,6 +219,7 @@ async fn verify(token: &str, policy: &PolicyConfig) -> Result<Identity, AuthErro
     let jwt = Jwt::decode(token).inspect_err(AuthError::audit)?;
     let provider = policy
         .provider_for(&jwt.claims)
+        .map_err(AuthError::Unauthorized)
         .inspect_err(AuthError::audit)?;
     let result = provider.verify_token(&jwt, now_ms).await;
     // A verified token's identity can't change, so both outcomes hold until
@@ -298,24 +299,6 @@ impl IntoResponse for AuthError {
 
 fn invalid(what: &str) -> AuthError {
     AuthError::Unauthorized(format!("the subject token isn't valid: {what}"))
-}
-
-impl PolicyConfig {
-    /// The provider a token's claims say it comes from, by its `iss`, read
-    /// unverified only to pick the keys to verify it with.
-    fn provider_for(&self, claims: &Map<String, Value>) -> Result<&ProviderConfig, AuthError> {
-        let iss = claims
-            .get("iss")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        self.providers
-            .iter()
-            .find(|provider| provider.issuer == iss)
-            .ok_or_else(|| {
-                let shown: String = iss.chars().take(200).collect();
-                AuthError::Unauthorized(format!("no provider is for issuer {shown}"))
-            })
-    }
 }
 
 impl ProviderConfig {
@@ -802,19 +785,6 @@ mod tests {
         assert_eq!(form("subject_token="), None);
         assert_eq!(form("grant_type=x"), None);
         assert_eq!(form("{\"subject_token\":\"a\"}"), None);
-    }
-
-    #[test]
-    fn picks_the_provider_by_the_tokens_issuer() {
-        let policy = parse(&policy());
-        assert_eq!(policy.provider_for(&claims()).unwrap().name, "github");
-
-        let mut other = claims();
-        other.insert("iss".into(), "https://other.example.com".into());
-        assert_eq!(
-            policy.provider_for(&other).unwrap_err(),
-            AuthError::Unauthorized("no provider is for issuer https://other.example.com".into())
-        );
     }
 
     #[test]
