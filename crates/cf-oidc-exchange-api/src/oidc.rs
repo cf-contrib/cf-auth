@@ -14,7 +14,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::{
-    policy::{Claims, Provider, ProviderType, is_issuer_url},
+    service::config::{Claims, ProviderConfig, ProviderType, is_issuer_url},
     webcrypto,
 };
 
@@ -94,7 +94,10 @@ impl<'a> Jwt<'a> {
 
 /// The OIDC provider whose issuer the token names. Its `iss` is read unverified,
 /// only to pick the keys to verify it with; the claims check reads it again.
-pub fn provider_for<'p>(jwt: &Jwt, providers: &'p [Provider]) -> Result<&'p Provider, Error> {
+pub fn provider_for<'p>(
+    jwt: &Jwt,
+    providers: &'p [ProviderConfig],
+) -> Result<&'p ProviderConfig, Error> {
     let iss = jwt
         .claims
         .get("iss")
@@ -113,7 +116,7 @@ pub fn provider_for<'p>(jwt: &Jwt, providers: &'p [Provider]) -> Result<&'p Prov
 
 /// Verifies an OIDC token from `provider`: its RS256 signature against the
 /// issuer's keys, then `iss`, `aud`, `exp`, `iat` and `nbf`.
-pub async fn verify(jwt: Jwt<'_>, provider: &Provider, now_ms: u64) -> Result<Claims, Error> {
+pub async fn verify(jwt: Jwt<'_>, provider: &ProviderConfig, now_ms: u64) -> Result<Claims, Error> {
     let key = find_key(provider, jwt.kid.as_deref(), now_ms).await?;
     let verified =
         webcrypto::verify_rs256(&key.n, &key.e, jwt.signing_input.as_bytes(), &jwt.signature)
@@ -127,7 +130,7 @@ pub async fn verify(jwt: Jwt<'_>, provider: &Provider, now_ms: u64) -> Result<Cl
 }
 
 /// The standard claims of a token whose signature verified.
-pub fn check_claims(claims: &Claims, provider: &Provider, now: u64) -> Result<(), Error> {
+pub fn check_claims(claims: &Claims, provider: &ProviderConfig, now: u64) -> Result<(), Error> {
     let claim = |name| claims.get(name);
     if claim("iss").and_then(Value::as_str) != Some(provider.issuer.as_str()) {
         return Err(invalid("wrong issuer"));
@@ -232,7 +235,7 @@ impl KeySet {
     }
 }
 
-async fn find_key(provider: &Provider, kid: Option<&str>, now_ms: u64) -> Result<Jwk, Error> {
+async fn find_key(provider: &ProviderConfig, kid: Option<&str>, now_ms: u64) -> Result<Jwk, Error> {
     let unknown = || invalid("no matching key");
     match KEYS.with_borrow(|sets| KeySet::lookup(sets.get(&provider.issuer), kid, now_ms)) {
         Lookup::Hit(key) => return Ok(key),
@@ -248,7 +251,7 @@ async fn find_key(provider: &Provider, kid: Option<&str>, now_ms: u64) -> Result
 /// Where an issuer's keys are: its configured `jwks_uri`, or what its discovery
 /// document says, which must name the same issuer, so one issuer can't hand out
 /// another's keys.
-async fn jwks_uri(provider: &Provider) -> Result<String, Error> {
+async fn jwks_uri(provider: &ProviderConfig) -> Result<String, Error> {
     if let Some(uri) = &provider.jwks_uri {
         return Ok(uri.clone());
     }
@@ -307,8 +310,8 @@ mod tests {
     const ISSUER: &str = "https://token.actions.githubusercontent.com";
     const AUDIENCE: &str = "https://cf-oidc-exchange.example.com";
 
-    fn provider() -> Provider {
-        Provider {
+    fn provider() -> ProviderConfig {
+        ProviderConfig {
             name: "github".into(),
             kind: ProviderType::Oidc,
             issuer: ISSUER.into(),
@@ -423,7 +426,7 @@ mod tests {
 
     #[test]
     fn picks_the_provider_by_the_tokens_issuer() {
-        let people = Provider {
+        let people = ProviderConfig {
             name: "people".into(),
             kind: ProviderType::GithubUser,
             issuer: "https://github.com".into(),

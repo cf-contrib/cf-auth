@@ -10,7 +10,11 @@
 //! never cached, so a rotated one takes effect at once.
 //!
 //! The policy is loaded here, once per isolate, from the `policy.json` module
-//! beside the Worker. Its format and guardrails are in [`crate::policy`].
+//! beside the Worker. It's configuration too, so its format, its guardrails
+//! and what matching a caller against it takes are here, in [`policy`]:
+//! [`PolicyConfig`], its [`ProviderConfig`]s and [`ProfileConfig`]s.
+
+pub mod policy;
 
 use std::{cell::RefCell, sync::Arc};
 
@@ -18,12 +22,17 @@ use cf_oidc_exchange_sdk::v1::{Error, ErrorCode};
 use serde_json::Value;
 use worker::{Env, SecretStore, js_sys, wasm_bindgen::JsValue};
 
+pub use self::policy::{
+    Bucket, BucketPermission, CLOUDFLARE_AUDIENCE, Claims, Effect, PolicyConfig, ProfileConfig,
+    ProviderConfig, ProviderType, ResourceValue, TokenPolicy, clamp_ttl, is_issuer_url,
+    r2_prefixes, select_profile,
+};
+use self::policy::{PolicyError, load_policy};
 use crate::{
     audit::Audit,
     cloudflare::{self, Cloudflare},
     github,
     issuer::{self, SigningKey},
-    policy::{Policy, PolicyError, load_policy},
 };
 
 /// The binding of the account the broker token belongs to and tokens are
@@ -32,7 +41,7 @@ pub const ACCOUNT_KEY: &str = "CF_OIDC_EXCHANGE_API_ACCOUNT_ID";
 
 /// The binding of the broker token: account-owned, with "Account API Tokens
 /// Write", plus R2 permissions covering what profiles' `buckets` delegate.
-pub const BROKER_TOKEN_KEY: &str = "CF_OIDC_EXCHANGE_API_BROKER_TOKEN";
+pub const CLOUDFLARE_TOKEN_KEY: &str = "CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN";
 
 /// The binding of the RSA private key (PKCS#8 PEM, at least 2048 bits) the
 /// broker signs its own tokens with. Optional: without it, the broker issues
@@ -52,7 +61,7 @@ thread_local! {
 struct Loaded {
     raw: String,
     account_id: String,
-    result: Result<Arc<Policy>, PolicyError>,
+    result: Result<Arc<PolicyConfig>, PolicyError>,
 }
 
 /// What the Worker is configured with, from its bindings.
@@ -60,9 +69,9 @@ pub struct Config {
     /// `CF_OIDC_EXCHANGE_API_ACCOUNT_ID`.
     account_id: String,
     /// `policy.json`, loaded and checked against the account.
-    policy: Arc<Policy>,
-    /// `CF_OIDC_EXCHANGE_API_BROKER_TOKEN`'s binding, not yet its value.
-    broker_token: SecretConfig,
+    policy: Arc<PolicyConfig>,
+    /// `CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN`'s binding, not yet its value.
+    cloudflare_token: SecretConfig,
     /// `CF_OIDC_EXCHANGE_API_SIGNING_KEY`'s binding, which may be unbound.
     signing_key: SecretConfig,
     /// Where GitHub's API and Cloudflare's are.
@@ -89,7 +98,7 @@ impl Config {
         Ok(Self {
             account_id: bindings.account_id,
             policy,
-            broker_token: SecretConfig::from_env(env, &bindings.broker_token, true)?,
+            cloudflare_token: SecretConfig::from_env(env, &bindings.cloudflare_token, true)?,
             signing_key: SecretConfig::from_env(env, &bindings.signing_key, false)?,
             github_api: upstream(env, "CF_OIDC_EXCHANGE_API_GITHUB_URL", github::API_URL),
             cloudflare_api: upstream(
@@ -106,7 +115,7 @@ impl Config {
     }
 
     /// The policy.
-    pub fn policy(&self) -> &Policy {
+    pub fn policy(&self) -> &PolicyConfig {
         &self.policy
     }
 
@@ -122,7 +131,7 @@ impl Config {
 
     /// The Cloudflare API, as the broker token, read now.
     pub async fn cloudflare(&self) -> Result<Cloudflare, Error> {
-        let token = self.broker_token.read().await?;
+        let token = self.cloudflare_token.read().await?;
         Ok(Cloudflare::new(
             &self.cloudflare_api,
             &self.account_id,
@@ -164,7 +173,7 @@ fn upstream(env: &Env, binding: &str, default: &str) -> String {
 }
 
 /// Loads the policy in `raw` for the account, or the copy already loaded.
-fn load(raw: &str, account_id: &str) -> Result<Arc<Policy>, Error> {
+fn load(raw: &str, account_id: &str) -> Result<Arc<PolicyConfig>, Error> {
     let loaded = LOADED.with_borrow_mut(|loaded| {
         let stale = loaded
             .as_ref()
@@ -240,7 +249,7 @@ impl SecretConfig {
 /// integration tests choose them.
 struct Bindings {
     account_id: String,
-    broker_token: String,
+    cloudflare_token: String,
     signing_key: String,
     policy: String,
 }
@@ -256,7 +265,7 @@ impl Bindings {
                 .var(ACCOUNT_KEY)
                 .map(|var| var.to_string())
                 .unwrap_or_default(),
-            broker_token: BROKER_TOKEN_KEY.into(),
+            cloudflare_token: CLOUDFLARE_TOKEN_KEY.into(),
             signing_key: SIGNING_KEY_KEY.into(),
             policy: Self::policy_text()?,
         })
@@ -287,7 +296,7 @@ impl Bindings {
         struct Scenario {
             policy: Value,
             account_id: String,
-            broker_token: String,
+            cloudflare_token: String,
             signing_key: String,
         }
         let failed = |err: reqwest::Error| misconfigured(format!("the scenario: {err}"));
@@ -299,7 +308,7 @@ impl Bindings {
             .map_err(failed)?;
         Ok(Self {
             account_id: scenario.account_id,
-            broker_token: scenario.broker_token,
+            cloudflare_token: scenario.cloudflare_token,
             signing_key: scenario.signing_key,
             policy: match scenario.policy {
                 Value::String(text) => text,

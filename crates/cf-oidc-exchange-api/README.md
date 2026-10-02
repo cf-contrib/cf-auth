@@ -45,7 +45,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 
 1. **Create the broker token.** In the Cloudflare dashboard, create an **account-owned** API token with **Account API Tokens Write**. If any profile has [`buckets`](#buckets), also give it R2 permissions covering what they delegate. It's the broker's only long-lived credential. This is the one manual step: automating it would need a token that can create tokens. Store it in [Secrets Store](https://developers.cloudflare.com/secrets-store/) so it never passes through your deploy tooling:
    ```sh
-   wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-broker-token --scopes workers --remote
+   wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-cloudflare-token --scopes workers --remote
    ```
 2. **Look up numeric IDs.** Pin IDs, not names, because a deleted repo or org name can be re-registered by someone else:
    ```sh
@@ -63,7 +63,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 | Binding | Type | Required | Description |
 |---|---|---|---|
 | `CF_OIDC_EXCHANGE_API_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
-| `CF_OIDC_EXCHANGE_API_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 permissions covering what profiles' `buckets` delegate. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
+| `CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 permissions covering what profiles' `buckets` delegate. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
 | `CF_OIDC_EXCHANGE_API_SIGNING_KEY` | Secrets Store secret | for profiles with an `audience` | RSA private key (at least 2048 bits), as a PKCS#8 PEM, the broker signs [its own tokens](#tokens-for-other-services) with. Without it the broker issues none, publishes no keys, and those profiles fail closed with `500`. |
 
 The hourly cron (`17 * * * *` in the examples) deletes expired `cf-oidc:*` tokens.

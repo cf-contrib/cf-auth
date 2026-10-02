@@ -46,9 +46,9 @@ pub const USER_TOKEN: &str = "gho_exampleUserToken0000000000000000000";
 pub const CACHE: &str = "https://cf-nix-cache.example.com";
 
 /// The broker tokens `tests/run.sh` puts in the local Secrets Store.
-pub const BROKER_TOKEN: &str = "test-broker-token";
-pub const BROKER_TOKEN_ID: &str = "tok-broker";
-pub const ROTATED_TOKEN: &str = "test-broker-token-rotated";
+pub const CLOUDFLARE_TOKEN: &str = "test-cloudflare-token";
+pub const CLOUDFLARE_TOKEN_ID: &str = "tok-broker";
+pub const ROTATED_TOKEN: &str = "test-cloudflare-token-rotated";
 
 pub const GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 pub const ID_TOKEN: &str = "urn:ietf:params:oauth:token-type:id_token";
@@ -104,7 +104,7 @@ impl World {
             scenario: json!({
                 "policy": test_policy(),
                 "account_id": ACCOUNT_ID,
-                "broker_token": "CF_OIDC_EXCHANGE_API_BROKER_TOKEN",
+                "cloudflare_token": "CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN",
                 "signing_key": "CF_OIDC_EXCHANGE_API_SIGNING_KEY",
             }),
             discovery: HashMap::new(),
@@ -632,9 +632,9 @@ impl FakeCloudflare {
             seq: 0,
         };
         fake.add(
-            Some(BROKER_TOKEN_ID),
+            Some(CLOUDFLARE_TOKEN_ID),
             "cf-oidc broker token",
-            Some(BROKER_TOKEN),
+            Some(CLOUDFLARE_TOKEN),
             None,
             "active",
         );
@@ -708,7 +708,7 @@ impl FakeCloudflare {
                 None => api_error(401, "Invalid API Token"),
             };
         }
-        if auth != BROKER_TOKEN {
+        if auth != CLOUDFLARE_TOKEN {
             return api_error(403, "Unauthorized");
         }
 

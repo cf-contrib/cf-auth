@@ -9,7 +9,7 @@ use reqwest::{StatusCode, header::HeaderMap};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use crate::policy::Claims;
+use crate::service::config::Claims;
 
 pub const API_URL: &str = "https://api.github.com";
 

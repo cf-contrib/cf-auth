@@ -43,9 +43,9 @@ use crate::{
     github::{self, UserCheck},
     issuer::{self, ALGORITHM, IssueRequest},
     oidc::{self, Jwt, shown},
-    policy::{
-        CLOUDFLARE_AUDIENCE, Claims, Policy, Profile, Provider, ProviderType, clamp_ttl,
-        r2_prefixes, select_profile,
+    service::config::{
+        CLOUDFLARE_AUDIENCE, Claims, PolicyConfig, ProfileConfig, ProviderConfig, ProviderType,
+        clamp_ttl, r2_prefixes, select_profile,
     },
 };
 
@@ -83,7 +83,7 @@ fn public(err: Error) -> Error {
 
 /// A verified caller of `/oauth/token`.
 struct Caller<'p> {
-    provider: &'p Provider,
+    provider: &'p ProviderConfig,
     claims: Claims,
 }
 
@@ -101,7 +101,7 @@ struct Exchange<'r> {
 impl<'r> Exchange<'r> {
     /// Checks what the generated validation can't: which audience, and what it
     /// can hand out.
-    fn read(request: &'r TokenExchangeRequest, policy: &Policy) -> Result<Self, Error> {
+    fn read(request: &'r TokenExchangeRequest, policy: &PolicyConfig) -> Result<Self, Error> {
         let audience = request.audience.as_deref().unwrap_or(CLOUDFLARE_AUDIENCE);
         if audience.is_empty() {
             return Err(Error::new(
@@ -182,7 +182,7 @@ impl ExchangeServiceHandler {
     /// Authenticates the caller, whose token is in the body.
     async fn authenticate<'p>(
         config: &Config,
-        policy: &'p Policy,
+        policy: &'p PolicyConfig,
         exchange: &Exchange<'_>,
     ) -> Result<Caller<'p>, Error> {
         if exchange.kind == ProviderType::Oidc {
@@ -198,7 +198,7 @@ impl ExchangeServiceHandler {
             .providers
             .iter()
             .find(|p| p.kind == ProviderType::GithubUser);
-        let profiles: Vec<&Profile> = policy
+        let profiles: Vec<&ProfileConfig> = policy
             .profiles
             .iter()
             .filter(|p| Some(p.provider.as_str()) == provider.map(|p| p.name.as_str()) && p.enabled)
@@ -232,7 +232,7 @@ impl ExchangeServiceHandler {
     async fn service_token(
         config: &Config,
         caller: &Caller<'_>,
-        profile: &Profile,
+        profile: &ProfileConfig,
         ttl: u64,
     ) -> Result<TokenExchangeResponse, Error> {
         let key = config.signing_key().await?;
@@ -280,7 +280,7 @@ impl ExchangeServiceHandler {
     async fn cloudflare_credentials(
         config: &Config,
         caller: &Caller<'_>,
-        profile: &Profile,
+        profile: &ProfileConfig,
         ttl: u64,
     ) -> Result<TokenExchangeResponse, Error> {
         let Caller { provider, claims } = caller;
@@ -566,9 +566,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::policy::load_policy;
+    use crate::service::config::policy::load_policy;
 
-    fn policy() -> Policy {
+    fn policy() -> PolicyConfig {
         let policy = json!({
             "version": 2,
             "issuer": "https://cf-oidc-exchange.example.com",

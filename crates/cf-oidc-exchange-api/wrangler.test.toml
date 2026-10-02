@@ -14,23 +14,23 @@ CF_OIDC_EXCHANGE_API_SCENARIO_URL = "http://127.0.0.1:8791/scenario"
 CF_OIDC_EXCHANGE_API_GITHUB_URL = "http://127.0.0.1:8791/github"
 CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL = "http://127.0.0.1:8791/cloudflare/client/v4"
 # A broker token as a plain variable, which the Worker must refuse.
-BROKER_TOKEN_PLAIN = "test-broker-token"
+CLOUDFLARE_TOKEN_PLAIN = "test-cloudflare-token"
 
 [[secrets_store_secrets]]
-binding = "CF_OIDC_EXCHANGE_API_BROKER_TOKEN"
+binding = "CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN"
 store_id = "00000000000000000000000000000000"
-secret_name = "broker-token"
+secret_name = "cloudflare-token"
 
 [[secrets_store_secrets]]
-binding = "BROKER_TOKEN_ROTATED"
+binding = "CLOUDFLARE_TOKEN_ROTATED"
 store_id = "00000000000000000000000000000000"
-secret_name = "broker-token-rotated"
+secret_name = "cloudflare-token-rotated"
 
 # Never created, so reading it fails.
 [[secrets_store_secrets]]
-binding = "BROKER_TOKEN_MISSING"
+binding = "CLOUDFLARE_TOKEN_MISSING"
 store_id = "00000000000000000000000000000000"
-secret_name = "broker-token-missing"
+secret_name = "cloudflare-token-missing"
 
 [[secrets_store_secrets]]
 binding = "CF_OIDC_EXCHANGE_API_SIGNING_KEY"

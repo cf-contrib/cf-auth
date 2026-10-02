@@ -19,11 +19,11 @@ crons = ["17 * * * *"] # hourly cleanup of expired cf-oidc:* tokens
 
 # The broker token must come from Secrets Store; a plain `wrangler secret` is
 # refused. For `wrangler dev`, create it in the local store:
-#   wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-broker-token --scopes workers
+#   wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-cloudflare-token --scopes workers
 [[secrets_store_secrets]]
-binding = "CF_OIDC_EXCHANGE_API_BROKER_TOKEN"
+binding = "CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN"
 store_id = "00000000000000000000000000000000"
-secret_name = "cf-oidc-exchange-broker-token"
+secret_name = "cf-oidc-exchange-cloudflare-token"
 
 # Only for profiles with an `audience`: the RSA key the broker signs its own
 # tokens with, as a PKCS#8 PEM. Uncomment after creating it in the local store:

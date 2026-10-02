@@ -11,7 +11,7 @@ module "cf_oidc_broker" {
 
   account_id          = var.account_id
   hostname            = "cf-oidc-exchange.example.workers.dev"
-  broker_token_secret = { secret_store_id = var.secret_store_id, secret_name = "cf-oidc-exchange-broker-token" }
+  cloudflare_token_secret = { secret_store_id = var.secret_store_id, secret_name = "cf-oidc-exchange-cloudflare-token" }
   policy_file         = "${path.root}/policy.yaml"
 }
 
@@ -45,7 +45,7 @@ by default deploys the broker of the release its `ref` points to.
 ```sh
 # Store the broker token once. Wrangler prompts for the value.
 wrangler secrets-store store list --remote     # note the store ID
-wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-broker-token --scopes workers --remote
+wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-cloudflare-token --scopes workers --remote
 
 $EDITOR policy.yaml                            # providers, profiles; see Policy below
 
@@ -152,7 +152,7 @@ worker-build --release && cp worker/entry.js build/   # worker_dir = ".../crates
 | `account_id` | yes | | Cloudflare account ID. The broker runs here and mints tokens for it. |
 | `hostname` | yes | | `<worker_name>.<subdomain>.workers.dev`, or a custom domain. |
 | `zone_id` | for a custom domain | `null` | Zone ID of the zone holding a custom-domain `hostname`. |
-| `broker_token_secret` | yes | | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the broker token. With `buckets`, the token also needs R2 permissions covering what they delegate. |
+| `cloudflare_token_secret` | yes | | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the broker token. With `buckets`, the token also needs R2 permissions covering what they delegate. |
 | `signing_key_secret` | for profiles with an `audience` | `null` | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the RSA key the broker signs its own tokens with. See [Tokens for other services](../../crates/cf-oidc-exchange-api#tokens-for-other-services). |
 | `policy_file` | yes | | Policy YAML path, rendered as a template. |
 | `policy_vars` | no | `{}` | Extra template variables for the policy. |

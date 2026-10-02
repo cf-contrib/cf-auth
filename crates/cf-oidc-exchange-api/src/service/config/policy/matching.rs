@@ -3,7 +3,7 @@
 use cf_oidc_exchange_sdk::v1::{Error, ErrorCode};
 use serde_json::{Map, Value};
 
-use super::{MIN_TTL, Policy, Profile, REPOSITORY_PERMISSIONS, parse_duration};
+use super::{MIN_TTL, PolicyConfig, ProfileConfig, REPOSITORY_PERMISSIONS, parse_duration};
 
 /// A verified token's claims, or a person's as the broker looks them up.
 pub type Claims = Map<String, Value>;
@@ -47,7 +47,7 @@ fn matches_value(claim: &str, patterns: &[String], value: &Value) -> bool {
 }
 
 /// Whether every claim of the profile matches, each by any of its values.
-pub fn matches(profile: &Profile, claims: &Claims) -> bool {
+pub fn matches(profile: &ProfileConfig, claims: &Claims) -> bool {
     profile.claims.iter().all(|(claim, patterns)| {
         match claim.as_str() {
             // Only a person's claims carry these: the teams they're in and their role on the repo.
@@ -78,12 +78,12 @@ pub fn matches(profile: &Profile, claims: &Claims) -> bool {
 /// Picks the profile to issue with, among those for `provider` and `audience`
 /// only, or refuses with a `403` that says why.
 pub fn select_profile<'a>(
-    policy: &'a Policy,
+    policy: &'a PolicyConfig,
     provider: &str,
     claims: &Claims,
     requested: Option<&str>,
     audience: &str,
-) -> Result<&'a Profile, Error> {
+) -> Result<&'a ProfileConfig, Error> {
     let mut profiles = policy
         .profiles
         .iter()
@@ -112,7 +112,7 @@ pub fn select_profile<'a>(
         return Err(Error::new(ErrorCode::Forbidden, message));
     }
 
-    let candidates: Vec<&Profile> = profiles
+    let candidates: Vec<&ProfileConfig> = profiles
         .filter(|p| p.enabled && matches(p, claims))
         .collect();
     match candidates.as_slice() {
@@ -136,7 +136,7 @@ pub fn select_profile<'a>(
 
 /// Resolves the requested TTL against the profile, in milliseconds. Requests
 /// above `max_ttl` are clamped, not refused.
-pub fn clamp_ttl(requested: Option<&str>, profile: &Profile) -> Result<u64, Error> {
+pub fn clamp_ttl(requested: Option<&str>, profile: &ProfileConfig) -> Result<u64, Error> {
     let Some(requested) = requested else {
         return Ok(profile.ttl);
     };
