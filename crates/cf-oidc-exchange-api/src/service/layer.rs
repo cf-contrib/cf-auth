@@ -3,12 +3,12 @@
 //!
 //! [`AuthenticateLayer`] is layered over the API's routes in the crate root.
 //! Every token exchange needs an OIDC token from a provider the policy names,
-//! as its `subject_token`. The layer verifies it with [`cf_oidc_jwt`] before
+//! as its `subject_token`. The layer verifies it with [`cf_oidc_core`] before
 //! the request reaches the handler, and refuses the exchange if it isn't
 //! valid, or none of its provider's claim sets matches. Everything else
 //! passes straight through.
 //!
-//! The handler takes the caller's identity from [`cf_oidc_jwt::verified`],
+//! The handler takes the caller's identity from [`cf_oidc_core::verified`],
 //! by the token: never from the token itself, so a token the layer didn't
 //! verify gets nothing.
 //!
@@ -125,7 +125,7 @@ where
             // `Send`, which the router wants; a Worker is single-threaded, so
             // it runs in a `SendFuture`.
             let policy = config.policy();
-            match SendFuture::new(cf_oidc_jwt::verify(&token, &policy.providers)).await {
+            match SendFuture::new(cf_oidc_core::verify(&token, &policy.providers)).await {
                 Ok(_) => inner.call(req).await,
                 Err(err) => Ok(refuse(policy, err)),
             }
@@ -142,16 +142,16 @@ fn subject_token(body: &[u8]) -> Option<String> {
         .map(|(_, token)| token)
 }
 
-/// Refuses an exchange whose token `cf_oidc_jwt` didn't accept, with why
+/// Refuses an exchange whose token `cf_oidc_core` didn't accept, with why
 /// logged, and returned unless it's an issuer's fault.
-fn refuse(policy: &PolicyConfig, err: cf_oidc_jwt::Error) -> Response {
+fn refuse(policy: &PolicyConfig, err: cf_oidc_core::Error) -> Response {
     let (status, body) = match err {
-        cf_oidc_jwt::Error::Unauthorized(message) => {
+        cf_oidc_core::Error::Unauthorized(message) => {
             warn!(event = "token.deny", error = "unauthorized", %message);
             let body = v1::Error::new(ErrorCode::Unauthorized, message);
             (StatusCode::UNAUTHORIZED, body)
         }
-        cf_oidc_jwt::Error::Forbidden { issuer, subject } => {
+        cf_oidc_core::Error::Forbidden { issuer, subject } => {
             // Named as the policy names it.
             let provider = policy
                 .providers
@@ -169,7 +169,7 @@ fn refuse(policy: &PolicyConfig, err: cf_oidc_jwt::Error) -> Response {
             let body = v1::Error::new(ErrorCode::Forbidden, message);
             (StatusCode::FORBIDDEN, body)
         }
-        cf_oidc_jwt::Error::Upstream(message) => {
+        cf_oidc_core::Error::Upstream(message) => {
             warn!(event = "token.deny", error = "upstream_error", %message);
             let body = v1::Error::new(
                 ErrorCode::UpstreamError,

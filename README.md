@@ -97,7 +97,7 @@ crates/cf-oidc-exchange-api/tests/run.sh                    # the broker end to 
 | [`packages/cf-oidc-action`](packages/cf-oidc-action) | The action, in JavaScript with no runtime dependencies. |
 | [`crates/cf-oidc-exchange-api`](crates/cf-oidc-exchange-api) | The broker, a Rust Worker. |
 | [`crates/cf-oidc-exchange-sdk`](crates/cf-oidc-exchange-sdk) | The broker's API, generated from its OpenAPI document. |
-| [`crates/cf-oidc-jwt`](crates/cf-oidc-jwt) | OIDC token verification for Workers, which the broker and cf-nix-cache share. |
+| [`crates/cf-oidc-core`](crates/cf-oidc-core) | OIDC tokens in Workers, verified and signed, which the broker and cf-nix-cache share. |
 | [`deployment/terraform`](deployment/terraform) | The Terraform module that deploys the broker. |
 
 Releases are cut by release-please from Conventional Commits. Each release is tagged `vX.Y.Z` and attaches the broker's `index.js`, `index_bg.wasm.base64` and their `SHA256SUMS`. Pin the action to a release tag or its commit SHA: before 1.0 there is no floating major tag, because minor releases may break.

@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use cf_oidc_jwt::{ClaimSet, Provider, check_url};
+use cf_oidc_core::{ClaimSet, Provider, check_url};
 use cloudflare::v4::{
     IamResources, IamResourcesTypeObjectNested, IamResourcesTypeObjectNestedAdditionalProperty,
     IamResourcesTypeObjectString,

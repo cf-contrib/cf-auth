@@ -1,13 +1,13 @@
 [package]
-name = "cf-oidc-jwt"
+name = "cf-oidc-core"
 version = "0.8.0"
 edition = "2024"
 authors = ["iamralch"]
 readme = "README.md"
-description = "OIDC token verification for Cloudflare Workers: RS256 with WebCrypto, claim sets, per-isolate caches."
+description = "OIDC tokens in Cloudflare Workers: verifying and signing them with RS256 through WebCrypto, claim sets, per-isolate caches."
 
 [dependencies]
-# Decodes a token's parts.
+# A token's parts, and a signing key's PEM.
 base64 = "0.22"
 # Token claims, discovery documents, key sets and claim sets.
 serde = { version = "1", features = ["derive"] }
@@ -16,6 +16,6 @@ serde_json = "1"
 sha2 = { version = "0.11", default-features = false }
 # Fetches issuers' keys, and reads the clock.
 worker = "0.8"
-# WebCrypto bindings for RS256, so no RSA crate ends up in the wasm bundle, and
-# a timeout for fetching keys.
+# WebCrypto bindings for RS256, verifying and signing, so no RSA crate ends up
+# in the wasm bundle, and a timeout for fetching keys.
 web-sys = { version = "0.3", features = ["AbortSignal", "Crypto", "CryptoKey", "SubtleCrypto", "WorkerGlobalScope"] }
