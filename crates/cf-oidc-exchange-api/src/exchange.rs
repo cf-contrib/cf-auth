@@ -416,21 +416,6 @@ pub async fn jwks(config: &Config) -> Result<Jwks, HttpError> {
     Ok(Jwks { keys: vec![jwk] })
 }
 
-/// Whether the broker can serve: the policy loads, the broker token can be
-/// read, and so can the signing key if a profile issues the broker's own tokens.
-pub async fn ready(config: &Config) -> Result<(), HttpError> {
-    config.cloudflare().await?;
-    if config
-        .policy
-        .profiles
-        .iter()
-        .any(|p| p.audience != CLOUDFLARE_AUDIENCE)
-    {
-        config.signing_key().await?;
-    }
-    Ok(())
-}
-
 /// The hourly cleanup of expired `cf-oidc:` tokens.
 pub async fn cleanup(config: &Config) -> Result<usize, HttpError> {
     config.cloudflare().await?.cleanup(now_ms()).await

@@ -18,18 +18,14 @@ use cf_oidc_exchange_sdk::v1;
 use tower_service::Service;
 use worker::*;
 
-use crate::{
-    config::Config,
-    service::handler::{ExchangeServiceHandler, Readiness},
-};
+use crate::{config::Config, service::handler::ExchangeServiceHandler};
 
 #[event(fetch)]
 async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<HttpResponse> {
     // The router checks each request against the spec, form bodies included,
     // before it reaches a handler.
-    let health = v1::HealthHandler::new().readiness(Readiness::new(env.clone()));
     let mut router = v1::exchange_service_api_router(ExchangeServiceHandler::new(env))
-        .merge(health.into_router())
+        .merge(v1::HealthHandler::new().into_router())
         .layer(middleware::from_fn(service::layer::respond));
     Ok(router.call(req).await?)
 }
