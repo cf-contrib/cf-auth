@@ -10,10 +10,10 @@ const MAX_TEAM_PAGES = 10;
 /** A repository as a person's request names it: `owner/name` or its numeric ID. */
 export const REPOSITORY = /^(?:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+|\d+)$/;
 
+type Team = components["schemas"]["team-full"];
 // GET /user returns the private shape for the token's own user; both have id and login.
 type User = components["schemas"]["public-user"];
 type Repository = components["schemas"]["full-repository"];
-type Team = components["schemas"]["team-full"];
 
 /** GitHub's permission flags, most to least, under the policy's names for them. */
 const ROLES: [keyof NonNullable<Repository["permissions"]>, RepositoryPermission][] = [
