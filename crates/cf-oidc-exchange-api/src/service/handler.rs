@@ -24,7 +24,7 @@
 //! [`layer`](super::layer) has, and the handler takes the caller's identity
 //! from it.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 use base64::{
     Engine,
@@ -41,11 +41,11 @@ use cloudflare::v4::{
     IamPolicyWithPermissionGroupsAndResources, R2TempAccessCredsRequest,
     R2TempAccessCredsRequestPermission,
 };
-use serde::ser::{Serialize, SerializeMap, Serializer};
 use serde_json::{Map, Value, json};
+use tracing::{error, info, warn};
 use web_sys::{CryptoKey, SubtleCrypto, WorkerGlobalScope};
 use worker::{
-    Date, console_error, console_log, console_warn,
+    Date,
     js_sys::{self, Uint8Array},
     send::SendFuture,
     wasm_bindgen::{JsCast, JsValue},
@@ -100,7 +100,7 @@ impl ExchangeServiceHandler {
             .await
             .map_err(|err| Error::new(ErrorCode::Misconfigured, err.to_string()))?;
         Ok(Cloudflare::new(
-            self.config.cloudflare_api(),
+            self.config.cloudflare_url(),
             self.config.account_id(),
             &token,
         ))
@@ -147,15 +147,16 @@ impl ExchangeServiceHandler {
         let issued = key
             .issue(&self.config.policy().issuer, caller, profile, ttl, now)
             .await?;
-        caller
-            .audit("token.issue", Some(profile))
-            .with("audience", profile.audience.as_str())
-            .with("jti", issued.jti.as_str())
-            .with(
-                "expires_on",
-                json!(DateTime::from_timestamp(issued.expires_at as i64, 0)),
-            )
-            .emit();
+        info!(
+            event = "token.issue",
+            provider = %caller.provider.name,
+            profile = %profile.name,
+            sub = caller.subject(),
+            claims = %serde_json::Value::Object(caller.matched(Some(profile))),
+            audience = %profile.audience,
+            jti = %issued.jti,
+            expires_at = issued.expires_at,
+        );
         Ok(TokenExchangeResponse {
             access_token: Some(issued.jwt),
             account_id: None,
@@ -200,16 +201,20 @@ impl ExchangeServiceHandler {
         let now = Date::now().as_millis() / 1000;
         // In whole seconds, which is what the tokens API takes.
         let expires_on = DateTime::from_timestamp((now + ttl / 1000) as i64, 0).unwrap_or_default();
-        let mut token: Option<MintedToken> = None;
+        let mut token: Option<ApiToken> = None;
         if let Some(config) = &profile.token {
             let minted = cloudflare
                 .mint(&config.policies, caller.token_name(), expires_on)
                 .await?;
-            caller
-                .audit("token.mint", Some(profile))
-                .with("token_id", minted.token_id.as_str())
-                .with("expires_on", json!(minted.expires_on))
-                .emit();
+            info!(
+                event = "token.mint",
+                provider = %caller.provider.name,
+                profile = %profile.name,
+                sub = caller.subject(),
+                claims = %serde_json::Value::Object(caller.matched(Some(profile))),
+                token_id = %minted.token_id,
+                expires_at = minted.expires_on.timestamp(),
+            );
             token = Some(minted);
         }
 
@@ -217,13 +222,17 @@ impl ExchangeServiceHandler {
         for (bucket, prefixes) in buckets.iter().zip(prefixes) {
             match cloudflare.issue_r2(bucket, &prefixes, ttl).await {
                 Ok(credentials) => {
-                    caller
-                        .audit("r2.issued", Some(profile))
-                        .with("bucket", bucket.name.as_str())
-                        .with("prefixes", prefixes.clone())
-                        .with("permission", json!(bucket.permission))
-                        .with("expires_on", json!(expires_on))
-                        .emit();
+                    info!(
+                        event = "r2.issued",
+                        provider = %caller.provider.name,
+                        profile = %profile.name,
+                        sub = caller.subject(),
+                        claims = %serde_json::Value::Object(caller.matched(Some(profile))),
+                        bucket = %bucket.name,
+                        prefixes = ?prefixes,
+                        permission = bucket.permission.as_str(),
+                        expires_at = expires_on.timestamp(),
+                    );
                     issued.push(BucketCredentials {
                         access_key_id: credentials.access_key_id,
                         endpoint: format!(
@@ -352,17 +361,20 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
             match exchanged.await {
                 Ok(response) => v1::ExchangeTokenResponse::Ok(response),
                 Err(err) => {
-                    let audit = match &caller {
-                        Some(caller) => caller.audit("token.deny", named),
-                        None => Audit::new("token.deny"),
-                    };
-                    audit
-                        .with("profile", request.profile.as_deref())
-                        .with("error", err.error.as_str())
-                        .with("message", err.message.as_str())
-                        .emit();
+                    let profile = named
+                        .map(|p| p.name.as_str())
+                        .or(request.profile.as_deref());
+                    warn!(
+                        event = "token.deny",
+                        provider = caller.as_ref().map(|c| c.provider.name.as_str()),
+                        profile,
+                        sub = caller.as_ref().and_then(Caller::subject),
+                        claims = caller.as_ref().map(|c| display(serde_json::Value::Object(c.matched(named)))),
+                        error = err.error.as_str(),
+                        message = %err.message,
+                    );
                     // A caller's mistake says what it was. A fault of the
-                    // broker's doesn't: the audit line does.
+                    // broker's doesn't: the log line does.
                     match err.error {
                         ErrorCode::BadRequest => v1::ExchangeTokenResponse::BadRequest(err),
                         ErrorCode::Unauthorized => v1::ExchangeTokenResponse::Unauthorized(err),
@@ -397,26 +409,26 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
             let revoked = async {
                 let cloudflare = self.cloudflare().await?;
                 cloudflare
-                    .revoke(self.config.cloudflare_api(), &request.token)
+                    .revoke(self.config.cloudflare_url(), &request.token)
                     .await
             };
-            let audit = Audit::new("token.revoke");
             match revoked.await {
-                Ok(Some(id)) => {
-                    audit.with("token_id", id).emit();
+                Ok(Some(token_id)) => {
+                    info!(event = "token.revoke", token_id);
                     v1::RevokeTokenResponse::Ok
                 }
                 Ok(None) => {
-                    audit.with("reason", "already_gone").emit();
+                    info!(event = "token.revoke", reason = "already_gone");
                     v1::RevokeTokenResponse::Ok
                 }
                 Err(err) => {
-                    audit
-                        .with("error", err.error.as_str())
-                        .with("message", err.message.as_str())
-                        .emit();
+                    warn!(
+                        event = "token.revoke",
+                        error = err.error.as_str(),
+                        message = %err.message,
+                    );
                     // As for an exchange: the broker's faults say why only in
-                    // the audit line.
+                    // the log line.
                     match err.error {
                         ErrorCode::BadRequest => v1::RevokeTokenResponse::BadRequest(err),
                         ErrorCode::Forbidden => v1::RevokeTokenResponse::Forbidden(err),
@@ -449,7 +461,7 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
             url("/oauth/token"),
             url("/oauth/revoke"),
         ) else {
-            console_error!("issuer {issuer} makes no URLs");
+            error!(%issuer, "the issuer makes no URLs");
             return v1::DiscoveryResponse::InternalServerError(Error::new(
                 ErrorCode::Misconfigured,
                 "the broker is misconfigured; its logs say why",
@@ -484,7 +496,7 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
             match keys.await {
                 Ok(jwks) => v1::JwksResponse::Ok(jwks),
                 Err(err) => {
-                    console_error!("{err}");
+                    error!(error = err.error.as_str(), message = %err.message);
                     v1::JwksResponse::InternalServerError(Error::new(
                         err.error,
                         "the broker failed; its logs say why",
@@ -520,16 +532,20 @@ impl<'p> Caller<'p> {
         Ok(Self { identity, provider })
     }
 
-    /// The claims its provider's and `profile`'s claim sets match on: what's
-    /// worth writing down about a caller, and copying into the broker's own
-    /// tokens. Never secret.
-    fn matched<'a>(&'a self, profile: Option<&'a ProfileConfig>) -> BTreeSet<&'a str> {
+    /// The claims its provider's and `profile`'s claim sets match on, with
+    /// their values: what's worth writing down about a caller, and copying
+    /// into the broker's own tokens. Never secret.
+    fn matched(&self, profile: Option<&ProfileConfig>) -> Map<String, Value> {
         let profile = profile.map(|p| p.claims.as_slice()).unwrap_or_default();
         self.provider
             .claims
             .iter()
             .chain(profile)
             .flat_map(|set| set.names())
+            .filter_map(|name| {
+                let value = self.identity.claims.get(name).filter(|v| copyable(v))?;
+                Some((name.to_string(), value.clone()))
+            })
             .collect()
     }
 
@@ -544,87 +560,6 @@ impl<'p> Caller<'p> {
         let sub = self.subject().unwrap_or("unknown");
         let name = format!("{TOKEN_PREFIX}{}:{sub}", self.provider.name);
         name.chars().take(NAME_MAX).collect()
-    }
-
-    /// An audit line about the caller, and the profile it gets.
-    fn audit(&self, event: &'static str, profile: Option<&ProfileConfig>) -> Audit {
-        Audit::new(event).caller(
-            Some(&self.provider.name),
-            profile.map(|p| p.name.as_str()),
-            Some(&self.identity.claims),
-            self.matched(profile),
-        )
-    }
-}
-
-/// An audit line, in Workers Logs, one JSON object per event. Never token
-/// values, R2 secrets or raw JWTs.
-#[must_use]
-pub struct Audit {
-    /// In the order they were added, which is the order they're written in.
-    fields: Vec<(String, Value)>,
-}
-
-impl Audit {
-    pub fn new(event: &'static str) -> Self {
-        Self {
-            fields: vec![("event".into(), event.into())],
-        }
-    }
-
-    /// Adds a field, unless it's absent or already there.
-    pub fn with(mut self, key: &str, value: impl Into<Value>) -> Self {
-        let value = value.into();
-        if !value.is_null() && !self.fields.iter().any(|(k, _)| k == key) {
-            self.fields.push((key.into(), value));
-        }
-        self
-    }
-
-    /// Adds the provider and profile, and who the caller is: their token's
-    /// `sub`, and the claims in `names`, which the policy matches on.
-    pub fn caller<'n>(
-        mut self,
-        provider: Option<&str>,
-        profile: Option<&str>,
-        claims: Option<&Map<String, Value>>,
-        names: impl IntoIterator<Item = &'n str>,
-    ) -> Self {
-        self = self.with("provider", provider).with("profile", profile);
-        let names: BTreeSet<&str> = names.into_iter().collect();
-        for key in std::iter::once("sub").chain(names) {
-            let value = claims.and_then(|claims| claims.get(key));
-            // Only what's worth writing down: a string, number or boolean.
-            let scalar = |value: &&Value| match value {
-                Value::String(text) => !text.is_empty(),
-                Value::Number(_) | Value::Bool(_) => true,
-                _ => false,
-            };
-            if let Some(value) = value.filter(scalar) {
-                self = self.with(key, value.clone());
-            }
-        }
-        self
-    }
-
-    /// Writes the line: a warning for a refusal.
-    pub fn emit(self) {
-        let line = serde_json::to_string(&self).unwrap_or_default();
-        if self.fields[0].1 == "token.deny" {
-            console_warn!("{line}");
-        } else {
-            console_log!("{line}");
-        }
-    }
-}
-
-impl Serialize for Audit {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(self.fields.len()))?;
-        for (key, value) in &self.fields {
-            map.serialize_entry(key, value)?;
-        }
-        map.end()
     }
 }
 
@@ -659,7 +594,7 @@ struct Cloudflare {
 }
 
 /// A token the broker minted.
-struct MintedToken {
+struct ApiToken {
     token: String,
     token_id: String,
     expires_on: DateTime<Utc>,
@@ -694,7 +629,7 @@ impl Cloudflare {
         policies: &[TokenPolicyConfig],
         name: String,
         expires_on: DateTime<Utc>,
-    ) -> Result<MintedToken, Error> {
+    ) -> Result<ApiToken, Error> {
         let policies = self.resolve(policies).await?;
         let payload = IamCreatePayload {
             condition: None,
@@ -713,7 +648,7 @@ impl Cloudflare {
         let (Some(token_id), Some(token)) = (created.id, created.value) else {
             return Err(missing("tokens.create"));
         };
-        Ok(MintedToken {
+        Ok(ApiToken {
             token,
             token_id,
             expires_on: created.expires_on.unwrap_or(expires_on),
@@ -727,13 +662,14 @@ impl Cloudflare {
             .client
             .account_api_tokens_delete_token(&self.account_id, token_id)
             .await;
-        let audit = Audit::new("token.revoke").with("token_id", token_id);
         match deleted {
-            Ok(_) => audit.with("reason", "discarded").emit(),
-            Err(err) => audit
-                .with("reason", "discard_failed")
-                .with("detail", err.to_string())
-                .emit(),
+            Ok(_) => info!(event = "token.revoke", token_id, reason = "discarded"),
+            Err(err) => error!(
+                event = "token.revoke",
+                token_id,
+                reason = "discard_failed",
+                detail = %err,
+            ),
         }
     }
 
@@ -831,11 +767,12 @@ impl Cloudflare {
             {
                 Ok(_) => {
                     deleted += 1;
-                    Audit::new("token.cleanup")
-                        .with("token_id", id)
-                        .with("name", name)
-                        .with("expires_on", json!(expires_on))
-                        .emit();
+                    info!(
+                        event = "token.cleanup",
+                        token_id = %id,
+                        name = %name,
+                        expires_at = expires_on.timestamp(),
+                    );
                 }
                 Err(err) if status(&err) == Some(404) => {}
                 Err(err) => return Err(upstream("tokens.delete", err)),
@@ -1147,12 +1084,7 @@ fn payload(
         ));
     }
 
-    let mut payload = Map::new();
-    for name in caller.matched(Some(profile)) {
-        if let Some(value) = claims.get(name).filter(|value| copyable(value)) {
-            payload.insert(name.into(), value.clone());
-        }
-    }
+    let mut payload = caller.matched(Some(profile));
     let subject = match caller.subject() {
         Some(sub) => sub.to_string(),
         None => format!("{}:unknown", caller.provider.name),
@@ -1222,27 +1154,22 @@ mod tests {
     }
 
     #[test]
-    fn audits_who_without_anything_else() {
+    fn knows_a_caller_by_the_claims_the_policy_matches_on() {
         let policy = parse(&policy());
         let mut claims = claims();
         claims.insert("email".into(), "someone@example.com".into());
-        let audit = caller(&policy, claims)
-            .audit("token.mint", Some(&policy.profiles[0]))
-            .with("token_id", "tok-1")
-            .with("detail", None::<String>)
-            .with("token_id", "tok-2");
+        let caller = caller(&policy, claims);
         assert_eq!(
-            serde_json::to_value(&audit).unwrap(),
+            Value::Object(caller.matched(Some(&policy.profiles[0]))),
             json!({
-                "event": "token.mint",
-                "provider": "github",
-                "profile": "deploy",
-                "sub": "repo:example-org/app:ref:refs/heads/main",
                 "ref": "refs/heads/main",
                 "repository": "example-org/app",
                 "repository_owner_id": "100000001",
-                "token_id": "tok-1",
             })
+        );
+        assert_eq!(
+            Value::Object(caller.matched(None)),
+            json!({ "repository_owner_id": "100000001" })
         );
     }
 

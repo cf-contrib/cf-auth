@@ -142,11 +142,18 @@ impl Test {
     pub fn audit_lines(&self) -> Vec<Value> {
         self.log()
             .lines()
-            .filter_map(|line| line.find(r#"{"event":"#).map(|at| &line[at..]))
+            .filter_map(|line| line.find(r#"{"level":"#).map(|at| &line[at..]))
             .filter_map(|line| {
                 // Warnings come with a colour reset after the JSON.
                 let end = line.rfind('}')?;
-                serde_json::from_str(&line[..=end]).ok()
+                let mut line: Value = serde_json::from_str(&line[..=end]).ok()?;
+                // Logged as JSON text: read back as JSON, to compare.
+                for field in ["claims", "prefixes"] {
+                    if let Some(text) = line[field].as_str() {
+                        line[field] = serde_json::from_str(text).ok()?;
+                    }
+                }
+                line.get("event").is_some().then_some(line)
             })
             .collect()
     }

@@ -21,7 +21,7 @@ use cloudflare::v4::{
     IamResources, IamResourcesTypeObjectNested, IamResourcesTypeObjectNestedAdditionalProperty,
     IamResourcesTypeObjectString,
 };
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 use worker::{Env, Error, SecretStore, js_sys, wasm_bindgen::JsValue};
 
@@ -42,7 +42,7 @@ pub const CLOUDFLARE_TOKEN_KEY: &str = "CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN";
 pub const SIGNING_KEY_KEY: &str = "CF_OIDC_EXCHANGE_API_SIGNING_KEY";
 
 /// Where Cloudflare's API is.
-const CLOUDFLARE_API: &str = "https://api.cloudflare.com/client/v4";
+const CLOUDFLARE_URL: &str = "https://api.cloudflare.com/client/v4";
 
 /// The audience for Cloudflare API tokens and R2 credentials, and every
 /// profile's default.
@@ -72,11 +72,11 @@ pub struct Config {
     policy: PolicyConfig,
     /// `CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN`'s binding, not yet its value.
     cloudflare_token: SecretConfig,
+    /// Where Cloudflare's API is.
+    cloudflare_url: String,
     /// `CF_OIDC_EXCHANGE_API_SIGNING_KEY`'s binding. None issues no tokens of
     /// the broker's own.
     signing_key: Option<SecretConfig>,
-    /// Where Cloudflare's API is.
-    cloudflare_api: String,
 }
 
 impl Config {
@@ -103,17 +103,17 @@ impl Config {
         // Only a `stand-ins` build, for the integration tests, takes Cloudflare's
         // API from anywhere but Cloudflare.
         #[cfg(feature = "stand-ins")]
-        let cloudflare_api = var("CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL")
-            .unwrap_or_else(|| CLOUDFLARE_API.to_string());
+        let cloudflare_url = var("CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL")
+            .unwrap_or_else(|| CLOUDFLARE_URL.to_string());
         #[cfg(not(feature = "stand-ins"))]
-        let cloudflare_api = CLOUDFLARE_API.to_string();
+        let cloudflare_url = CLOUDFLARE_URL.to_string();
 
         Ok(Self {
             account_id,
             policy,
             cloudflare_token,
+            cloudflare_url,
             signing_key: SecretConfig::from_env(env, SIGNING_KEY_KEY)?,
-            cloudflare_api,
         })
     }
 
@@ -127,14 +127,14 @@ impl Config {
         &self.policy
     }
 
-    /// Where Cloudflare's API is.
-    pub fn cloudflare_api(&self) -> &str {
-        &self.cloudflare_api
-    }
-
     /// Reads the Cloudflare token.
     pub async fn cloudflare_token(&self) -> worker::Result<String> {
         self.cloudflare_token.read().await
+    }
+
+    /// Where Cloudflare's API is.
+    pub fn cloudflare_url(&self) -> &str {
+        &self.cloudflare_url
     }
 
     /// Reads the signing key, a PKCS#8 PEM, or `None` if none is bound.
@@ -728,11 +728,21 @@ pub struct BucketConfig {
     pub prefixes: Vec<Prefix>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum BucketPermission {
     ObjectReadWrite,
     ObjectReadOnly,
+}
+
+impl BucketPermission {
+    /// As the policy writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ObjectReadWrite => "object-read-write",
+            Self::ObjectReadOnly => "object-read-only",
+        }
+    }
 }
 
 /// A bucket prefix, its path segments filled in from the caller's claims:
