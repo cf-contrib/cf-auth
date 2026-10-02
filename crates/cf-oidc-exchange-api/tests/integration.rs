@@ -1171,12 +1171,14 @@ mod broker_token {
         assert_eq!(res.status, 500);
         assert_error(&res, "misconfigured");
         assert!(!res.text.contains("BROKER_TOKEN_PLAIN"), "{}", res.text);
-        assert_refused(
-            &t.deny().await,
-            "misconfigured",
-            "BROKER_TOKEN_PLAIN must be a Secrets Store binding",
+        // Refused with the configuration, before any route: the log says why.
+        assert!(
+            t.log()
+                .contains("misconfigured: BROKER_TOKEN_PLAIN must be a Secrets Store binding"),
+            "{}",
+            t.log()
         );
-        assert_eq!(token_count(), 1); // nothing minted
+        assert!(world().cloudflare.calls().is_empty());
     }
 }
 
@@ -1200,16 +1202,16 @@ mod health {
         );
     }
 
-    /// Neither endpoint reads the policy: it's checked when a route of the API
-    /// first needs it, and fails closed there.
+    /// Misconfigured, the Worker serves nothing, the health endpoints
+    /// included, so a broken deploy shows on its probes.
     #[tokio::test]
-    async fn stays_live_and_ready_while_the_api_fails_closed_on_an_invalid_policy() {
+    async fn is_neither_live_nor_ready_when_misconfigured() {
         let _t = start().await;
         world().scenario["policy"] = json!("{");
         let health = HealthClient::new(BROKER);
-        assert!(health.is_live().await.expect("the request failed"));
-        assert!(health.is_ready().await.expect("the request failed"));
-        let res = call(Method::GET, "/.well-known/openid-configuration").await;
+        assert!(!health.is_live().await.expect("the request failed"));
+        assert!(!health.is_ready().await.expect("the request failed"));
+        let res = call(Method::GET, "/health/ready").await;
         assert_eq!(res.status, 500);
         assert_error(&res, "misconfigured");
     }
@@ -1727,7 +1729,7 @@ mod tokens_for_other_services {
         assert_refused(
             &t.deny().await,
             "misconfigured",
-            "SIGNING_KEY_UNBOUND must be a Secrets Store binding",
+            "SIGNING_KEY_UNBOUND isn't bound",
         );
 
         assert_eq!(
