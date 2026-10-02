@@ -14,7 +14,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::{
-    service::config::{Claims, ProviderConfig, ProviderType, is_issuer_url},
+    service::config::{Claims, ProviderConfig, is_issuer_url},
     webcrypto,
 };
 
@@ -103,15 +103,12 @@ pub fn provider_for<'p>(
         .get("iss")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    providers
-        .iter()
-        .find(|p| p.kind == ProviderType::Oidc && p.issuer == iss)
-        .ok_or_else(|| {
-            Error::new(
-                ErrorCode::Unauthorized,
-                format!("no provider is for issuer {}", shown(iss)),
-            )
-        })
+    providers.iter().find(|p| p.issuer == iss).ok_or_else(|| {
+        Error::new(
+            ErrorCode::Unauthorized,
+            format!("no provider is for issuer {}", shown(iss)),
+        )
+    })
 }
 
 /// Verifies an OIDC token from `provider`: its RS256 signature against the
@@ -135,7 +132,7 @@ pub fn check_claims(claims: &Claims, provider: &ProviderConfig, now: u64) -> Res
     if claim("iss").and_then(Value::as_str) != Some(provider.issuer.as_str()) {
         return Err(invalid("wrong issuer"));
     }
-    let audience = provider.audience.as_deref().unwrap_or_default();
+    let audience = provider.audience.as_str();
     let ours = |aud: &Value| aud.as_str() == Some(audience);
     let audience_ok = match claim("aud") {
         Some(Value::Array(auds)) => auds.iter().any(ours),
@@ -313,11 +310,10 @@ mod tests {
     fn provider() -> ProviderConfig {
         ProviderConfig {
             name: "github".into(),
-            kind: ProviderType::Oidc,
             issuer: ISSUER.into(),
-            audience: Some(AUDIENCE.into()),
+            audience: AUDIENCE.into(),
             jwks_uri: None,
-            claims: Default::default(),
+            claims: vec![],
         }
     }
 
@@ -426,15 +422,12 @@ mod tests {
 
     #[test]
     fn picks_the_provider_by_the_tokens_issuer() {
-        let people = ProviderConfig {
-            name: "people".into(),
-            kind: ProviderType::GithubUser,
-            issuer: "https://github.com".into(),
-            audience: None,
-            jwks_uri: None,
-            claims: Default::default(),
+        let gitlab = ProviderConfig {
+            name: "gitlab".into(),
+            issuer: "https://gitlab.com".into(),
+            ..provider()
         };
-        let providers = [people, provider()];
+        let providers = [gitlab, provider()];
         let jwt = |iss: &str| {
             let payload = segment(json!({ "iss": iss }));
             format!("{}.{payload}.c2ln", segment(json!({ "alg": "RS256" })))
@@ -446,11 +439,13 @@ mod tests {
                 .name,
             "github"
         );
-        // A person's provider never takes OIDC tokens, even one that names its issuer.
-        let token = jwt("https://github.com");
+        let token = jwt("https://other.example.com");
         let err = provider_for(&Jwt::decode(&token).unwrap(), &providers).unwrap_err();
         assert_eq!(err.error, ErrorCode::Unauthorized);
-        assert_eq!(err.message, "no provider is for issuer https://github.com");
+        assert_eq!(
+            err.message,
+            "no provider is for issuer https://other.example.com"
+        );
     }
 
     #[test]

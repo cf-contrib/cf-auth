@@ -33,7 +33,7 @@ steps:
 
 The action and the broker, with its Terraform module, are released together from one tag, so deploy the broker from the release whose action you use. The action talks only to the broker, never to the Cloudflare API.
 
-People can get credentials too, for example to run `tofu plan` locally against the shared state bucket. [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare) sends their `gh auth token` to the broker, which checks their role on the repo with GitHub and matches the profiles of the [`https://github.com` provider](crates/cf-oidc-exchange-api#people).
+The broker takes OIDC tokens from any issuer you list: GitHub Actions, GitLab CI, HCP Terraform, or, for people, an identity provider such as [Cloudflare Access](crates/cf-oidc-exchange-api#people). Who gets what is in the policy's claim sets, the same rules [cf-nix-cache](https://github.com/cf-contrib/cf-nix-cache) uses.
 
 Other services can trust the broker too. A profile with an `audience` gets the caller a short-lived token the broker signs itself, for that service, which verifies it with the broker's published keys. [cf-nix-cache](https://github.com/cf-contrib/cf-nix-cache) is the first such service. See [Tokens for other services](crates/cf-oidc-exchange-api#tokens-for-other-services).
 

@@ -23,15 +23,14 @@ use serde_json::Value;
 use worker::{Env, SecretStore, js_sys, wasm_bindgen::JsValue};
 
 pub use self::policy::{
-    Bucket, BucketPermission, CLOUDFLARE_AUDIENCE, Claims, Effect, PolicyConfig, ProfileConfig,
-    ProviderConfig, ProviderType, ResourceValue, TokenPolicy, clamp_ttl, is_issuer_url,
+    Bucket, BucketPermission, CLOUDFLARE_AUDIENCE, ClaimSet, Claims, Effect, PolicyConfig,
+    ProfileConfig, ProviderConfig, ResourceValue, TokenPolicy, clamp_ttl, is_issuer_url,
     r2_prefixes, select_profile,
 };
 use self::policy::{PolicyError, load_policy};
 use crate::{
     audit::Audit,
     cloudflare::{self, Cloudflare},
-    github,
     issuer::{self, SigningKey},
 };
 
@@ -74,8 +73,7 @@ pub struct Config {
     cloudflare_token: SecretConfig,
     /// `CF_OIDC_EXCHANGE_API_SIGNING_KEY`'s binding, which may be unbound.
     signing_key: SecretConfig,
-    /// Where GitHub's API and Cloudflare's are.
-    github_api: String,
+    /// Where Cloudflare's API is.
     cloudflare_api: String,
 }
 
@@ -100,7 +98,6 @@ impl Config {
             policy,
             cloudflare_token: SecretConfig::from_env(env, &bindings.cloudflare_token, true)?,
             signing_key: SecretConfig::from_env(env, &bindings.signing_key, false)?,
-            github_api: upstream(env, "CF_OIDC_EXCHANGE_API_GITHUB_URL", github::API_URL),
             cloudflare_api: upstream(
                 env,
                 "CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL",
@@ -117,11 +114,6 @@ impl Config {
     /// The policy.
     pub fn policy(&self) -> &PolicyConfig {
         &self.policy
-    }
-
-    /// Where GitHub's API is.
-    pub fn github_api(&self) -> &str {
-        &self.github_api
     }
 
     /// Where Cloudflare's API is.

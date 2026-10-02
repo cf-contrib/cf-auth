@@ -2,11 +2,8 @@
 // type-checks against. The contract is crates/cf-oidc-exchange-sdk's OpenAPI
 // document (openapi/oidc/exchange/v1/exchangev1.yaml); keep this file in step.
 
-/** What the presented `subject_token` is: a GitHub Actions OIDC token (`id_token` or `jwt`), or a GitHub user token (`access_token`). */
-export type SubjectTokenType =
-  | "urn:ietf:params:oauth:token-type:id_token"
-  | "urn:ietf:params:oauth:token-type:jwt"
-  | "urn:ietf:params:oauth:token-type:access_token";
+/** What the presented `subject_token` is: an OIDC token, as `id_token` or `jwt`. */
+export type SubjectTokenType = "urn:ietf:params:oauth:token-type:id_token" | "urn:ietf:params:oauth:token-type:jwt";
 
 /**
  * What comes back: a Cloudflare API token, only R2 credentials for a profile without a
@@ -18,8 +15,8 @@ export type IssuedTokenType =
   | "urn:ietf:params:oauth:token-type:jwt";
 
 /**
- * Body of `POST /oauth/token`, an RFC 8693 token exchange, form-encoded. `profile`,
- * `ttl` and `repository` are the broker's own extension parameters.
+ * Body of `POST /oauth/token`, an RFC 8693 token exchange, form-encoded. `profile` and
+ * `ttl` are the broker's own extension parameters.
  */
 export interface TokenExchangeRequest {
   grant_type: "urn:ietf:params:oauth:grant-type:token-exchange";
@@ -33,8 +30,6 @@ export interface TokenExchangeRequest {
   requested_token_type?: IssuedTokenType | undefined;
   profile?: string | undefined;
   ttl?: string | undefined;
-  /** Required for a GitHub user token: the repo to get credentials for. */
-  repository?: string | undefined;
 }
 
 /**

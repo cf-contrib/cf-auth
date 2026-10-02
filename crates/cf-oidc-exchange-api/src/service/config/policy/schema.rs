@@ -1,6 +1,6 @@
 //! The policy as written: its shape, and the checks each field needs on its own.
-//! Problems here are reported by their dot path (`profiles.1.claims.ref`), and stop
-//! the load before the guardrails, which need a well-formed policy.
+//! Problems here are reported by their dot path (`profiles.1.claims.0`), and
+//! stop the load before the guardrails, which need a well-formed policy.
 
 use std::{collections::BTreeMap, sync::LazyLock};
 
@@ -8,61 +8,15 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_path_to_error::Segment;
 
-use super::{ResourceValue, is_issuer_url, parse_duration};
+use super::{ClaimSet, ResourceValue, is_issuer_url, parse_duration};
 
 static NAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$").unwrap());
-
-static CLAIM_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new("^[a-z_]+$").unwrap());
 
 /// R2's bucket name rules: 3-63 lowercase letters, digits and hyphens, starting
 /// and ending with a letter or digit.
 static R2_BUCKET: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$").unwrap());
-
-/// A claim's value as written: one value or a list, meaning any of them. YAML
-/// turns unquoted IDs into numbers, so non-negative integers are accepted too, and
-/// loaded as strings, which is what issuers put in their claims.
-#[derive(Deserialize)]
-#[serde(
-    untagged,
-    expecting = "must be a string, a non-negative integer or a list of them"
-)]
-pub(super) enum ClaimValues {
-    One(ClaimValue),
-    Many(Vec<ClaimValue>),
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-pub(super) enum ClaimValue {
-    Text(String),
-    Number(u64),
-}
-
-impl ClaimValues {
-    pub(super) fn into_list(self) -> Vec<String> {
-        let list = match self {
-            Self::One(value) => vec![value],
-            Self::Many(values) => values,
-        };
-        list.into_iter()
-            .map(|value| match value {
-                ClaimValue::Text(text) => text,
-                ClaimValue::Number(number) => number.to_string(),
-            })
-            .collect()
-    }
-
-    fn values(&self) -> Vec<&ClaimValue> {
-        match self {
-            Self::One(value) => vec![value],
-            Self::Many(values) => values.iter().collect(),
-        }
-    }
-}
-
-pub(super) type ClaimSet = BTreeMap<String, ClaimValues>;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,13 +41,14 @@ pub(super) struct Defaults {
 #[serde(deny_unknown_fields)]
 pub(super) struct Provider {
     pub name: String,
-    /// https://github.com for people's GitHub tokens; any other issuer's tokens are OIDC tokens.
+    /// The tokens' `iss`, exactly.
     pub issuer: String,
-    pub audience: Option<String>,
+    /// A value the tokens' `aud` must contain.
+    pub audience: String,
     pub jwks_uri: Option<String>,
-    /// Every token from this provider must have these, whichever profile it gets.
-    #[serde(default)]
-    pub claims: ClaimSet,
+    /// Every token from this provider must match one of these, whichever
+    /// profile it gets.
+    pub claims: Vec<ClaimSet>,
 }
 
 #[derive(Deserialize)]
@@ -107,8 +62,8 @@ pub(super) struct Profile {
     pub enabled: bool,
     /// Another service the broker issues its own token for, instead of Cloudflare credentials.
     pub audience: Option<String>,
-    #[serde(default)]
-    pub claims: ClaimSet,
+    /// A token must match one of these, as well as one of its provider's.
+    pub claims: Vec<ClaimSet>,
     /// For everything the profile hands out: the token and the buckets' credentials.
     pub ttl: Option<String>,
     pub max_ttl: Option<String>,
@@ -186,8 +141,8 @@ pub(super) fn check(policy: &Policy) -> Vec<String> {
     let mut issues = Vec::new();
     let mut issue = |path: String, message: &str| issues.push(format!("{path}: {message}"));
 
-    if policy.version != 2 {
-        issue("version".into(), "must be 2");
+    if policy.version != 3 {
+        issue("version".into(), "must be 3");
     }
     if let Some(problem) = origin_problem(&policy.issuer) {
         issue("issuer".into(), problem);
@@ -203,13 +158,17 @@ pub(super) fn check(policy: &Policy) -> Vec<String> {
         if let Some(problem) = issuer_url_problem(&provider.issuer) {
             issue(format!("{at}.issuer"), problem);
         }
-        if provider.audience.as_deref() == Some("") {
+        if provider.audience.is_empty() {
             issue(format!("{at}.audience"), "must not be empty");
         }
         if let Some(problem) = provider.jwks_uri.as_deref().and_then(issuer_url_problem) {
             issue(format!("{at}.jwks_uri"), problem);
         }
-        check_claims(&format!("{at}.claims"), &provider.claims, &mut issue);
+        // Guardrail 1: the provider is pinned. An issuer that gives anyone's
+        // projects a token, such as GitHub Actions, would otherwise let them all in.
+        if provider.claims.is_empty() {
+            issue(format!("{at}.claims"), "must list at least one claim set");
+        }
     }
 
     for (field, value) in [
@@ -245,7 +204,9 @@ pub(super) fn check(policy: &Policy) -> Vec<String> {
         if let Some(problem) = profile.audience.as_deref().and_then(origin_problem) {
             issue(format!("{at}.audience"), problem);
         }
-        check_claims(&format!("{at}.claims"), &profile.claims, &mut issue);
+        if profile.claims.is_empty() {
+            issue(format!("{at}.claims"), "must list at least one claim set");
+        }
         for (field, value) in [("ttl", &profile.ttl), ("max_ttl", &profile.max_ttl)] {
             if value
                 .as_deref()
@@ -328,25 +289,6 @@ pub(super) fn check(policy: &Policy) -> Vec<String> {
         }
     }
     issues
-}
-
-/// Checks a claim set's names, and that its values are there to compare with.
-fn check_claims(at: &str, claims: &ClaimSet, issue: &mut impl FnMut(String, &str)) {
-    for (claim, values) in claims {
-        if !CLAIM_NAME.is_match(claim) {
-            issue(format!("{at}.{claim}"), "must be a claim name");
-        }
-        let values = values.values();
-        if values.is_empty() {
-            issue(format!("{at}.{claim}"), "must list at least one value");
-        }
-        if values
-            .iter()
-            .any(|value| matches!(value, ClaimValue::Text(text) if text.is_empty()))
-        {
-            issue(format!("{at}.{claim}"), "must not be empty");
-        }
-    }
 }
 
 fn origin_problem(value: &str) -> Option<&'static str> {

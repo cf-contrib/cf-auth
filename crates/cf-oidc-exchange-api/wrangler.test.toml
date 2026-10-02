@@ -11,7 +11,6 @@ command = "worker-build --dev -d build-test . --features stand-ins && cp worker/
 
 [vars]
 CF_OIDC_EXCHANGE_API_SCENARIO_URL = "http://127.0.0.1:8791/scenario"
-CF_OIDC_EXCHANGE_API_GITHUB_URL = "http://127.0.0.1:8791/github"
 CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL = "http://127.0.0.1:8791/cloudflare/client/v4"
 # A broker token as a plain variable, which the Worker must refuse.
 CLOUDFLARE_TOKEN_PLAIN = "test-cloudflare-token"

@@ -1,23 +1,27 @@
 {
-  "version": 2,
+  "version": 3,
   "issuer": "http://localhost:8787",
   "providers": [
     {
       "name": "github",
       "issuer": "https://token.actions.githubusercontent.com",
       "audience": "http://localhost:8787",
-      "claims": {
-        "repository_owner_id": "100000001"
-      }
+      "claims": [
+        {
+          "repository_owner_id": "100000001"
+        }
+      ]
     }
   ],
   "profiles": [
     {
       "name": "workers-deploy",
-      "claims": {
-        "repository_id": "200000002",
-        "ref": "refs/heads/main"
-      },
+      "claims": [
+        {
+          "repository_id": "200000002",
+          "ref": "refs/heads/main"
+        }
+      ],
       "token": {
         "policies": [
           {

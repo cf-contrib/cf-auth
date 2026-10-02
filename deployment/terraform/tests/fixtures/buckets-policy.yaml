@@ -1,17 +1,17 @@
 # Profiles with buckets, for tests/main.tftest.hcl. {claim} placeholders are the
 # broker's, filled in from each job's claims; $${…} is Terraform's.
-version: 2
+version: 3
 issuer: ${broker_url}
 providers:
   - name: github
     issuer: https://token.actions.githubusercontent.com
     audience: ${broker_url}
     claims:
-      repository_owner_id: "100000001"
+      - repository_owner_id: "100000001"
 profiles:
   - name: terraform-state
     claims:
-      ref: refs/heads/main
+      - ref: refs/heads/main
     ttl: 30m
     buckets:
       - name: org-terraform-state
@@ -19,8 +19,8 @@ profiles:
         prefixes: ["github.com/{repository}/"]
   - name: deploy-with-state
     claims:
-      repository_id: "200000002"
-      environment: prod
+      - repository_id: "200000002"
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]

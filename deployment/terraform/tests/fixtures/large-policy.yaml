@@ -1,18 +1,18 @@
 # Over the 5 KB Worker binding limit, to show the policy module has no such cap.
-version: 2
+version: 3
 issuer: https://cf-oidc-exchange.example.com
 providers:
   - name: github
     issuer: https://token.actions.githubusercontent.com
     audience: https://cf-oidc-exchange.example.com
     claims:
-      repository_owner_id: "100000001"
+      - repository_owner_id: "100000001"
 profiles:
   - name: repo-00
     claims:
-      repository_id: "200000000"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000000"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -20,9 +20,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-01
     claims:
-      repository_id: "200000001"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000001"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -30,9 +30,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-02
     claims:
-      repository_id: "200000002"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000002"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -40,9 +40,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-03
     claims:
-      repository_id: "200000003"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000003"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -50,9 +50,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-04
     claims:
-      repository_id: "200000004"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000004"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -60,9 +60,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-05
     claims:
-      repository_id: "200000005"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000005"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -70,9 +70,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-06
     claims:
-      repository_id: "200000006"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000006"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -80,9 +80,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-07
     claims:
-      repository_id: "200000007"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000007"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -90,9 +90,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-08
     claims:
-      repository_id: "200000008"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000008"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -100,9 +100,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-09
     claims:
-      repository_id: "200000009"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000009"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -110,9 +110,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-10
     claims:
-      repository_id: "200000010"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000010"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -120,9 +120,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-11
     claims:
-      repository_id: "200000011"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000011"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -130,9 +130,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-12
     claims:
-      repository_id: "200000012"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000012"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -140,9 +140,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-13
     claims:
-      repository_id: "200000013"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000013"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -150,9 +150,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-14
     claims:
-      repository_id: "200000014"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000014"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -160,9 +160,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-15
     claims:
-      repository_id: "200000015"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000015"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -170,9 +170,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-16
     claims:
-      repository_id: "200000016"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000016"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -180,9 +180,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-17
     claims:
-      repository_id: "200000017"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000017"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -190,9 +190,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-18
     claims:
-      repository_id: "200000018"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000018"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -200,9 +200,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-19
     claims:
-      repository_id: "200000019"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000019"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -210,9 +210,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-20
     claims:
-      repository_id: "200000020"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000020"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -220,9 +220,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-21
     claims:
-      repository_id: "200000021"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000021"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -230,9 +230,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-22
     claims:
-      repository_id: "200000022"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000022"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -240,9 +240,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-23
     claims:
-      repository_id: "200000023"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000023"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -250,9 +250,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-24
     claims:
-      repository_id: "200000024"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000024"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -260,9 +260,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-25
     claims:
-      repository_id: "200000025"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000025"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -270,9 +270,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-26
     claims:
-      repository_id: "200000026"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000026"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -280,9 +280,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-27
     claims:
-      repository_id: "200000027"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000027"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -290,9 +290,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-28
     claims:
-      repository_id: "200000028"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000028"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -300,9 +300,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-29
     claims:
-      repository_id: "200000029"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000029"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -310,9 +310,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-30
     claims:
-      repository_id: "200000030"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000030"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -320,9 +320,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-31
     claims:
-      repository_id: "200000031"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000031"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -330,9 +330,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-32
     claims:
-      repository_id: "200000032"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000032"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -340,9 +340,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-33
     claims:
-      repository_id: "200000033"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000033"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -350,9 +350,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-34
     claims:
-      repository_id: "200000034"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000034"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -360,9 +360,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-35
     claims:
-      repository_id: "200000035"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000035"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -370,9 +370,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-36
     claims:
-      repository_id: "200000036"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000036"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -380,9 +380,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-37
     claims:
-      repository_id: "200000037"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000037"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -390,9 +390,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-38
     claims:
-      repository_id: "200000038"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000038"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -400,9 +400,9 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: repo-39
     claims:
-      repository_id: "200000039"
-      ref: refs/heads/main
-      environment: prod
+      - repository_id: "200000039"
+        ref: refs/heads/main
+        environment: prod
     token:
       policies:
         - permissions: ["Workers Scripts Write"]

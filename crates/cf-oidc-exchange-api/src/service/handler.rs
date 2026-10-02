@@ -40,11 +40,10 @@ use super::config::Config;
 use crate::{
     audit::Audit,
     cloudflare::{BucketGrant, MintedToken, rfc3339, token_name},
-    github::{self, UserCheck},
     issuer::{self, ALGORITHM, IssueRequest},
     oidc::{self, Jwt, shown},
     service::config::{
-        CLOUDFLARE_AUDIENCE, Claims, PolicyConfig, ProfileConfig, ProviderConfig, ProviderType,
+        CLOUDFLARE_AUDIENCE, ClaimSet, Claims, PolicyConfig, ProfileConfig, ProviderConfig,
         clamp_ttl, r2_prefixes, select_profile,
     },
 };
@@ -81,6 +80,18 @@ fn public(err: Error) -> Error {
     }
 }
 
+/// The claims a provider's and a profile's claim sets match on: what's worth
+/// writing down about a caller, and copying into the broker's own tokens.
+fn names<'a>(provider: &'a ProviderConfig, profile: Option<&'a ProfileConfig>) -> Vec<&'a str> {
+    let profile = profile.map(|p| p.claims.as_slice()).unwrap_or_default();
+    provider
+        .claims
+        .iter()
+        .chain(profile)
+        .flat_map(ClaimSet::names)
+        .collect()
+}
+
 /// A verified caller of `/oauth/token`.
 struct Caller<'p> {
     provider: &'p ProviderConfig,
@@ -89,13 +100,11 @@ struct Caller<'p> {
 
 /// The broker's own exchange parameters, and what the caller asked for.
 struct Exchange<'r> {
-    kind: ProviderType,
     token: &'r str,
     /// Cloudflare, or a service the policy issues the broker's own tokens for.
     audience: &'r str,
     profile: Option<&'r str>,
     ttl: Option<&'r str>,
-    repository: Option<&'r str>,
 }
 
 impl<'r> Exchange<'r> {
@@ -141,22 +150,14 @@ impl<'r> Exchange<'r> {
                 format!("no profile is for audience {}", shown(audience)),
             ));
         }
-        let kind = match request.subject_token_type {
-            SubjectTokenType::UrnIetfParamsOauthTokenTypeIdToken
-            | SubjectTokenType::UrnIetfParamsOauthTokenTypeJwt => ProviderType::Oidc,
-            SubjectTokenType::UrnIetfParamsOauthTokenTypeAccessToken => ProviderType::GithubUser,
-        };
+        // `id_token` and `jwt` alike: an OIDC token is a JWT.
+        let (SubjectTokenType::UrnIetfParamsOauthTokenTypeIdToken
+        | SubjectTokenType::UrnIetfParamsOauthTokenTypeJwt) = request.subject_token_type;
         Ok(Self {
-            kind,
             token: &request.subject_token,
             audience,
             profile: request.profile.as_deref(),
             ttl: request.ttl.as_deref(),
-            // Only a person names the repo; a job's token already does.
-            repository: request
-                .repository
-                .as_deref()
-                .filter(|_| kind == ProviderType::GithubUser),
         })
     }
 }
@@ -179,52 +180,16 @@ impl ExchangeServiceHandler {
         cloudflare.cleanup(now_ms()).await
     }
 
-    /// Authenticates the caller, whose token is in the body.
+    /// Authenticates the caller, whose OIDC token is in the body: the provider
+    /// its issuer names, and its claims, once its signature and standard claims
+    /// check out.
     async fn authenticate<'p>(
-        config: &Config,
         policy: &'p PolicyConfig,
         exchange: &Exchange<'_>,
     ) -> Result<Caller<'p>, Error> {
-        if exchange.kind == ProviderType::Oidc {
-            let jwt = Jwt::decode(exchange.token)?;
-            let provider = oidc::provider_for(&jwt, &policy.providers)?;
-            let claims = oidc::verify(jwt, provider, now_ms()).await?;
-            return Ok(Caller { provider, claims });
-        }
-
-        // The provider for people, and its enabled profiles: none means a 404, so
-        // the broker doesn't call GitHub for people it serves nothing.
-        let provider = policy
-            .providers
-            .iter()
-            .find(|p| p.kind == ProviderType::GithubUser);
-        let profiles: Vec<&ProfileConfig> = policy
-            .profiles
-            .iter()
-            .filter(|p| Some(p.provider.as_str()) == provider.map(|p| p.name.as_str()) && p.enabled)
-            .collect();
-        let Some(provider) = provider.filter(|_| !profiles.is_empty()) else {
-            return Err(Error::new(ErrorCode::NotFound, "no profile is for people"));
-        };
-        // Teams cost extra GitHub calls, so they're only looked up if a profile
-        // that could match needs them.
-        let teams = profiles
-            .iter()
-            .filter(|p| exchange.profile.is_none_or(|name| p.name == name))
-            .any(|p| p.claims.contains_key("team_id"));
-        let owner_ids = provider
-            .claims
-            .get("repository_owner_id")
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let check = UserCheck { owner_ids, teams };
-        let claims = github::verify_user(
-            config.github_api(),
-            exchange.token,
-            exchange.repository,
-            check,
-        )
-        .await?;
+        let jwt = Jwt::decode(exchange.token)?;
+        let provider = oidc::provider_for(&jwt, &policy.providers)?;
+        let claims = oidc::verify(jwt, provider, now_ms()).await?;
         Ok(Caller { provider, claims })
     }
 
@@ -237,10 +202,8 @@ impl ExchangeServiceHandler {
     ) -> Result<TokenExchangeResponse, Error> {
         let key = config.signing_key().await?;
         let Caller { provider, claims } = caller;
-        let text = |name: &str| claims.get(name).and_then(Value::as_str);
-        let subject = match (provider.kind, text("actor_id"), text("sub")) {
-            (ProviderType::GithubUser, Some(actor_id), _) => format!("user:{actor_id}"),
-            (ProviderType::Oidc, _, Some(sub)) => sub.to_string(),
+        let subject = match claims.get("sub").and_then(Value::as_str) {
+            Some(sub) if !sub.is_empty() => sub.to_string(),
             _ => format!("{}:unknown", provider.name),
         };
         let now = now_ms() / 1000;
@@ -250,15 +213,20 @@ impl ExchangeServiceHandler {
             subject,
             provider: &provider.name,
             profile: &profile.name,
-            matched: profile.claims.keys().map(String::as_str).collect(),
+            matched: names(provider, Some(profile)),
             claims,
             ttl,
-            // A job's OIDC token has an expiry; a person's GitHub token doesn't.
+            // Never past the caller's own token.
             not_after: claims.get("exp").and_then(Value::as_u64),
         };
         let issued = issuer::issue(&key, &request, now).await?;
         Audit::new("token.issue")
-            .caller(Some(&provider.name), Some(&profile.name), Some(claims))
+            .caller(
+                Some(&provider.name),
+                Some(&profile.name),
+                Some(claims),
+                names(provider, Some(profile)),
+            )
             .with("audience", profile.audience.as_str())
             .with("jti", issued.jti.as_str())
             .with("expires_on", rfc3339(issued.expires_at * 1000))
@@ -285,7 +253,12 @@ impl ExchangeServiceHandler {
     ) -> Result<TokenExchangeResponse, Error> {
         let Caller { provider, claims } = caller;
         let audit = |event| {
-            Audit::new(event).caller(Some(&provider.name), Some(&profile.name), Some(claims))
+            Audit::new(event).caller(
+                Some(&provider.name),
+                Some(&profile.name),
+                Some(claims),
+                names(provider, Some(profile)),
+            )
         };
 
         // Filled in before anything is minted, so an unusable claim leaves nothing behind.
@@ -409,11 +382,11 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
             let mut profile: Option<String> = request.profile.clone();
             let exchanged = async {
                 let exchange = Exchange::read(&request, policy)?;
-                let verified = Self::authenticate(config, policy, &exchange).await?;
+                let verified = Self::authenticate(policy, &exchange).await?;
                 let caller = caller.insert(verified);
                 let selected = select_profile(
                     policy,
-                    &caller.provider.name,
+                    caller.provider,
                     &caller.claims,
                     exchange.profile,
                     exchange.audience,
@@ -435,6 +408,12 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                             caller.as_ref().map(|c| c.provider.name.as_str()),
                             profile.as_deref(),
                             caller.as_ref().map(|c| &c.claims),
+                            caller.as_ref().map_or_else(Vec::new, |c| {
+                                let named = profile.as_deref().and_then(|name| {
+                                    policy.profiles.iter().find(|p| p.name == name)
+                                });
+                                names(c.provider, named)
+                            }),
                         )
                         .with("error", err.error.as_str())
                         .with("message", err.message.as_str())
@@ -445,9 +424,11 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                         ErrorCode::BadRequest => v1::ExchangeTokenResponse::BadRequest(err),
                         ErrorCode::Unauthorized => v1::ExchangeTokenResponse::Unauthorized(err),
                         ErrorCode::Forbidden => v1::ExchangeTokenResponse::Forbidden(err),
-                        ErrorCode::NotFound => v1::ExchangeTokenResponse::NotFound(err),
                         ErrorCode::UpstreamError => v1::ExchangeTokenResponse::BadGateway(err),
-                        ErrorCode::Misconfigured | ErrorCode::InternalError => {
+                        // Nothing in an exchange is a 404.
+                        ErrorCode::NotFound
+                        | ErrorCode::Misconfigured
+                        | ErrorCode::InternalError => {
                             v1::ExchangeTokenResponse::InternalServerError(err)
                         }
                     }
@@ -570,12 +551,12 @@ mod tests {
 
     fn policy() -> PolicyConfig {
         let policy = json!({
-            "version": 2,
+            "version": 3,
             "issuer": "https://cf-oidc-exchange.example.com",
-            "providers": [{ "name": "github", "issuer": "https://token.actions.githubusercontent.com", "audience": "https://cf-oidc-exchange.example.com", "claims": { "repository_owner_id": "100000001" } }],
+            "providers": [{ "name": "github", "issuer": "https://token.actions.githubusercontent.com", "audience": "https://cf-oidc-exchange.example.com", "claims": [{ "repository_owner_id": "100000001" }] }],
             "profiles": [
-                { "name": "deploy", "claims": { "ref": "refs/heads/main" }, "token": { "policies": [{ "permissions": ["DNS Write"], "resources": { "com.cloudflare.api.account.zone.fedcba9876543210fedcba9876543210": "*" } }] } },
-                { "name": "nix-push", "audience": "https://cf-nix-cache.example.com", "claims": { "ref": "refs/heads/main" } },
+                { "name": "deploy", "claims": [{ "ref": "refs/heads/main" }], "token": { "policies": [{ "permissions": ["DNS Write"], "resources": { "com.cloudflare.api.account.zone.fedcba9876543210fedcba9876543210": "*" } }] } },
+                { "name": "nix-push", "audience": "https://cf-nix-cache.example.com", "claims": [{ "ref": "refs/heads/main" }] },
             ],
         });
         load_policy(&policy, None).unwrap()

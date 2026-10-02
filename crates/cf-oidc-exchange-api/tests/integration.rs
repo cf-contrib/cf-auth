@@ -60,7 +60,10 @@ mod token_exchange_for_jobs {
         );
 
         let created = world().cloudflare.tokens[&token_id(&res)].clone();
-        assert_eq!(created.name, "cf-oidc:example-org/api:1234567890:1");
+        assert_eq!(
+            created.name,
+            "cf-oidc:github:repo:example-org/api:environment:prod"
+        );
         assert_eq!(
             created.policies,
             json!([{
@@ -122,16 +125,16 @@ mod token_exchange_for_jobs {
             &mint,
             json!({
                 "profile": "workers-deploy",
+                "sub": "repo:example-org/api:environment:prod",
                 "repository": "example-org/api",
-                "repository_id": "200000003",
+                "repository_owner_id": OWNER_ID,
                 "ref": "refs/heads/main",
                 "environment": "prod",
-                "run_id": "1234567890",
-                "run_attempt": "1",
-                "actor_id": USER_ID,
                 "token_id": body["token_id"],
             }),
         );
+        // Only the claims the policy matches on, and the subject.
+        assert!(mint.get("run_id").is_none(), "{mint}");
         assert!(!t.log().contains(body["access_token"].as_str().unwrap()));
     }
 
@@ -167,7 +170,11 @@ mod token_exchange_for_jobs {
         let res = job_token(&sign(claims), &[]).await;
         assert_eq!(res.status, 403);
         assert_error(&res, "forbidden");
-        assert_refused(&t.deny().await, "forbidden", "no profile matches the token");
+        assert_refused(
+            &t.deny().await,
+            "forbidden",
+            "the token matches none of provider github's claim sets",
+        );
         assert_eq!(token_count(), 1); // only the broker token
     }
 
@@ -326,7 +333,7 @@ mod token_exchange_for_jobs_with_buckets {
     }
 
     fn state() -> Value {
-        json!({ "repository": "example-org/state-*", "environment": "state" })
+        json!([{ "repository": "example-org/state-*", "environment": "state" }])
     }
 
     fn state_repo(overrides: Value) -> String {
@@ -559,16 +566,10 @@ mod token_exchange_for_jobs_with_buckets {
                 "event": "r2.issued",
                 "provider": "github",
                 "profile": "terraform-state",
-                "repository": "example-org/state-app",
-                "repository_id": "200000003",
-                "ref": "refs/heads/main",
+                "sub": "repo:example-org/api:environment:prod",
                 "environment": "state",
-                "event_name": "push",
-                "workflow_ref": "example-org/api/.github/workflows/deploy.yml@refs/heads/main",
-                "job_workflow_ref": "example-org/api/.github/workflows/deploy.yml@refs/heads/main",
-                "run_id": "1234567890",
-                "run_attempt": "1",
-                "actor_id": USER_ID,
+                "repository": "example-org/state-app",
+                "repository_owner_id": OWNER_ID,
                 "bucket": "org-terraform-state",
                 "prefixes": ["github.com/example-org/state-app/"],
                 "permission": "object-read-write",
@@ -624,436 +625,6 @@ fn chrono_secs(rfc3339: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
         .unwrap()
         .timestamp()
-}
-
-mod token_exchange_for_people {
-    use super::*;
-
-    /// A person's profiles: a team's read-only state, and a token for one repo's writers.
-    fn with_user_profiles(extra: Value) {
-        let mut world = world();
-        let policy = world.policy();
-        policy["providers"].as_array_mut().unwrap().push(people());
-        let profiles = policy["profiles"].as_array_mut().unwrap();
-        profiles.push(json!({
-            "name": "tofu-plan",
-            "provider": "people",
-            "claims": { "team_id": TEAM_ID, "repository_permission": "read" },
-            "ttl": "30m",
-            "buckets": [{ "name": "org-terraform-state", "permission": "object-read-only", "prefixes": ["{repository_owner_id}/{repository_id}/"] }],
-        }));
-        profiles.push(json!({
-            "name": "infra-dns",
-            "provider": "people",
-            "claims": { "repository_id": "200000002", "repository_permission": "write" },
-            "token": { "policies": [{ "permissions": ["DNS Write"], "resources": { (format!("com.cloudflare.api.account.zone.{ZONE_ID}")): "*" } }] },
-        }));
-        profiles.extend(extra.as_array().unwrap().iter().cloned());
-    }
-
-    async fn setup() -> Test {
-        let t = start().await;
-        with_user_profiles(json!([]));
-        t
-    }
-
-    fn github_requests() -> Vec<String> {
-        world().github.requests.clone()
-    }
-
-    #[tokio::test]
-    async fn issues_state_credentials_under_the_prefix_githubs_ids_give() {
-        let _t = setup().await;
-        let res = user_token(
-            USER_TOKEN,
-            &[("profile", "tofu-plan"), ("repository", "example-org/api")],
-        )
-        .await;
-        assert_eq!(res.status, 200, "{}", res.text);
-        let body = res.json();
-        assert!(body.get("access_token").is_none());
-        assert_matches(
-            &body["buckets"][0],
-            json!({ "name": "org-terraform-state", "prefixes": [format!("{OWNER_ID}/200000003/")] }),
-        );
-        assert!(body["expires_at"].as_u64().unwrap() - now() <= 30 * 60 + 1);
-    }
-
-    #[tokio::test]
-    async fn accepts_a_numeric_repository_id() {
-        let _t = setup().await;
-        let res = user_token(
-            USER_TOKEN,
-            &[("profile", "tofu-plan"), ("repository", "200000003")],
-        )
-        .await;
-        assert_eq!(res.status, 200, "{}", res.text);
-        assert!(github_requests().contains(&"/repositories/200000003".to_string()));
-    }
-
-    #[tokio::test]
-    async fn mints_a_token_named_after_the_person_and_the_repo() {
-        let _t = setup().await;
-        let res = user_token(
-            USER_TOKEN,
-            &[
-                ("profile", "infra-dns"),
-                ("repository", "example-org/infra"),
-            ],
-        )
-        .await;
-        assert_eq!(res.status, 200, "{}", res.text);
-        assert_eq!(
-            world().cloudflare.tokens[&token_id(&res)].name,
-            "cf-oidc:user:octocat:example-org/infra"
-        );
-    }
-
-    #[tokio::test]
-    async fn writes_audit_lines_with_the_person_without_the_gh_token() {
-        let t = setup().await;
-        user_token(
-            USER_TOKEN,
-            &[
-                ("profile", "infra-dns"),
-                ("repository", "example-org/infra"),
-            ],
-        )
-        .await;
-        assert_matches(
-            &t.audit("token.mint").await.unwrap(),
-            json!({
-                "provider": "people",
-                "profile": "infra-dns",
-                "actor": "octocat",
-                "actor_id": USER_ID,
-                "repository": "example-org/infra",
-                "repository_id": "200000002",
-            }),
-        );
-        assert!(!t.log().contains(USER_TOKEN));
-    }
-
-    #[tokio::test]
-    async fn refuses_when_several_user_profiles_match_and_none_is_named() {
-        let t = setup().await;
-        // tofu-plan (team, read) and infra-dns (repo, write) both match example-org/infra.
-        assert_eq!(
-            user_token(USER_TOKEN, &[("repository", "example-org/infra")])
-                .await
-                .status,
-            403
-        );
-        let deny = t.deny().await;
-        assert_matches(&deny, json!({ "provider": "people" }));
-        assert_refused(&deny, "forbidden", "all match the token");
-    }
-
-    #[tokio::test]
-    async fn never_uses_a_jobs_profile_for_a_person() {
-        let t = setup().await;
-        // workers-deploy matches repository example-org/*, as this person's claims would.
-        let res = user_token(
-            USER_TOKEN,
-            &[
-                ("profile", "workers-deploy"),
-                ("repository", "example-org/api"),
-            ],
-        )
-        .await;
-        assert_eq!(res.status, 403);
-        assert_refused(
-            &t.deny().await,
-            "forbidden",
-            "profile workers-deploy isn't for provider people",
-        );
-    }
-
-    #[tokio::test]
-    async fn never_uses_a_persons_profile_for_a_job() {
-        let t = setup().await;
-        let res = job_token(&sign(github_claims(json!({}))), &[("profile", "tofu-plan")]).await;
-        assert_eq!(res.status, 403);
-        let deny = t.deny().await;
-        assert_matches(&deny, json!({ "provider": "github" }));
-        assert_refused(&deny, "forbidden", "profile ");
-    }
-
-    #[tokio::test]
-    async fn refuses_without_enough_access_to_the_repo() {
-        let t = setup().await;
-        // The person can only read example-org/infra; infra-dns needs write on 200000002.
-        world().github.repos[0].role = Some("read");
-        let res = user_token(
-            USER_TOKEN,
-            &[
-                ("profile", "infra-dns"),
-                ("repository", "example-org/infra"),
-            ],
-        )
-        .await;
-        assert_eq!(res.status, 403);
-        assert_refused(&t.deny().await, "forbidden", "profile ");
-        assert_eq!(token_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn refuses_outside_the_team() {
-        let t = setup().await;
-        world().github.teams.clear();
-        let res = user_token(
-            USER_TOKEN,
-            &[("profile", "tofu-plan"), ("repository", "example-org/api")],
-        )
-        .await;
-        assert_eq!(res.status, 403);
-        assert_refused(&t.deny().await, "forbidden", "profile ");
-    }
-
-    #[tokio::test]
-    async fn refuses_a_repo_outside_the_pinned_owner_without_looking_up_teams() {
-        let t = setup().await;
-        let res = user_token(
-            USER_TOKEN,
-            &[("profile", "tofu-plan"), ("repository", "other-org/infra")],
-        )
-        .await;
-        assert_eq!(res.status, 403);
-        assert_error(&res, "forbidden");
-        assert_refused(
-            &t.deny().await,
-            "forbidden",
-            "other-org/infra doesn't belong to the owner the provider pins",
-        );
-        assert!(
-            !github_requests()
-                .iter()
-                .any(|r| r.starts_with("/user/teams"))
-        );
-    }
-
-    #[tokio::test]
-    async fn refuses_a_repo_the_person_cant_see() {
-        let t = setup().await;
-        assert_eq!(
-            user_token(USER_TOKEN, &[("repository", "example-org/secret")])
-                .await
-                .status,
-            403
-        );
-        assert_refused(
-            &t.deny().await,
-            "forbidden",
-            "the repository doesn't exist, or the token can't see it",
-        );
-    }
-
-    #[tokio::test]
-    async fn looks_up_teams_only_when_a_profile_that_could_match_needs_them() {
-        let _t = setup().await;
-        user_token(
-            USER_TOKEN,
-            &[
-                ("profile", "infra-dns"),
-                ("repository", "example-org/infra"),
-            ],
-        )
-        .await;
-        assert!(
-            !github_requests()
-                .iter()
-                .any(|r| r.starts_with("/user/teams"))
-        );
-    }
-
-    #[tokio::test]
-    async fn refuses_a_github_app_installation_token_without_calling_github() {
-        let t = setup().await;
-        let res = user_token(
-            "ghs_exampleInstallationToken000000000000",
-            &[("repository", "example-org/api")],
-        )
-        .await;
-        assert_eq!(res.status, 401);
-        assert_refused(&t.deny().await, "unauthorized", "installation token");
-        assert!(github_requests().is_empty());
-    }
-
-    #[tokio::test]
-    async fn refuses_a_token_github_rejects() {
-        let t = setup().await;
-        assert_eq!(
-            user_token("gho_revoked", &[("repository", "example-org/api")])
-                .await
-                .status,
-            401
-        );
-        assert_refused(&t.deny().await, "unauthorized", "GitHub rejected the token");
-    }
-
-    #[tokio::test]
-    async fn rejects_a_request_without_a_token_without_calling_github() {
-        let t = setup().await;
-        let res = user_token("", &[("repository", "example-org/api")]).await;
-        assert_eq!(res.status, 400);
-        assert_refused(&t.deny().await, "bad_request", "");
-        assert!(github_requests().is_empty());
-    }
-
-    #[tokio::test]
-    async fn rejects_a_bad_repository_without_calling_github() {
-        let _t = setup().await;
-        for repository in ["example-org", "a/b/c", "example org/api"] {
-            assert_eq!(
-                user_token(USER_TOKEN, &[("repository", repository)])
-                    .await
-                    .status,
-                400,
-                "{repository}"
-            );
-        }
-        assert!(github_requests().is_empty());
-    }
-
-    #[tokio::test]
-    async fn without_a_repository_only_asks_github_who_the_person_is() {
-        let t = setup().await;
-        // Every profile here needs a role on a repo, so none matches.
-        assert_eq!(user_token(USER_TOKEN, &[]).await.status, 403);
-        let deny = t.deny().await;
-        assert_matches(&deny, json!({ "provider": "people", "actor_id": USER_ID }));
-        assert_refused(&deny, "forbidden", "no profile matches the token");
-        assert_eq!(github_requests(), ["/user"]);
-    }
-
-    #[tokio::test]
-    async fn issues_to_a_person_on_a_profiles_list_with_one_github_call() {
-        let _t = start().await;
-        with_user_profiles(json!([{
-            "name": "on-call",
-            "provider": "people",
-            "claims": { "actor_id": [USER_ID, "300000099"] },
-            "buckets": [{ "name": "org-terraform-state", "permission": "object-read-only", "prefixes": ["shared/"] }],
-        }]));
-        let res = user_token(USER_TOKEN, &[("profile", "on-call")]).await;
-        assert_eq!(res.status, 200, "{}", res.text);
-        assert_eq!(res.json()["buckets"][0]["prefixes"], json!(["shared/"]));
-        assert_eq!(github_requests(), ["/user"]);
-    }
-
-    #[tokio::test]
-    async fn refuses_a_person_who_isnt_on_the_list() {
-        let t = start().await;
-        with_user_profiles(json!([{
-            "name": "on-call",
-            "provider": "people",
-            "claims": { "actor_id": "300000099" },
-            "buckets": [{ "name": "org-terraform-state", "permission": "object-read-only", "prefixes": ["shared/"] }],
-        }]));
-        assert_eq!(
-            user_token(USER_TOKEN, &[("profile", "on-call")])
-                .await
-                .status,
-            403
-        );
-        assert_refused(&t.deny().await, "forbidden", "profile ");
-    }
-
-    #[tokio::test]
-    async fn answers_not_found_when_no_profile_is_for_people_without_calling_github() {
-        let _t = start().await;
-        assert_eq!(
-            user_token(USER_TOKEN, &[("repository", "example-org/api")])
-                .await
-                .status,
-            404
-        );
-        assert!(github_requests().is_empty());
-    }
-
-    #[tokio::test]
-    async fn answers_not_found_when_every_profile_for_people_is_disabled() {
-        let _t = setup().await;
-        for profile in world().policy()["profiles"].as_array_mut().unwrap() {
-            if profile["provider"] == "people" {
-                profile["enabled"] = json!(false);
-            }
-        }
-        assert_eq!(
-            user_token(USER_TOKEN, &[("repository", "example-org/api")])
-                .await
-                .status,
-            404
-        );
-        assert!(github_requests().is_empty());
-    }
-
-    #[tokio::test]
-    async fn refuses_when_the_token_cant_list_teams() {
-        let t = setup().await;
-        // What GitHub answers a classic token without the repo, read:org or user scope.
-        world().github.fail = Some(GitHubFailure {
-            path: "/user/teams",
-            status: 404,
-            headers: vec![],
-        });
-        let res = user_token(
-            USER_TOKEN,
-            &[("profile", "tofu-plan"), ("repository", "example-org/api")],
-        )
-        .await;
-        assert_eq!(res.status, 403);
-        assert_refused(&t.deny().await, "forbidden", "can't list its user's teams");
-        assert_eq!(token_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn refuses_when_the_token_isnt_authorized_for_saml_sso() {
-        let t = setup().await;
-        world().github.fail = Some(GitHubFailure {
-            path: "/repos/",
-            status: 403,
-            headers: vec![(
-                "x-github-sso",
-                "required; url=https://github.com/orgs/x/sso",
-            )],
-        });
-        assert_eq!(
-            user_token(USER_TOKEN, &[("repository", "example-org/api")])
-                .await
-                .status,
-            403
-        );
-        assert_refused(&t.deny().await, "forbidden", "SAML SSO");
-    }
-
-    #[tokio::test]
-    async fn fails_when_github_does() {
-        let failures = [
-            (403, vec![("x-ratelimit-remaining", "0")]),
-            (429, vec![]),
-            (503, vec![]),
-        ];
-        for (status, headers) in failures {
-            let t = setup().await;
-            world().github.fail = Some(GitHubFailure {
-                path: "/user",
-                status,
-                headers,
-            });
-            let res = user_token(
-                USER_TOKEN,
-                &[
-                    ("profile", "infra-dns"),
-                    ("repository", "example-org/infra"),
-                ],
-            )
-            .await;
-            assert_eq!(res.status, 502, "{status}");
-            assert_refused(&t.deny().await, "upstream_error", "GitHub: /user");
-            drop(t);
-        }
-    }
 }
 
 mod revocation {
@@ -1274,7 +845,7 @@ mod exchange_requests {
     #[tokio::test]
     async fn rejects_what_it_doesnt_support_without_calling_anyone() {
         type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str);
-        let cases: [Case; 6] = [
+        let cases: [Case; 7] = [
             (
                 "another grant type",
                 &[("grant_type", "client_credentials")],
@@ -1286,6 +857,15 @@ mod exchange_requests {
                 &[(
                     "subject_token_type",
                     "urn:ietf:params:oauth:token-type:saml2",
+                )],
+                "",
+            ),
+            // Only OIDC tokens: a GitHub user token isn't one.
+            (
+                "an access token",
+                &[(
+                    "subject_token_type",
+                    "urn:ietf:params:oauth:token-type:access_token",
                 )],
                 "",
             ),
@@ -1328,7 +908,6 @@ mod exchange_requests {
                 deny["message"].as_str().unwrap_or_default().contains(says),
                 "{case}: {deny}"
             );
-            assert!(world().github.requests.is_empty(), "{case}");
             assert!(world().cloudflare.calls().is_empty(), "{case}");
             drop(t);
         }
@@ -1393,11 +972,11 @@ mod providers {
             let mut world = world();
             let policy = world.policy();
             policy["providers"].as_array_mut().unwrap().push(json!({
-                "name": "gitlab", "issuer": gitlab, "audience": AUDIENCE, "claims": { "namespace_id": "4000001" },
+                "name": "gitlab", "issuer": gitlab, "audience": AUDIENCE, "claims": [{ "namespace_id": "4000001" }],
             }));
             let profiles = policy["profiles"].as_array_mut().unwrap();
-            profiles.push(json!({ "name": "gitlab-deploy", "provider": "gitlab", "claims": { "project_path": "group/app", "ref_protected": "true" }, "token": deploy_token() }));
-            profiles.push(json!({ "name": "gitlab-cache", "provider": "gitlab", "audience": CACHE, "claims": { "project_path": "group/*" } }));
+            profiles.push(json!({ "name": "gitlab-deploy", "provider": "gitlab", "claims": [{ "project_path": "group/app", "ref_protected": "true" }], "token": deploy_token() }));
+            profiles.push(json!({ "name": "gitlab-cache", "provider": "gitlab", "audience": CACHE, "claims": [{ "project_path": "group/*" }] }));
         }
         (t, gitlab)
     }
@@ -1434,7 +1013,11 @@ mod providers {
         assert_eq!(res.status, 403);
         let deny = t.deny().await;
         assert_matches(&deny, json!({ "provider": "gitlab" }));
-        assert_refused(&deny, "forbidden", "no profile matches the token");
+        assert_refused(
+            &deny,
+            "forbidden",
+            "the token matches none of provider gitlab's claim sets",
+        );
     }
 
     #[tokio::test]
@@ -1506,6 +1089,30 @@ mod providers {
         assert_eq!(res.status, 200, "{}", res.text);
     }
 
+    /// Any claim can fill a bucket prefix, not only GitHub's: GitLab's
+    /// `project_path` spans segments, as the template's one placeholder.
+    #[tokio::test]
+    async fn fills_bucket_prefixes_from_another_issuers_claims() {
+        let (_t, gitlab) = setup().await;
+        world().policy()["profiles"].as_array_mut().unwrap().push(json!({
+            "name": "gitlab-state",
+            "provider": "gitlab",
+            "claims": [{ "project_path": "group/*", "ref": "main" }],
+            "buckets": [{ "name": "org-terraform-state", "permission": "object-read-write", "prefixes": ["gitlab.com/{project_path}/", "{namespace_id}/{project_id}/"] }],
+        }));
+        let claims = gitlab_claims(json!({ "project_path": "group/sub/app" }));
+        let res = job_token(
+            &gitlab_token(&gitlab, claims),
+            &[("profile", "gitlab-state")],
+        )
+        .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(
+            res.json()["buckets"][0]["prefixes"],
+            json!(["gitlab.com/group/sub/app/", "4000001/500000001/"])
+        );
+    }
+
     #[tokio::test]
     async fn issues_another_providers_caller_a_service_token_with_the_matched_claims() {
         let (_t, gitlab) = setup().await;
@@ -1541,10 +1148,8 @@ mod tokens_for_other_services {
         let t = start().await;
         let mut world = world();
         let policy = world.policy();
-        policy["providers"].as_array_mut().unwrap().push(people());
         let profiles = policy["profiles"].as_array_mut().unwrap();
-        profiles.push(json!({ "name": "nix-push", "provider": "github", "audience": CACHE, "claims": { "ref": "refs/heads/main" }, "ttl": "15m" }));
-        profiles.push(json!({ "name": "nix-push-people", "provider": "people", "audience": CACHE, "claims": { "repository_permission": "write" }, "ttl": "30m" }));
+        profiles.push(json!({ "name": "nix-push", "provider": "github", "audience": CACHE, "claims": [{ "ref": "refs/heads/main" }], "ttl": "15m" }));
         drop(world);
         t
     }
@@ -1588,11 +1193,15 @@ mod tokens_for_other_services {
                 "sub": sub,
                 "provider": "github",
                 "profile": "nix-push",
-                "repository": "example-org/api",
+                // What the profile and its provider match on, so the service can too.
                 "repository_owner_id": OWNER_ID,
                 "ref": "refs/heads/main",
-                "run_id": "1234567890",
             }),
+        );
+        // Nothing else of the job's token.
+        assert!(
+            claims.get("repository").is_none() && claims.get("run_id").is_none(),
+            "{claims}"
         );
         assert!(claims["jti"].is_string());
         // Only the identity: no API token, no R2 credentials.
@@ -1612,34 +1221,6 @@ mod tokens_for_other_services {
         // The profile's ttl is 15m; the GitHub token's 2m wins.
         let lives = body["expires_at"].as_u64().unwrap() - before;
         assert!(lives > 60 && lives <= 2 * 60 + 1, "{lives}");
-    }
-
-    #[tokio::test]
-    async fn issues_a_person_a_token_named_after_their_github_user() {
-        let _t = setup().await;
-        let before = now();
-        let res = for_cache(
-            USER_TOKEN,
-            ACCESS_TOKEN,
-            &[("repository", "example-org/infra")],
-        )
-        .await;
-        assert_eq!(res.status, 200, "{}", res.text);
-        let body = res.json();
-        let (_, claims) = verify_broker_token(body["access_token"].as_str().unwrap()).await;
-        assert_matches(
-            &claims,
-            json!({
-                "sub": format!("user:{USER_ID}"),
-                "actor": "octocat",
-                "repository": "example-org/infra",
-                "repository_permission": "write",
-                "profile": "nix-push-people",
-            }),
-        );
-        // A GitHub user token doesn't expire, so the profile's 30m applies.
-        let lives = body["expires_at"].as_u64().unwrap() - before;
-        assert!(lives > 29 * 60 && lives <= 30 * 60 + 1, "{lives}");
     }
 
     #[tokio::test]
@@ -1687,7 +1268,6 @@ mod tokens_for_other_services {
         .await;
         assert_eq!(res.status, 400);
         assert_refused(&t.deny().await, "bad_request", "no profile is for audience");
-        assert!(world().github.requests.is_empty());
     }
 
     #[tokio::test]

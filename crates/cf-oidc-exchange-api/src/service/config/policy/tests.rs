@@ -1,38 +1,35 @@
-//! Ported from the TypeScript broker's `test/policy.test.ts`. All IDs are made up.
+//! The policy's loading, guardrails, matching and bucket prefixes. All IDs are made up.
 
 use cf_oidc_exchange_sdk::v1::Error;
 use serde_json::{Value, json};
 
-use super::{
-    matching::{glob, matches},
-    *,
-};
+use super::*;
 
 const ACCOUNT_ID: &str = "0123456789abcdef0123456789abcdef";
 const ZONE_ID: &str = "fedcba9876543210fedcba9876543210";
 const OWNER_ID: &str = "100000001";
-const USER_ID: &str = "300000004";
-const TEAM_ID: &str = "400000005";
 const AUDIENCE: &str = "https://cf-oidc-exchange.example.com";
 const CACHE: &str = "https://cf-nix-cache.example.com";
+const GITHUB_ACTIONS: &str = "https://token.actions.githubusercontent.com";
 
-/// A version 2 policy: one GitHub Actions provider, `github`, and three profiles for it.
+/// A version 3 policy: one GitHub Actions provider, `github`, pinned to the test
+/// org, and three profiles for it.
 fn policy() -> Value {
     json!({
-        "version": 2,
+        "version": 3,
         "issuer": AUDIENCE,
         "providers": [{
             "name": "github",
-            "issuer": GITHUB_ACTIONS_ISSUER,
+            "issuer": GITHUB_ACTIONS,
             "audience": AUDIENCE,
-            "claims": { "repository_owner_id": OWNER_ID },
+            "claims": [{ "repository_owner_id": OWNER_ID }],
         }],
         "defaults": { "ttl": "15m", "max_ttl": "1h" },
         "profiles": [
             {
                 "name": "infra-cloudflare",
                 "provider": "github",
-                "claims": { "repository_id": "200000002", "ref": "refs/heads/main", "environment": "prod" },
+                "claims": [{ "repository_id": "200000002", "ref": "refs/heads/main", "environment": "prod" }],
                 "ttl": "15m",
                 "token": { "policies": [{
                     "effect": "allow",
@@ -43,7 +40,7 @@ fn policy() -> Value {
             {
                 "name": "workers-deploy",
                 "provider": "github",
-                "claims": { "repository": "example-org/*", "ref": "refs/heads/main", "environment": "prod" },
+                "claims": [{ "repository": "example-org/*", "ref": "refs/heads/main", "environment": "prod" }],
                 "token": { "policies": [{
                     "effect": "allow",
                     "permissions": ["Workers Scripts Write"],
@@ -53,7 +50,7 @@ fn policy() -> Value {
             {
                 "name": "service-dns",
                 "provider": "github",
-                "claims": { "job_workflow_ref": "example-org/workflows/.github/workflows/deploy.yml@refs/heads/main" },
+                "claims": [{ "job_workflow_ref": "example-org/workflows/.github/workflows/deploy.yml@refs/heads/main" }],
                 "ttl": "5m",
                 "token": { "policies": [{
                     "effect": "allow",
@@ -65,9 +62,9 @@ fn policy() -> Value {
     })
 }
 
-/// The provider for people's GitHub tokens, pinned to the test org.
-fn people() -> Value {
-    json!({ "name": "people", "issuer": "https://github.com", "claims": { "repository_owner_id": OWNER_ID } })
+/// A GitLab provider, for tests about several providers.
+fn gitlab() -> Value {
+    json!({ "name": "gitlab", "issuer": "https://gitlab.com", "audience": AUDIENCE, "claims": [{ "namespace_id": "4000001" }] })
 }
 
 /// Sets the value at a JSON pointer, adding the key if it's not there. `null` removes it.
@@ -95,10 +92,6 @@ fn push(target: &mut Value, pointer: &str, value: Value) {
         .push(value);
 }
 
-fn get(target: &Value, pointer: &str) -> Value {
-    target.pointer(pointer).unwrap().clone()
-}
-
 /// `base` with `overrides` applied; a `null` override removes the claim.
 fn with(base: Value, overrides: Value) -> Claims {
     let Value::Object(mut claims) = base else {
@@ -114,22 +107,18 @@ fn with(base: Value, overrides: Value) -> Claims {
     claims
 }
 
+/// A GitHub Actions job's claims.
 fn github_claims(overrides: Value) -> Claims {
     let base = json!({
+        "iss": GITHUB_ACTIONS,
+        "sub": "repo:example-org/api:environment:prod",
         "repository": "example-org/api",
         "repository_id": "200000003",
         "repository_owner": "example-org",
         "repository_owner_id": OWNER_ID,
         "ref": "refs/heads/main",
-        "ref_type": "branch",
         "environment": "prod",
-        "event_name": "push",
-        "workflow_ref": "example-org/api/.github/workflows/deploy.yml@refs/heads/main",
-        "job_workflow_ref": "example-org/api/.github/workflows/deploy.yml@refs/heads/main",
         "run_id": "1234567890",
-        "run_attempt": "1",
-        "actor_id": USER_ID,
-        "runner_environment": "github-hosted",
     });
     with(base, overrides)
 }
@@ -146,6 +135,17 @@ fn issues(input: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The one issue a policy has, which must start with `at` and contain `says`.
+#[track_caller]
+fn assert_issue(input: &Value, at: &str, says: &str) {
+    let found = issues(input);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].starts_with(at) && found[0].contains(says),
+        "{found:?}"
+    );
+}
+
 fn profile<'a>(policy: &'a PolicyConfig, name: &str) -> &'a ProfileConfig {
     policy.profiles.iter().find(|p| p.name == name).unwrap()
 }
@@ -155,17 +155,28 @@ fn denial<T>(result: Result<T, Error>) -> Option<String> {
     result.err().map(|err| err.message)
 }
 
+/// Selects a Cloudflare profile for a token from `provider`.
 fn select<'a>(
     policy: &'a PolicyConfig,
     provider: &str,
     claims: &Claims,
     requested: Option<&str>,
 ) -> Result<&'a ProfileConfig, Error> {
-    select_profile(policy, provider, claims, requested, CLOUDFLARE_AUDIENCE)
+    select_profile(
+        policy,
+        provider_of(policy, provider),
+        claims,
+        requested,
+        CLOUDFLARE_AUDIENCE,
+    )
 }
 
-fn strings(values: &[&str]) -> Vec<String> {
-    values.iter().map(|v| v.to_string()).collect()
+fn provider_of<'a>(policy: &'a PolicyConfig, name: &str) -> &'a ProviderConfig {
+    policy.providers.iter().find(|p| p.name == name).unwrap()
+}
+
+fn set_of(value: Value) -> ClaimSet {
+    serde_json::from_value(value).unwrap()
 }
 
 mod parse_duration {
@@ -191,36 +202,6 @@ mod parse_duration {
     }
 }
 
-mod glob {
-    use super::*;
-
-    #[test]
-    fn matches_exact_strings_without_star() {
-        assert!(glob("refs/heads/main", "refs/heads/main"));
-        assert!(!glob("refs/heads/main", "refs/heads/main2"));
-    }
-
-    #[test]
-    fn lets_star_span_any_characters_including_slash() {
-        assert!(glob("example-org/*", "example-org/api"));
-        assert!(glob("refs/heads/release/*", "refs/heads/release/2026/09"));
-        assert!(!glob("example-org/*", "other-org/api"));
-    }
-
-    #[test]
-    fn treats_regex_metacharacters_literally() {
-        assert!(glob("a.b*", "a.bc"));
-        assert!(!glob("a.b*", "axbc"));
-    }
-
-    #[test]
-    fn only_treats_a_trailing_star_after_a_prefix_as_a_wildcard() {
-        assert!(glob("example-org/*", "example-org/"));
-        assert!(!glob("*", "anything"));
-        assert!(!glob("a*b", "axb"));
-    }
-}
-
 mod load_policy {
     use super::*;
 
@@ -232,15 +213,15 @@ mod load_policy {
             p.providers,
             vec![ProviderConfig {
                 name: "github".into(),
-                kind: ProviderType::Oidc,
-                issuer: GITHUB_ACTIONS_ISSUER.into(),
-                audience: Some(AUDIENCE.into()),
+                issuer: GITHUB_ACTIONS.into(),
+                audience: AUDIENCE.into(),
                 jwks_uri: None,
-                claims: [("repository_owner_id".to_string(), strings(&[OWNER_ID]))].into(),
+                claims: vec![set_of(json!({ "repository_owner_id": OWNER_ID }))],
             }]
         );
         let deploy = profile(&p, "workers-deploy");
         assert_eq!(deploy.provider, "github");
+        assert_eq!(deploy.audience, CLOUDFLARE_AUDIENCE);
         assert_eq!(deploy.ttl, 15 * 60_000);
         assert_eq!(deploy.max_ttl, 60 * 60_000);
         assert_eq!(deploy.policies.as_ref().unwrap()[0].effect, Effect::Allow);
@@ -253,13 +234,6 @@ mod load_policy {
     }
 
     #[test]
-    fn adds_the_providers_claims_to_every_profile() {
-        for profile in load(&policy()).profiles {
-            assert_eq!(profile.claims["repository_owner_id"], strings(&[OWNER_ID]));
-        }
-    }
-
-    #[test]
     fn lets_profiles_leave_the_provider_out_when_theres_only_one() {
         let mut p = policy();
         for i in 0..3 {
@@ -269,85 +243,18 @@ mod load_policy {
     }
 
     #[test]
-    fn accepts_unquoted_numeric_ids_from_yaml() {
-        let mut p = policy();
-        set(
-            &mut p,
-            "/providers/0/claims/repository_owner_id",
-            json!(100000001),
-        );
-        set(&mut p, "/profiles/0/claims/repository_id", json!(200000002));
-        let loaded = load(&p);
-        assert_eq!(
-            loaded.providers[0].claims["repository_owner_id"],
-            strings(&[OWNER_ID])
-        );
-        assert_eq!(
-            loaded.profiles[0].claims["repository_id"],
-            strings(&["200000002"])
-        );
-    }
-
-    #[test]
-    fn rejects_negative_and_fractional_numbers() {
-        for value in [json!(-1), json!(1.5), json!(true)] {
-            let mut p = policy();
-            set(&mut p, "/profiles/0/claims/repository_id", value);
-            let found = issues(&p);
+    fn refuses_older_versions_with_a_pointer_to_what_changed() {
+        for version in [1, 2] {
+            let found = issues(&json!({ "version": version, "providers": [], "profiles": [] }));
             assert_eq!(found.len(), 1);
             assert!(
-                found[0].starts_with("profiles.0.claims.repository_id: "),
+                found[0].starts_with(&format!("version {version} is no longer supported")),
                 "{found:?}"
             );
         }
-    }
-
-    #[test]
-    fn takes_one_value_or_a_list_and_loads_both_as_a_list() {
         let mut p = policy();
-        set(
-            &mut p,
-            "/profiles/1/claims/ref",
-            json!(["refs/heads/main", "refs/heads/release/*"]),
-        );
-        set(
-            &mut p,
-            "/providers/0/claims/repository_owner_id",
-            json!([100000001, "100000002"]),
-        );
-        let loaded = load(&p);
-        assert_eq!(
-            loaded.profiles[1].claims["ref"],
-            strings(&["refs/heads/main", "refs/heads/release/*"])
-        );
-        assert_eq!(
-            loaded.profiles[1].claims["repository_owner_id"],
-            strings(&[OWNER_ID, "100000002"])
-        );
-    }
-
-    #[test]
-    fn rejects_an_empty_list() {
-        let mut p = policy();
-        set(&mut p, "/profiles/1/claims/ref", json!([]));
-        assert!(issues(&p).join(",").contains("profiles.1.claims.ref"));
-    }
-
-    #[test]
-    fn rejects_an_empty_value() {
-        let mut p = policy();
-        set(&mut p, "/profiles/1/claims/ref", json!(""));
-        assert_eq!(issues(&p), ["profiles.1.claims.ref: must not be empty"]);
-    }
-
-    #[test]
-    fn refuses_version_1_with_a_pointer_to_the_migration() {
-        assert_eq!(
-            issues(&json!({ "version": 1, "github": {}, "profiles": [] })),
-            [
-                "version 1 is no longer supported: move github: to providers: and match: to claims: (see the broker README's migration table)"
-            ]
-        );
+        set(&mut p, "/version", json!(4));
+        assert_eq!(issues(&p), ["version: must be 3"]);
     }
 
     #[test]
@@ -360,10 +267,6 @@ mod load_policy {
         let mut p = policy();
         set(&mut p, "/extra", json!(true));
         assert_eq!(issues(&p), ["extra: unknown key"]);
-    }
-
-    #[test]
-    fn rejects_the_old_token_ttl() {
         let mut p = policy();
         set(&mut p, "/profiles/1/token/ttl", json!("10m"));
         assert_eq!(issues(&p), ["profiles.1.token.ttl: unknown key"]);
@@ -375,7 +278,7 @@ mod load_policy {
         #[test]
         fn rejects_duplicate_names_and_issuers() {
             let mut p = policy();
-            let first = get(&p, "/providers/0");
+            let first = p["providers"][0].clone();
             push(&mut p, "/providers", first);
             assert_eq!(
                 issues(&p),
@@ -387,44 +290,43 @@ mod load_policy {
         }
 
         #[test]
-        fn requires_an_issuer() {
+        fn requires_an_issuer_an_audience_and_claims() {
+            for field in ["issuer", "audience", "claims"] {
+                let mut p = policy();
+                set(&mut p, &format!("/providers/0/{field}"), Value::Null);
+                assert_eq!(
+                    issues(&p),
+                    [format!("providers.0.{field}: required")],
+                    "{field}"
+                );
+            }
             let mut p = policy();
-            push(
-                &mut p,
-                "/providers",
-                json!({ "name": "other", "claims": {} }),
-            );
-            assert_eq!(issues(&p), ["providers.1.issuer: required"]);
+            set(&mut p, "/providers/0/audience", json!(""));
+            assert_eq!(issues(&p), ["providers.0.audience: must not be empty"]);
         }
 
         #[test]
-        fn requires_an_audience_for_an_oidc_issuer() {
+        fn one_requires_every_provider_to_be_pinned() {
             let mut p = policy();
-            let other =
-                json!({ "name": "other", "issuer": "https://issuer.example.com", "claims": {} });
-            push(&mut p, "/providers", other);
+            set(&mut p, "/providers/0/claims", json!([]));
             assert_eq!(
                 issues(&p),
-                ["providers.1 (other).audience: required for an OIDC issuer"]
+                ["providers.0.claims: must list at least one claim set"]
+            );
+            set(&mut p, "/providers/0/claims", json!([{}]));
+            assert_issue(
+                &p,
+                "providers.0.claims.0",
+                "a claim set must match at least one claim",
             );
         }
 
         #[test]
-        fn treats_github_com_as_peoples_tokens_and_any_other_issuer_as_oidc() {
+        fn takes_any_issuer_by_its_claims() {
             let mut p = policy();
-            push(&mut p, "/providers", people());
-            let kinds: Vec<_> = load(&p)
-                .providers
-                .into_iter()
-                .map(|r| (r.name, r.kind))
-                .collect();
-            assert_eq!(
-                kinds,
-                [
-                    ("github".to_string(), ProviderType::Oidc),
-                    ("people".to_string(), ProviderType::GithubUser),
-                ]
-            );
+            push(&mut p, "/providers", gitlab());
+            let loaded = load(&p);
+            assert_eq!(loaded.providers[1].issuer, "https://gitlab.com");
         }
 
         #[test]
@@ -437,187 +339,109 @@ mod load_policy {
                 ("http://issuer.example.com", false),
             ] {
                 let mut p = policy();
-                let local = json!({ "name": "local", "issuer": issuer, "audience": AUDIENCE, "claims": {} });
+                let mut local = gitlab();
+                set(&mut local, "/issuer", json!(issuer));
                 push(&mut p, "/providers", local);
                 let refused = issues(&p).join(",").contains("must be an https:// URL");
                 assert_eq!(refused, !ok, "{issuer}");
             }
+            let mut p = policy();
+            set(
+                &mut p,
+                "/providers/0/jwks_uri",
+                json!("http://keys.example.com"),
+            );
+            assert_issue(&p, "providers.0.jwks_uri", "must be an https:// URL");
+        }
+    }
+
+    mod claim_sets {
+        use super::*;
+
+        #[test]
+        fn two_keeps_patterns_narrow_and_ids_exact() {
+            let mut p = policy();
+            set(&mut p, "/profiles/0/claims/0/repository_id", json!("2000*"));
+            assert_issue(
+                &p,
+                "profiles.0.claims.0",
+                "claim repository_id: ID claims must match exactly",
+            );
+
+            for pattern in ["*", "*/api", "example-org/*/api", "example-org/**"] {
+                let mut p = policy();
+                set(&mut p, "/profiles/1/claims/0/repository", json!(pattern));
+                assert_issue(
+                    &p,
+                    "profiles.1.claims.0",
+                    "claim repository: * may only end a pattern, after a prefix",
+                );
+            }
         }
 
         #[test]
-        fn refuses_an_audience_on_the_provider_for_people() {
+        fn checks_provider_claim_sets_the_same_way() {
             let mut p = policy();
-            let mut provider = people();
-            set(&mut provider, "/audience", json!(AUDIENCE));
-            push(&mut p, "/providers", provider);
-            assert_eq!(
-                issues(&p),
-                [
-                    "providers.1 (people).audience: not for https://github.com, whose tokens aren't OIDC tokens"
-                ]
+            set(
+                &mut p,
+                "/providers/0/claims/0/repository_owner_id",
+                json!("1000*"),
             );
+            assert_issue(&p, "providers.0.claims.0", "ID claims must match exactly");
         }
 
         #[test]
-        fn allows_one_provider_for_people_like_any_issuer() {
+        fn takes_numbers_and_booleans_as_written() {
             let mut p = policy();
-            let mut more = people();
-            set(&mut more, "/name", json!("more-people"));
-            push(&mut p, "/providers", people());
-            push(&mut p, "/providers", more);
-            assert_eq!(
-                issues(&p),
-                ["providers.2 (more-people).issuer: another provider has the same issuer"]
+            set(
+                &mut p,
+                "/providers/0/claims/0/repository_owner_id",
+                json!(100000001),
             );
+            set(
+                &mut p,
+                "/profiles/1/claims/0/runner_environment_trusted",
+                json!(true),
+            );
+            let loaded = load(&p);
+            let deploy = profile(&loaded, "workers-deploy");
+            assert!(loaded.providers[0].takes(&github_claims(json!({}))));
+            assert!(deploy.matches(&github_claims(
+                json!({ "runner_environment_trusted": true })
+            )));
+            assert!(!deploy.matches(&github_claims(
+                json!({ "runner_environment_trusted": false })
+            )));
         }
 
         #[test]
-        fn only_lets_the_provider_for_people_pin_the_owner_and_who() {
+        fn rejects_values_that_arent_patterns() {
+            for value in [json!(""), json!(-1), json!(1.5), json!(["a"])] {
+                let mut p = policy();
+                set(&mut p, "/profiles/0/claims/0/ref", value.clone());
+                assert_issue(
+                    &p,
+                    "profiles.0.claims.0",
+                    "claim ref must be a non-empty string, a number or a boolean",
+                );
+            }
+        }
+
+        #[test]
+        fn requires_profiles_to_list_claim_sets() {
             let mut p = policy();
-            let mut provider = people();
-            set(&mut provider, "/claims/team_id", json!(TEAM_ID));
-            push(&mut p, "/providers", provider);
+            set(&mut p, "/profiles/0/claims", json!([]));
             assert_eq!(
                 issues(&p),
-                [
-                    "providers.1 (people).claims.team_id: a provider for people pins repository_owner_id or actor_id; the rest go on profiles"
-                ]
+                ["profiles.0.claims: must list at least one claim set"]
             );
+            set(&mut p, "/profiles/0/claims", Value::Null);
+            assert_eq!(issues(&p), ["profiles.0.claims: required"]);
         }
     }
 
     mod guardrails {
         use super::*;
-
-        #[test]
-        fn one_requires_github_actions_providers_to_pin_the_owner() {
-            let mut p = policy();
-            set(&mut p, "/providers/0/claims", json!({}));
-            assert_eq!(
-                issues(&p),
-                [format!(
-                    "providers.0 (github).claims: must pin repository_owner_id: {GITHUB_ACTIONS_ISSUER} issues tokens to anyone's projects"
-                )]
-            );
-        }
-
-        #[test]
-        fn one_requires_multi_tenant_issuers_to_pin_the_tenant() {
-            let enterprise = format!("{GITHUB_ACTIONS_ISSUER}/example-enterprise");
-            for (issuer, pin) in [
-                ("https://gitlab.com", "namespace_id or project_id"),
-                ("https://app.terraform.io", "terraform_organization_id"),
-                (enterprise.as_str(), "repository_owner_id"),
-            ] {
-                let mut p = policy();
-                let other = json!({ "name": "other", "issuer": issuer, "audience": AUDIENCE, "claims": {} });
-                push(&mut p, "/providers", other);
-                assert_eq!(
-                    issues(&p),
-                    [format!(
-                        "providers.1 (other).claims: must pin {pin}: {issuer} issues tokens to anyone's projects"
-                    )]
-                );
-            }
-        }
-
-        #[test]
-        fn one_lets_a_single_tenant_issuer_go_without_a_pin() {
-            let mut p = policy();
-            let own = json!({
-                "name": "gitlab-self",
-                "issuer": "https://gitlab.example.com",
-                "audience": AUDIENCE,
-                "claims": {},
-            });
-            push(&mut p, "/providers", own);
-            assert!(issues(&p).is_empty());
-        }
-
-        #[test]
-        fn one_lets_a_profile_narrow_its_providers_list_but_not_widen_it() {
-            let mut p = policy();
-            set(
-                &mut p,
-                "/providers/0/claims/repository_owner_id",
-                json!([OWNER_ID, "100000002"]),
-            );
-            set(
-                &mut p,
-                "/profiles/1/claims/repository_owner_id",
-                json!(OWNER_ID),
-            );
-            assert_eq!(
-                load(&p).profiles[1].claims["repository_owner_id"],
-                strings(&[OWNER_ID])
-            );
-            set(
-                &mut p,
-                "/profiles/1/claims/repository_owner_id",
-                json!([OWNER_ID, "999"]),
-            );
-            assert_eq!(
-                issues(&p),
-                [
-                    "profiles.1 (workers-deploy).claims.repository_owner_id: conflicts with provider github"
-                ]
-            );
-        }
-
-        #[test]
-        fn one_rejects_a_profile_that_overrides_its_providers_claims() {
-            let mut p = policy();
-            set(
-                &mut p,
-                "/profiles/1/claims/repository_owner_id",
-                json!("999"),
-            );
-            assert_eq!(
-                issues(&p),
-                [
-                    "profiles.1 (workers-deploy).claims.repository_owner_id: conflicts with provider github"
-                ]
-            );
-        }
-
-        #[test]
-        fn two_rejects_globs_on_id_claims() {
-            let mut p = policy();
-            set(&mut p, "/profiles/0/claims/repository_id", json!("2000*"));
-            assert!(
-                issues(&p)
-                    .join(",")
-                    .contains("repository_id: ID claims must be exact")
-            );
-        }
-
-        #[test]
-        fn two_checks_provider_claims_the_same_way() {
-            let mut p = policy();
-            set(
-                &mut p,
-                "/providers/0/claims/repository_owner_id",
-                json!("1000*"),
-            );
-            assert!(issues(&p).join(",").contains(
-                "providers.0 (github).claims.repository_owner_id: ID claims must be exact"
-            ));
-        }
-
-        #[test]
-        fn two_rejects_broad_patterns() {
-            for pattern in ["*", "*/api", "example-org/*/api", "example-org/**"] {
-                let mut p = policy();
-                set(&mut p, "/profiles/1/claims/repository", json!(pattern));
-                assert_eq!(
-                    issues(&p),
-                    [
-                        "profiles.1 (workers-deploy).claims.repository: * is only allowed once, at the end, after a prefix (e.g. example-org/*)"
-                    ],
-                    "{pattern}"
-                );
-            }
-        }
 
         #[test]
         fn three_rejects_granting_token_management() {
@@ -652,7 +476,7 @@ mod load_policy {
         }
 
         #[test]
-        fn four_caps_max_ttl_at_24h() {
+        fn four_caps_ttls() {
             let mut p = policy();
             set(&mut p, "/profiles/1/max_ttl", json!("25h"));
             assert!(
@@ -660,10 +484,6 @@ mod load_policy {
                     .join(",")
                     .contains("max_ttl: must be at most 24h")
             );
-        }
-
-        #[test]
-        fn four_rejects_ttl_above_max_ttl() {
             let mut p = policy();
             set(&mut p, "/defaults", json!({ "ttl": "2h", "max_ttl": "1h" }));
             assert!(
@@ -671,10 +491,6 @@ mod load_policy {
                     .join(",")
                     .contains("defaults.ttl: must not exceed max_ttl")
             );
-        }
-
-        #[test]
-        fn four_rejects_a_profile_ttl_above_the_default_max_ttl() {
             let mut p = policy();
             set(&mut p, "/profiles/1/ttl", json!("2h"));
             assert!(
@@ -682,10 +498,6 @@ mod load_policy {
                     .join(",")
                     .contains("ttl: must not exceed max_ttl")
             );
-        }
-
-        #[test]
-        fn four_rejects_a_duration_it_cant_parse() {
             let mut p = policy();
             set(&mut p, "/profiles/1/ttl", json!("forever"));
             assert_eq!(
@@ -695,27 +507,9 @@ mod load_policy {
         }
 
         #[test]
-        fn five_rejects_githubs_audience() {
-            for aud in ["https://github.com/example-org", "https://github.com"] {
-                let mut p = policy();
-                set(&mut p, "/providers/0/audience", json!(aud));
-                assert_eq!(
-                    issues(&p),
-                    [
-                        "providers.0 (github).audience: must not be GitHub's default audience; use the broker's URL"
-                    ]
-                );
-            }
-        }
-
-        #[test]
         fn requires_the_brokers_issuer_to_be_a_bare_origin() {
             let mut p = policy();
-            set(
-                &mut p,
-                "/issuer",
-                json!("https://cf-oidc-exchange.example.com/"),
-            );
+            set(&mut p, "/issuer", json!(format!("{AUDIENCE}/")));
             assert!(
                 issues(&p)
                     .join(",")
@@ -727,7 +521,7 @@ mod load_policy {
     #[test]
     fn rejects_duplicate_profile_names() {
         let mut p = policy();
-        let deploy = get(&p, "/profiles/1");
+        let deploy = p["profiles"][1].clone();
         push(&mut p, "/profiles", deploy);
         assert!(issues(&p).join(",").contains("duplicate profile name"));
     }
@@ -735,7 +529,7 @@ mod load_policy {
     #[test]
     fn requires_a_profiles_provider_when_there_are_several() {
         let mut p = policy();
-        push(&mut p, "/providers", people());
+        push(&mut p, "/providers", gitlab());
         set(&mut p, "/profiles/0/provider", Value::Null);
         assert_eq!(
             issues(&p),
@@ -775,28 +569,26 @@ mod load_policy {
         }
 
         #[test]
-        fn rejects_mixing_flat_and_nested_resources() {
+        fn rejects_bad_resources() {
+            assert!(
+                issues(&with_resources(json!({})))
+                    .join(",")
+                    .contains("must name at least one resource")
+            );
+            assert!(
+                issues(&with_resources(json!({ "example.com": "*" })))
+                    .join(",")
+                    .contains("must be a Cloudflare resource name")
+            );
             let mixed = json!({
                 (format!("com.cloudflare.api.account.{ACCOUNT_ID}")): { "com.cloudflare.api.account.zone.*": "*" },
                 (format!("com.cloudflare.api.account.zone.{ZONE_ID}")): "*",
             });
-            let found = issues(&with_resources(mixed)).join(",");
             assert!(
-                found.contains("profiles.1.token.policies.0.resources: must be all"),
-                "{found}"
+                issues(&with_resources(mixed))
+                    .join(",")
+                    .contains("must be all")
             );
-        }
-
-        #[test]
-        fn rejects_an_empty_resources_map() {
-            let found = issues(&with_resources(json!({}))).join(",");
-            assert!(found.contains("must name at least one resource"));
-        }
-
-        #[test]
-        fn rejects_keys_that_arent_cloudflare_resource_names() {
-            let found = issues(&with_resources(json!({ "example.com": "*" }))).join(",");
-            assert!(found.contains("must be a Cloudflare resource name"));
         }
 
         #[test]
@@ -819,7 +611,7 @@ mod load_policy {
             "/defaults",
             json!({ "ttl": "2h", "max_ttl": "30h" }),
         );
-        set(&mut p, "/profiles/0/claims/repository_id", json!("*"));
+        set(&mut p, "/profiles/0/provider", json!("gitlab"));
         assert!(issues(&p).len() >= 3);
     }
 }
@@ -828,93 +620,47 @@ mod matching {
     use super::*;
 
     #[test]
-    fn ands_every_claim() {
+    fn ands_every_claim_of_a_set() {
         let loaded = load(&policy());
         let deploy = profile(&loaded, "workers-deploy");
-        assert!(matches(deploy, &github_claims(json!({}))));
-        assert!(!matches(
-            deploy,
-            &github_claims(json!({ "environment": "staging" }))
-        ));
+        assert!(deploy.matches(&github_claims(json!({}))));
+        assert!(!deploy.matches(&github_claims(json!({ "environment": "staging" }))));
+        assert!(!deploy.matches(&github_claims(json!({ "environment": null }))));
     }
 
     #[test]
-    fn requires_the_owner_pin() {
-        let loaded = load(&policy());
-        let claims = github_claims(json!({ "repository_owner_id": "999" }));
-        assert!(!matches(profile(&loaded, "workers-deploy"), &claims));
-    }
-
-    #[test]
-    fn fails_when_a_matched_claim_is_missing() {
-        let loaded = load(&policy());
-        let claims = github_claims(json!({ "environment": null }));
-        assert!(!matches(profile(&loaded, "workers-deploy"), &claims));
-    }
-
-    #[test]
-    fn matches_any_value_of_a_list() {
+    fn ors_the_sets() {
         let mut p = policy();
-        set(
-            &mut p,
-            "/profiles/1/claims/ref",
-            json!(["refs/heads/main", "refs/heads/release/*"]),
-        );
-        let loaded = load(&p);
-        let deploy = &loaded.profiles[1];
-        assert!(matches(
-            deploy,
-            &github_claims(json!({ "ref": "refs/heads/main" }))
-        ));
-        assert!(matches(
-            deploy,
-            &github_claims(json!({ "ref": "refs/heads/release/2026" }))
-        ));
-        assert!(!matches(
-            deploy,
-            &github_claims(json!({ "ref": "refs/heads/dev" }))
-        ));
-    }
-
-    #[test]
-    fn matches_a_claim_thats_a_list_in_the_token_if_any_of_its_values_does() {
-        let mut p = policy();
-        set(
+        push(
             &mut p,
             "/profiles/1/claims",
-            json!({ "groups": ["deployers", "admins"] }),
+            json!({ "repository": "example-org/*", "ref": "refs/heads/release/*", "environment": "prod" }),
         );
         let loaded = load(&p);
-        let deploy = &loaded.profiles[1];
-        assert!(matches(
-            deploy,
-            &github_claims(json!({ "groups": ["readers", "deployers"] }))
-        ));
-        assert!(!matches(
-            deploy,
-            &github_claims(json!({ "groups": ["readers"] }))
-        ));
+        let deploy = profile(&loaded, "workers-deploy");
+        assert!(deploy.matches(&github_claims(json!({ "ref": "refs/heads/main" }))));
+        assert!(deploy.matches(&github_claims(json!({ "ref": "refs/heads/release/2026" }))));
+        assert!(!deploy.matches(&github_claims(json!({ "ref": "refs/heads/dev" }))));
     }
 
     #[test]
-    fn compares_id_claims_exactly() {
+    fn holds_every_token_to_its_providers_claim_sets() {
         let loaded = load(&policy());
-        let infra = profile(&loaded, "infra-cloudflare");
-        assert!(matches(
-            infra,
-            &github_claims(json!({ "repository_id": "200000002" }))
-        ));
-        assert!(!matches(
-            infra,
-            &github_claims(json!({ "repository_id": "2000000021" }))
-        ));
+        let outsider = github_claims(json!({ "repository_owner_id": "999" }));
+        assert_eq!(
+            denial(select(&loaded, "github", &outsider, None)).as_deref(),
+            Some("the token matches none of provider github's claim sets")
+        );
     }
 
     #[test]
     fn selects_the_single_matching_profile() {
         let loaded = load(&policy());
-        let selected = select(&loaded, "github", &github_claims(json!({})), None).unwrap();
-        assert_eq!(selected.name, "workers-deploy");
+        let claims = github_claims(json!({}));
+        assert_eq!(
+            select(&loaded, "github", &claims, None).unwrap().name,
+            "workers-deploy"
+        );
     }
 
     #[test]
@@ -922,8 +668,8 @@ mod matching {
         let loaded = load(&policy());
         let claims = github_claims(json!({ "ref": "refs/heads/dev" }));
         assert_eq!(
-            denial(select(&loaded, "github", &claims, None)),
-            Some("no profile matches the token".to_string())
+            denial(select(&loaded, "github", &claims, None)).as_deref(),
+            Some("no profile matches the token")
         );
     }
 
@@ -933,10 +679,9 @@ mod matching {
         let claims = github_claims(
             json!({ "repository": "example-org/infra", "repository_id": "200000002" }),
         );
-        let err = select(&loaded, "github", &claims, None).unwrap_err();
         assert_eq!(
-            err.message,
-            "profiles infra-cloudflare, workers-deploy all match the token: name one"
+            denial(select(&loaded, "github", &claims, None)).as_deref(),
+            Some("profiles infra-cloudflare, workers-deploy all match the token: name one")
         );
         let named = select(&loaded, "github", &claims, Some("infra-cloudflare")).unwrap();
         assert_eq!(named.name, "infra-cloudflare");
@@ -946,13 +691,40 @@ mod matching {
     fn denies_a_named_profile_that_doesnt_match() {
         let loaded = load(&policy());
         let claims = github_claims(json!({}));
-        let err = select(&loaded, "github", &claims, Some("infra-cloudflare")).unwrap_err();
         assert_eq!(
-            err.message,
-            "profile infra-cloudflare doesn't match the token"
+            denial(select(&loaded, "github", &claims, Some("infra-cloudflare"))).as_deref(),
+            Some("profile infra-cloudflare doesn't match the token")
         );
-        let err = select(&loaded, "github", &claims, Some("nope")).unwrap_err();
-        assert_eq!(err.message, "unknown profile nope");
+        assert_eq!(
+            denial(select(&loaded, "github", &claims, Some("nope"))).as_deref(),
+            Some("unknown profile nope")
+        );
+    }
+
+    #[test]
+    fn never_gives_one_providers_token_anothers_profile() {
+        let mut p = policy();
+        push(&mut p, "/providers", gitlab());
+        let token = p["profiles"][1]["token"].clone();
+        push(
+            &mut p,
+            "/profiles",
+            json!({ "name": "gitlab-deploy", "provider": "gitlab", "claims": [{ "project_path": "group/*" }], "token": token }),
+        );
+        let loaded = load(&p);
+        let job = github_claims(json!({}));
+        assert_eq!(
+            denial(select(&loaded, "github", &job, Some("gitlab-deploy"))).as_deref(),
+            Some("profile gitlab-deploy isn't for provider github")
+        );
+        let gitlab_job = with(
+            json!({ "namespace_id": "4000001", "project_path": "group/app" }),
+            json!({}),
+        );
+        assert_eq!(
+            select(&loaded, "gitlab", &gitlab_job, None).unwrap().name,
+            "gitlab-deploy"
+        );
     }
 
     #[test]
@@ -960,10 +732,7 @@ mod matching {
         assert!(load(&policy()).profiles.iter().all(|p| p.enabled));
         let mut p = policy();
         set(&mut p, "/profiles/1/enabled", json!("no"));
-        let found = issues(&p);
-        assert_eq!(found.len(), 1);
-        assert!(found[0].starts_with("profiles.1.enabled: "), "{found:?}");
-        assert!(found[0].contains("expected a boolean"), "{found:?}");
+        assert_issue(&p, "profiles.1.enabled: ", "expected a boolean");
     }
 
     #[test]
@@ -973,11 +742,13 @@ mod matching {
         let disabled = load(&p);
         let claims = github_claims(json!({}));
         assert_eq!(
-            denial(select(&disabled, "github", &claims, None)),
-            Some("no profile matches the token".to_string())
+            denial(select(&disabled, "github", &claims, None)).as_deref(),
+            Some("no profile matches the token")
         );
-        let err = select(&disabled, "github", &claims, Some("workers-deploy")).unwrap_err();
-        assert_eq!(err.message, "profile workers-deploy is disabled");
+        assert_eq!(
+            denial(select(&disabled, "github", &claims, Some("workers-deploy"))).as_deref(),
+            Some("profile workers-deploy is disabled")
+        );
     }
 
     #[test]
@@ -1006,7 +777,7 @@ mod service_audiences {
             "name": "nix-push",
             "provider": "github",
             "audience": CACHE,
-            "claims": { "ref": "refs/heads/main" },
+            "claims": [{ "ref": "refs/heads/main" }],
         });
         for (key, value) in extra.as_object().unwrap() {
             set(&mut service, &format!("/{key}"), value.clone());
@@ -1027,7 +798,7 @@ mod service_audiences {
     }
 
     #[test]
-    fn refuses_a_token_or_buckets_on_a_service_profile() {
+    fn five_keeps_audiences_apart() {
         let buckets =
             json!({ "buckets": [{ "name": "org-artifacts", "permission": "object-read-only" }] });
         assert_eq!(
@@ -1036,22 +807,13 @@ mod service_audiences {
                 "profiles.3 (nix-push): a profile for {CACHE} can't have a token or buckets"
             )]
         );
-    }
-
-    #[test]
-    fn refuses_the_broker_itself_as_an_audience() {
-        let p = with_service(json!({ "audience": AUDIENCE }));
         assert_eq!(
-            issues(&p),
+            issues(&with_service(json!({ "audience": AUDIENCE }))),
             ["profiles.3 (nix-push).audience: must be another service, not the broker itself"]
         );
-    }
-
-    #[test]
-    fn refuses_an_audience_that_isnt_a_bare_origin() {
-        let p = with_service(json!({ "audience": format!("{CACHE}/upload") }));
+        let path = with_service(json!({ "audience": format!("{CACHE}/upload") }));
         assert!(
-            issues(&p)
+            issues(&path)
                 .join(",")
                 .contains("profiles.3.audience: must be a bare origin")
         );
@@ -1060,301 +822,28 @@ mod service_audiences {
     #[test]
     fn only_selects_profiles_for_the_requested_audience() {
         let loaded = load(&with_service(json!({})));
+        let github = provider_of(&loaded, "github");
         let claims = github_claims(json!({}));
         assert_eq!(
             select(&loaded, "github", &claims, None).unwrap().name,
             "workers-deploy"
         );
-        let service = select_profile(&loaded, "github", &claims, None, CACHE).unwrap();
-        assert_eq!(service.name, "nix-push");
-        let err =
-            select_profile(&loaded, "github", &claims, Some("workers-deploy"), CACHE).unwrap_err();
         assert_eq!(
-            err.message,
-            format!("profile workers-deploy isn't for {CACHE}")
-        );
-    }
-}
-
-mod people {
-    use super::*;
-
-    /// The test policy plus the people provider and one profile for it, with
-    /// workers-deploy's token.
-    fn with_user(claims: Value, extra: Value) -> Value {
-        let mut p = policy();
-        push(&mut p, "/providers", people());
-        let token = get(&p, "/profiles/1/token");
-        let mut user =
-            json!({ "name": "tofu-plan", "provider": "people", "claims": claims, "token": token });
-        for (key, value) in extra.as_object().unwrap() {
-            set(&mut user, &format!("/{key}"), value.clone());
-        }
-        push(&mut p, "/profiles", user);
-        p
-    }
-
-    /// A person's claims as the broker builds them.
-    fn person(overrides: Value) -> Claims {
-        let base = json!({
-            "actor": "octocat",
-            "actor_id": USER_ID,
-            "repository": "example-org/infra",
-            "repository_id": "200000002",
-            "repository_owner": "example-org",
-            "repository_owner_id": OWNER_ID,
-            "repository_permission": "write",
-            "team_ids": [TEAM_ID],
-        });
-        with(base, overrides)
-    }
-
-    #[test]
-    fn gives_profiles_their_providers_type() {
-        let claims = json!({ "team_id": TEAM_ID, "repository_permission": "write" });
-        let p = load(&with_user(claims, json!({})));
-        assert_eq!(profile(&p, "workers-deploy").kind, ProviderType::Oidc);
-        let user = profile(&p, "tofu-plan");
-        assert_eq!(
-            (user.provider.as_str(), user.kind),
-            ("people", ProviderType::GithubUser)
-        );
-    }
-
-    #[test]
-    fn adds_the_people_providers_owner_pin() {
-        let p = load(&with_user(
-            json!({ "repository_permission": "write" }),
-            json!({}),
-        ));
-        assert_eq!(
-            profile(&p, "tofu-plan").claims["repository_owner_id"],
-            strings(&[OWNER_ID])
-        );
-    }
-
-    #[test]
-    fn six_needs_a_role_on_the_repo_or_a_list_of_who() {
-        assert_eq!(
-            issues(&with_user(json!({ "team_id": TEAM_ID }), json!({}))),
-            [
-                "profiles.3 (tofu-plan).claims: a profile for people needs repository_permission (a role on the repo they ask for) or actor_id (who may use it)",
-                "profiles.3 (tofu-plan).claims.team_id: needs repository_permission",
-            ]
-        );
-    }
-
-    #[test]
-    fn six_accepts_a_list_of_who_may_use_it_without_the_owner_pin() {
-        let p = load(&with_user(
-            json!({ "actor_id": [USER_ID, "300000005"] }),
-            json!({}),
-        ));
-        let user = profile(&p, "tofu-plan");
-        // The owner pin bounds the repos people ask for; a list of who has no repo.
-        assert_eq!(
-            user.claims,
-            [("actor_id".to_string(), strings(&[USER_ID, "300000005"]))].into()
-        );
-        let someone = json!({ "actor": "someone", "actor_id": "300000099" });
-        assert!(matches(
-            user,
-            &with(
-                json!({ "actor": "octocat", "actor_id": USER_ID }),
-                json!({})
-            )
-        ));
-        assert!(!matches(user, &with(someone, json!({}))));
-    }
-
-    #[test]
-    fn six_needs_the_providers_owner_pin_for_a_role_on_the_repo() {
-        let mut p = with_user(json!({ "repository_permission": "write" }), json!({}));
-        set(&mut p, "/providers/1/claims", json!({}));
-        assert_eq!(
-            issues(&p),
-            [
-                "profiles.3 (tofu-plan).claims.repository_permission: needs provider people to pin repository_owner_id, the owner the repo must belong to"
-            ]
-        );
-    }
-
-    #[test]
-    fn takes_one_role_the_least() {
-        let p = with_user(
-            json!({ "repository_permission": ["read", "write"] }),
-            json!({}),
+            select_profile(&loaded, github, &claims, None, CACHE)
+                .unwrap()
+                .name,
+            "nix-push"
         );
         assert_eq!(
-            issues(&p),
-            [
-                "profiles.3 (tofu-plan).claims.repository_permission: one role, the least the person must have"
-            ]
+            denial(select_profile(
+                &loaded,
+                github,
+                &claims,
+                Some("workers-deploy"),
+                CACHE
+            )),
+            Some(format!("profile workers-deploy isn't for {CACHE}"))
         );
-    }
-
-    #[test]
-    fn six_rejects_claims_only_jobs_have() {
-        let claims = json!({ "repository_permission": "write", "ref": "refs/heads/main", "environment": "prod" });
-        let found = issues(&with_user(claims, json!({})));
-        // In claim-name order, which is how the loaded claims are kept.
-        assert_eq!(found.len(), 2);
-        assert!(
-            found[0]
-                .starts_with("profiles.3 (tofu-plan).claims.environment: not available for people")
-        );
-        assert!(
-            found[1].starts_with("profiles.3 (tofu-plan).claims.ref: not available for people")
-        );
-    }
-
-    #[test]
-    fn six_rejects_person_only_claims_in_an_oidc_profile() {
-        let mut p = policy();
-        set(&mut p, "/profiles/0/claims/team_id", json!(TEAM_ID));
-        set(
-            &mut p,
-            "/profiles/0/claims/repository_permission",
-            json!("write"),
-        );
-        assert_eq!(
-            issues(&p),
-            [
-                "profiles.0 (infra-cloudflare).claims.team_id: only for people (https://github.com)",
-                "profiles.0 (infra-cloudflare).claims.repository_permission: only for people (https://github.com)",
-            ]
-        );
-    }
-
-    #[test]
-    fn rejects_an_unknown_repository_permission() {
-        let p = with_user(json!({ "repository_permission": "push" }), json!({}));
-        assert_eq!(
-            issues(&p),
-            [
-                "profiles.3 (tofu-plan).claims.repository_permission: must be one of read, triage, write, maintain, admin"
-            ]
-        );
-    }
-
-    #[test]
-    fn two_rejects_a_globbed_team_id() {
-        let p = with_user(
-            json!({ "team_id": "4000*", "repository_permission": "write" }),
-            json!({}),
-        );
-        assert_eq!(
-            issues(&p),
-            [
-                "profiles.3 (tofu-plan).claims.team_id: ID claims must be exact, globs are not allowed"
-            ]
-        );
-    }
-
-    #[test]
-    fn caps_the_default_max_ttl_at_1h_unless_the_profile_sets_its_own() {
-        let defaults = json!({ "ttl": "15m", "max_ttl": "24h" });
-        let mut p = with_user(json!({ "repository_permission": "write" }), json!({}));
-        set(&mut p, "/defaults", defaults.clone());
-        let loaded = load(&p);
-        assert_eq!(profile(&loaded, "tofu-plan").max_ttl, 60 * 60_000);
-        assert_eq!(profile(&loaded, "workers-deploy").max_ttl, 24 * 60 * 60_000);
-
-        let mut own = with_user(
-            json!({ "repository_permission": "write" }),
-            json!({ "max_ttl": "8h" }),
-        );
-        set(&mut own, "/defaults", defaults);
-        assert_eq!(profile(&load(&own), "tofu-plan").max_ttl, 8 * 60 * 60_000);
-    }
-
-    mod matching {
-        use super::*;
-
-        fn loaded() -> PolicyConfig {
-            let claims = json!({ "team_id": TEAM_ID, "repository_permission": "write" });
-            load(&with_user(claims, json!({})))
-        }
-
-        #[test]
-        fn requires_at_least_the_role() {
-            let loaded = loaded();
-            let user = profile(&loaded, "tofu-plan");
-            assert!(matches(user, &person(json!({}))));
-            assert!(matches(
-                user,
-                &person(json!({ "repository_permission": "admin" }))
-            ));
-            assert!(!matches(
-                user,
-                &person(json!({ "repository_permission": "triage" }))
-            ));
-            assert!(!matches(
-                user,
-                &person(json!({ "repository_permission": null }))
-            ));
-            assert!(!matches(
-                user,
-                &person(json!({ "repository_permission": "push" }))
-            ));
-        }
-
-        #[test]
-        fn requires_membership_of_the_team() {
-            let loaded = loaded();
-            let user = profile(&loaded, "tofu-plan");
-            assert!(matches(
-                user,
-                &person(json!({ "team_ids": ["400000099", TEAM_ID] }))
-            ));
-            assert!(!matches(user, &person(json!({ "team_ids": [] }))));
-            assert!(!matches(user, &person(json!({ "team_ids": null }))));
-            assert!(!matches(user, &person(json!({ "team_ids": TEAM_ID }))));
-        }
-
-        #[test]
-        fn keeps_the_owner_pin() {
-            let loaded = loaded();
-            let claims = person(json!({ "repository_owner_id": "999999" }));
-            assert!(!matches(profile(&loaded, "tofu-plan"), &claims));
-        }
-
-        #[test]
-        fn never_picks_a_jobs_profile_for_a_person() {
-            let loaded = loaded();
-            // workers-deploy matches repository example-org/*, which a person's claims have too.
-            let me = person(json!({}));
-            assert_eq!(
-                select(&loaded, "people", &me, None).unwrap().name,
-                "tofu-plan"
-            );
-            let named = select(&loaded, "people", &me, Some("workers-deploy"));
-            assert_eq!(
-                denial(named).as_deref(),
-                Some("profile workers-deploy isn't for provider people")
-            );
-            let no_teams = person(json!({ "team_ids": [] }));
-            assert_eq!(
-                denial(select(&loaded, "people", &no_teams, None)),
-                Some("no profile matches the token".to_string())
-            );
-        }
-
-        #[test]
-        fn never_picks_a_persons_profile_for_a_job() {
-            let loaded = loaded();
-            let mut job = github_claims(json!({}));
-            job.extend(person(json!({ "ref": "refs/heads/dev" })));
-            assert_eq!(
-                denial(select(&loaded, "github", &job, None)),
-                Some("no profile matches the token".to_string())
-            );
-            let named = select(&loaded, "github", &job, Some("tofu-plan"));
-            assert_eq!(
-                denial(named).as_deref(),
-                Some("profile tofu-plan isn't for provider github")
-            );
-        }
     }
 }
 
@@ -1396,52 +885,32 @@ mod buckets {
             Some(vec![Bucket {
                 name: "org-terraform-state".into(),
                 permission: BucketPermission::ObjectReadWrite,
-                prefixes: strings(&["github.com/{repository}/"]),
+                prefixes: vec!["github.com/{repository}/".into()],
             }])
         );
-        assert_eq!(profile.ttl, 15 * 60_000);
-        assert_eq!(profile.max_ttl, 60 * 60_000);
+        assert_eq!((profile.ttl, profile.max_ttl), (15 * 60_000, 60 * 60_000));
     }
 
     #[test]
-    fn takes_ttl_and_max_ttl_from_the_profile() {
+    fn takes_ttl_and_max_ttl_from_the_profile_within_r2s_range() {
         let profile = loaded(&with_bucket(
             json!({}),
             json!({ "ttl": "5m", "max_ttl": "10m" }),
             false,
         ));
-        assert_eq!(profile.ttl, 5 * 60_000);
-        assert_eq!(profile.max_ttl, 10 * 60_000);
+        assert_eq!((profile.ttl, profile.max_ttl), (5 * 60_000, 10 * 60_000));
         let p = with_bucket(json!({}), json!({ "ttl": "20m", "max_ttl": "10m" }), false);
         assert!(
             issues(&p)
                 .join(",")
                 .contains("(workers-deploy).ttl: must not exceed max_ttl")
         );
-        let p = with_bucket(json!({}), json!({ "max_ttl": "25h" }), false);
-        assert!(
-            issues(&p)
-                .join(",")
-                .contains("(workers-deploy).max_ttl: must be at most 24h")
-        );
     }
 
     #[test]
-    fn applies_the_profiles_ttl_to_the_token_too() {
-        let mut p = policy();
-        set(&mut p, "/profiles/1/ttl", json!("5m"));
-        assert_eq!(loaded(&p).ttl, 5 * 60_000);
-    }
-
-    #[test]
-    fn accepts_a_profile_with_a_token_and_buckets() {
+    fn accepts_a_token_and_buckets_and_requires_one_of_them() {
         let profile = loaded(&with_bucket(json!({}), json!({}), true));
         assert_eq!(profile.policies.map(|p| p.len()), Some(1));
-        assert_eq!(profile.buckets.unwrap()[0].prefixes, Vec::<String>::new());
-    }
-
-    #[test]
-    fn requires_a_token_buckets_or_both() {
         let mut p = policy();
         set(&mut p, "/profiles/1/token", Value::Null);
         assert!(
@@ -1454,8 +923,11 @@ mod buckets {
     #[test]
     fn accepts_several_buckets_each_once() {
         let mut p = with_bucket(json!({}), json!({}), false);
-        let artifacts = json!({ "name": "org-artifacts", "permission": "object-read-only", "prefixes": ["{repository_id}/"] });
-        push(&mut p, "/profiles/1/buckets", artifacts);
+        push(
+            &mut p,
+            "/profiles/1/buckets",
+            json!({ "name": "org-artifacts", "permission": "object-read-only", "prefixes": ["{repository_id}/"] }),
+        );
         let names: Vec<String> = loaded(&p)
             .buckets
             .unwrap()
@@ -1464,19 +936,21 @@ mod buckets {
             .collect();
         assert_eq!(names, ["org-terraform-state", "org-artifacts"]);
 
-        let again = json!({ "name": "org-terraform-state", "permission": "object-read-only" });
-        push(&mut p, "/profiles/1/buckets", again);
+        push(
+            &mut p,
+            "/profiles/1/buckets",
+            json!({ "name": "org-terraform-state", "permission": "object-read-only" }),
+        );
         assert_eq!(
             issues(&p),
             ["profiles.1 (workers-deploy).buckets.2.name: duplicate bucket org-terraform-state"]
         );
-
         set(&mut p, "/profiles/1/buckets", json!([]));
         assert!(issues(&p).join(",").contains("buckets: "));
     }
 
     #[test]
-    fn rejects_bad_bucket_names() {
+    fn rejects_bad_bucket_names_and_permissions() {
         let long = "x".repeat(64);
         for name in [
             "ab",
@@ -1487,21 +961,17 @@ mod buckets {
             long.as_str(),
         ] {
             let p = with_bucket(json!({ "name": name }), json!({}), false);
-            let found = issues(&p).join(",");
             assert!(
-                found.contains("buckets.0.name: must be a valid R2 bucket name"),
+                issues(&p)
+                    .join(",")
+                    .contains("buckets.0.name: must be a valid R2 bucket name"),
                 "{name}"
             );
         }
-    }
-
-    #[test]
-    fn rejects_bad_permissions() {
         for permission in ["admin-read-write", "admin-read-only", "read-write"] {
             let p = with_bucket(json!({ "permission": permission }), json!({}), false);
-            let found = issues(&p).join(",");
             assert!(
-                found.contains(
+                issues(&p).join(",").contains(
                     "buckets.0.permission: must be object-read-write or object-read-only"
                 ),
                 "{permission}"
@@ -1510,11 +980,12 @@ mod buckets {
     }
 
     #[test]
-    fn accepts_good_prefixes() {
+    fn accepts_prefixes_from_any_claim() {
         for prefix in [
             "github.com/{repository}/",
             "{repository_owner_id}/{repository_id}/",
-            "{repository_owner}/shared/",
+            "gitlab.com/{namespace_id}/{project_id}/",
+            "{project_path}/state/",
             "shared/",
         ] {
             assert!(issues(&bucket(json!([prefix]))).is_empty(), "{prefix}");
@@ -1530,11 +1001,13 @@ mod buckets {
             ("github.com/../{repository}/", "must not contain .."),
             ("github.com//{repository}/", "empty or . path segments"),
             ("./{repository}/", "empty or . path segments"),
-            ("/", "must not start with /"),
             ("", "must end with /"),
             ("github.com/${repository}/", "not ${claim}"),
-            ("github.com/{ref}/", "unknown placeholder {ref}"),
-            ("github.com/{}/", "unknown placeholder {}"),
+            ("github.com/{}/", "placeholder {} must name a claim"),
+            (
+                "github.com/{repo-name}/",
+                "placeholder {repo-name} must name a claim",
+            ),
             ("github.com/{repository/", "unmatched"),
             ("github.com/repository}/", "unmatched"),
             ("state-{repository_id}/", "whole path segment"),
@@ -1558,7 +1031,7 @@ mod buckets {
             let bucket = Bucket {
                 name: "org-terraform-state".into(),
                 permission: BucketPermission::ObjectReadWrite,
-                prefixes: strings(prefixes),
+                prefixes: prefixes.iter().map(|p| p.to_string()).collect(),
             };
             r2_prefixes(&bucket, claims)
         }
@@ -1578,9 +1051,18 @@ mod buckets {
                     "example-org/".to_string(),
                 ]
             );
+            assert!(fill(&[], &github_claims(json!({}))).unwrap().is_empty());
+        }
+
+        #[test]
+        fn takes_numbers_and_any_issuers_claims() {
+            let gitlab = with(
+                json!({ "namespace_id": 4000001, "project_path": "group/sub/app" }),
+                json!({}),
+            );
             assert_eq!(
-                fill(&[], &github_claims(json!({}))).unwrap(),
-                Vec::<String>::new()
+                fill(&["gitlab.com/{namespace_id}/", "{project_path}/"], &gitlab).unwrap(),
+                ["gitlab.com/4000001/", "group/sub/app/"]
             );
         }
 
@@ -1598,18 +1080,28 @@ mod buckets {
             )
             .unwrap()[0];
             assert!(!old.starts_with(site.as_str()));
-            assert!(!format!("{old}terraform.tfstate").starts_with(site.as_str()));
+        }
+
+        /// With several placeholders, one value spanning segments could make two
+        /// callers' prefixes the same: a="x/y", b="z" and a="x", b="y/z".
+        #[test]
+        fn spans_segments_only_with_one_placeholder() {
+            let claims = github_claims(json!({}));
+            assert!(fill(&["{repository_owner}/{repository}/"], &claims).is_err());
+            assert!(fill(&["{repository}/"], &claims).is_ok());
         }
 
         #[test]
-        fn refuses_an_unusable_repository() {
+        fn refuses_unusable_claims() {
             for (case, repository) in [
                 ("missing", Value::Null),
                 ("empty", json!("")),
-                ("a number", json!(42)),
-                ("without an owner", json!("api")),
-                ("with two slashes", json!("example-org/api/../other")),
+                ("a boolean", json!(true)),
+                ("a list", json!(["example-org/api"])),
                 ("a leading slash", json!("/example-org/api")),
+                ("a trailing slash", json!("example-org/api/")),
+                ("..", json!("example-org/..")),
+                (". as a segment", json!("example-org/.")),
                 ("a space", json!("example-org/my api")),
                 ("a percent escape", json!("example-org/%2e%2e")),
                 ("a backslash", json!("example-org\\api")),
@@ -1618,35 +1110,8 @@ mod buckets {
                 ("a *", json!("example-org/*")),
             ] {
                 let claims = github_claims(json!({ "repository": repository }));
-                let filled = fill(&["github.com/{repository}/"], &claims);
-                let refused = denial(filled).unwrap_or_default();
-                assert!(
-                    refused.starts_with("bucket org-terraform-state: "),
-                    "{case}: {refused}"
-                );
-            }
-        }
-
-        #[test]
-        fn refuses_unusable_claims() {
-            let templates = [
-                "github.com/{repository}/",
-                "{repository_owner}/",
-                "{repository_owner_id}/{repository_id}/",
-            ];
-            for (case, overrides) in [
-                ("..", json!({ "repository": "example-org/.." })),
-                (". as the repo", json!({ "repository": "example-org/." })),
-                (".. as the owner", json!({ "repository_owner": ".." })),
-                (
-                    "a slash in the owner",
-                    json!({ "repository_owner": "example-org/api" }),
-                ),
-                ("a non-numeric ID", json!({ "repository_id": "200000003a" })),
-                ("an empty ID", json!({ "repository_owner_id": "" })),
-            ] {
-                let filled = fill(&templates, &github_claims(overrides));
-                let refused = denial(filled).unwrap_or_default();
+                let refused =
+                    denial(fill(&["github.com/{repository}/"], &claims)).unwrap_or_default();
                 assert!(
                     refused.starts_with("bucket org-terraform-state: "),
                     "{case}: {refused}"

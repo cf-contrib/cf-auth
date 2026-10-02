@@ -1,134 +1,65 @@
-//! Which profile a caller gets: their claims against each profile's.
+//! Which profile a caller gets: their claims against the claim sets of their
+//! provider and of each profile.
 
 use cf_oidc_exchange_sdk::v1::{Error, ErrorCode};
-use serde_json::{Map, Value};
 
-use super::{MIN_TTL, PolicyConfig, ProfileConfig, REPOSITORY_PERMISSIONS, parse_duration};
-
-/// A verified token's claims, or a person's as the broker looks them up.
-pub type Claims = Map<String, Value>;
-
-/// Whether a pattern is `<prefix>*`: one `*`, at the end, after a non-empty prefix.
-pub(super) fn is_prefix_pattern(pattern: &str) -> bool {
-    pattern.len() > 1 && pattern.find('*') == Some(pattern.len() - 1)
-}
-
-/// `<prefix>*` matches any value starting with the prefix, including across `/`.
-/// Any other pattern must equal the value; the policy refuses other uses of `*`
-/// when it loads.
-pub fn glob(pattern: &str, value: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) if is_prefix_pattern(pattern) => value.starts_with(prefix),
-        _ => pattern == value,
-    }
-}
-
-/// Whether a person's role on the repo is at least `required`.
-fn has_role(role: Option<&Value>, required: &str) -> bool {
-    let rank = |role: &str| REPOSITORY_PERMISSIONS.iter().position(|r| *r == role);
-    match (role.and_then(Value::as_str).and_then(rank), rank(required)) {
-        (Some(role), Some(required)) => role >= required,
-        _ => false,
-    }
-}
-
-/// Whether one value of a token's claim matches one of the patterns.
-fn matches_value(claim: &str, patterns: &[String], value: &Value) -> bool {
-    let Some(value) = value.as_str() else {
-        return false;
-    };
-    patterns.iter().any(|pattern| {
-        if claim.ends_with("_id") {
-            value == pattern
-        } else {
-            glob(pattern, value)
-        }
-    })
-}
-
-/// Whether every claim of the profile matches, each by any of its values.
-pub fn matches(profile: &ProfileConfig, claims: &Claims) -> bool {
-    profile.claims.iter().all(|(claim, patterns)| {
-        match claim.as_str() {
-            // Only a person's claims carry these: the teams they're in and their role on the repo.
-            "team_id" => claims
-                .get("team_ids")
-                .and_then(Value::as_array)
-                .is_some_and(|ids| {
-                    ids.iter().any(|id| {
-                        id.as_str()
-                            .is_some_and(|id| patterns.iter().any(|p| p == id))
-                    })
-                }),
-            "repository_permission" => patterns
-                .first()
-                .is_some_and(|required| has_role(claims.get(claim), required)),
-            _ => match claims.get(claim) {
-                // A claim that's a list in the token matches if any of its values does.
-                Some(Value::Array(values)) => {
-                    values.iter().any(|v| matches_value(claim, patterns, v))
-                }
-                Some(value) => matches_value(claim, patterns, value),
-                None => false,
-            },
-        }
-    })
-}
+use super::{Claims, MIN_TTL, PolicyConfig, ProfileConfig, ProviderConfig, parse_duration};
 
 /// Picks the profile to issue with, among those for `provider` and `audience`
-/// only, or refuses with a `403` that says why.
+/// only, or refuses with a `403` that says why. The token must match one of the
+/// provider's claim sets, and one of the profile's.
 pub fn select_profile<'a>(
     policy: &'a PolicyConfig,
-    provider: &str,
+    provider: &ProviderConfig,
     claims: &Claims,
     requested: Option<&str>,
     audience: &str,
 ) -> Result<&'a ProfileConfig, Error> {
+    let forbidden = |message: String| Err(Error::new(ErrorCode::Forbidden, message));
+    if !provider.takes(claims) {
+        return forbidden(format!(
+            "the token matches none of provider {}'s claim sets",
+            provider.name
+        ));
+    }
     let mut profiles = policy
         .profiles
         .iter()
-        .filter(|p| p.provider == provider && p.audience == audience);
+        .filter(|p| p.provider == provider.name && p.audience == audience);
 
     if let Some(requested) = requested {
         let profile = profiles.find(|p| p.name == requested);
         if let Some(profile) = profile
             && profile.enabled
-            && matches(profile, claims)
+            && profile.matches(claims)
         {
             return Ok(profile);
         }
         let named = policy.profiles.iter().find(|p| p.name == requested);
-        let message = match named {
+        return forbidden(match named {
             None => format!("unknown profile {requested}"),
-            Some(named) if named.provider != provider => {
-                format!("profile {requested} isn't for provider {provider}")
+            Some(named) if named.provider != provider.name => {
+                format!("profile {requested} isn't for provider {}", provider.name)
             }
             Some(named) if named.audience != audience => {
                 format!("profile {requested} isn't for {audience}")
             }
             Some(named) if !named.enabled => format!("profile {requested} is disabled"),
             Some(_) => format!("profile {requested} doesn't match the token"),
-        };
-        return Err(Error::new(ErrorCode::Forbidden, message));
+        });
     }
 
     let candidates: Vec<&ProfileConfig> = profiles
-        .filter(|p| p.enabled && matches(p, claims))
+        .filter(|p| p.enabled && p.matches(claims))
         .collect();
     match candidates.as_slice() {
-        [] => Err(Error::new(
-            ErrorCode::Forbidden,
-            "no profile matches the token",
-        )),
+        [] => forbidden("no profile matches the token".into()),
         [profile] => Ok(profile),
         several => {
             let names: Vec<&str> = several.iter().map(|p| p.name.as_str()).collect();
-            Err(Error::new(
-                ErrorCode::Forbidden,
-                format!(
-                    "profiles {} all match the token: name one",
-                    names.join(", ")
-                ),
+            forbidden(format!(
+                "profiles {} all match the token: name one",
+                names.join(", ")
             ))
         }
     }
