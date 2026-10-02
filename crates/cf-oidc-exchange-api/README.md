@@ -52,9 +52,9 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
    gh api orgs/<org> --jq .id           # the github provider's repository_owner_id
    gh api repos/<org>/<repo> --jq .id   # a profile's repository_id
    ```
-3. **Deploy** the released Worker with the [Terraform module](../../deployment/terraform) (`//deployment/terraform?ref=<version>`). It downloads the release (optionally pinned to a checksum), uploads your policy next to it, and sets up the bindings, the workers.dev URL (or an optional custom domain) and the cron. To deploy a build of your own, build it and point the module's `worker_dir` at it:
+3. **Deploy** the released Worker with the [Terraform module](../../deployment/terraform) (`//deployment/terraform?ref=<version>`). It downloads the release (optionally pinned to a checksum), binds your policy to it, and sets up the bindings, the workers.dev URL (or an optional custom domain) and the cron. To deploy a build of your own, build it and point the module's `worker_dir` at it:
    ```sh
-   worker-build --release && cp worker/entry.js build/   # then worker_dir = ".../crates/cf-oidc-exchange-api/build"
+   worker-build --release   # then worker_dir = ".../crates/cf-oidc-exchange-api/build"
    ```
 4. **Check** that `<broker-url>/.well-known/openid-configuration` returns `200` (`https://cf-oidc-exchange.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or a binding is wrong; the reasons are in Workers Logs.
 
@@ -63,21 +63,20 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 | Binding | Type | Required | Description |
 |---|---|---|---|
 | `CF_OIDC_EXCHANGE_API_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
+| `CF_OIDC_EXCHANGE_API_POLICY` | plain text | yes | The [policy](#policy), as JSON. A Worker variable holds at most 5 KB. |
 | `CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 permissions covering what profiles' `buckets` delegate. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
 | `CF_OIDC_EXCHANGE_API_SIGNING_KEY` | Secrets Store secret | for profiles with an `audience` | RSA private key (at least 2048 bits), as a PKCS#8 PEM, the broker signs [its own tokens](#tokens-for-other-services) with. Without it the broker issues none, publishes no keys, and those profiles fail closed with `500`. |
 
 The hourly cron (`17 * * * *` in the examples) deletes expired `cf-oidc:*` tokens.
 
-The policy isn't a binding. The Worker's entry module, [`worker/entry.js`](worker/entry.js),
-imports it from `policy.json`, another file in the same Worker version, so it
-changes only with a deploy and rolls back with it:
+The Terraform module renders your `policy.yaml` to JSON and binds it, so the
+policy changes with a deploy and rolls back with it. `wrangler dev` takes it from
+`wrangler.toml`.
 
-- The Terraform module renders your `policy.yaml` to JSON and uploads it as a
-  text module next to the release's modules.
-- `wrangler dev` copies `policy.json`, next to `wrangler.toml`, into the build. It fails if it's missing.
-
-The policy is checked when an isolate first serves a request. An invalid one is a
-`500` on every route, with the reasons in the `policy.invalid` log line.
+The bindings are read on every request. An unset account, an invalid policy or a
+Cloudflare token outside Secrets Store is a `500` on every route, the health
+endpoints' too, with the first problem in the log, such as
+`misconfigured: CF_OIDC_EXCHANGE_API_POLICY: profiles[1].claims must contain at least one claim set`.
 
 ## Policy
 
@@ -174,7 +173,7 @@ A profile has a `token`, `buckets`, or both, for callers with a token from its `
 
 To switch a profile off, for example during an incident, set `enabled: false`. It stays in the policy but never matches, and a request naming it is a `403`.
 
-The broker validates the policy on the first request. If it's invalid, the broker fails closed and every request gets `500`.
+The broker checks the policy on every request. If it's invalid, the broker fails closed and every request gets `500`.
 
 ### Providers
 
@@ -214,7 +213,7 @@ Keep people's profiles to what they need locally, such as read-only state, and k
 
 ### Migration from version 2
 
-Version 1 and 2 policies are refused (`500`, with `version N is no longer supported` in the `policy.invalid` log line). Move them over:
+Version 1 and 2 policies are refused (`500`, with `version must be 3` in the log). Move them over:
 
 | Version 2 | Version 3 |
 |---|---|
@@ -226,14 +225,14 @@ Version 1 and 2 policies are refused (`500`, with `version N is no longer suppor
 
 ### Permissions
 
-`permissions` are permission-group names as the [permission groups API](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/subresources/permission_groups/) returns them, e.g. `"DNS Write"` or `"Workers Scripts Write"`. The broker looks up their IDs with the broker token and caches them for an hour. To see the full list:
+`permissions` are permission-group names as the [permission groups API](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/subresources/permission_groups/) returns them, e.g. `"DNS Write"` or `"Workers Scripts Write"`. The broker looks up their IDs with the broker token when it mints a token. To see the full list:
 
 ```sh
 curl -H "Authorization: Bearer <token>" \
   "https://api.cloudflare.com/client/v4/accounts/<account_id>/tokens/permission_groups"
 ```
 
-- An unknown name fails the mint with `500` (`unknown_permission`). It's never silently dropped.
+- An unknown name fails the mint with `500` (`misconfigured`). It's never silently dropped.
 - If a name exists at several scopes, the broker uses the one matching the resources' scope (account, zone or R2 bucket).
 
 ### Resources
@@ -334,8 +333,8 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 | `POST` | `/oauth/revoke` | `token` in the body | [Revoke](#revocation) (RFC 7009) a token the broker minted. What the action's post step uses. |
 | `GET` | `/.well-known/openid-configuration` | public | The broker's issuer, key and endpoint URLs, for services that verify [its tokens](#tokens-for-other-services). |
 | `GET` | `/.well-known/jwks` | public | The public key the broker signs its own tokens with. Empty without `CF_OIDC_EXCHANGE_API_SIGNING_KEY`. |
-| `GET` | `/health/live` | public | `200` whenever the Worker serves HTTP. |
-| `GET` | `/health/ready` | public | `200` whenever the Worker serves HTTP. It reads neither the policy nor the secrets: a route that needs them fails closed with `500`, with why in Workers Logs. |
+| `GET` | `/health/live` | public | `200` whenever the Worker's bindings are valid. |
+| `GET` | `/health/ready` | public | `200` whenever the Worker's bindings are valid. It doesn't read the secrets: a route that needs them fails closed with `500`, with why in Workers Logs. |
 
 ### Token exchange
 
@@ -394,11 +393,10 @@ curl -sS https://cf-oidc-exchange.example.com/oauth/revoke -d token="$CLOUDFLARE
 - `400 bad_request`
 - `401 unauthorized`
 - `403 forbidden`
-- `404 not_found`
 - `500 misconfigured` or `internal_error`
 - `502 upstream_error`
 
-For the caller's own mistakes (400 to 404) the message says what was wrong, for example `no profile matches the token` or `profile workers-deploy isn't for provider gitlab`. That tells a caller with a valid token which profile names exist. For the broker's faults (500, 502) the message is generic, and the logs say why.
+For the caller's own mistakes (400 to 403) the message says what was wrong, for example `no profile matches the token` or `profile workers-deploy isn't for provider gitlab`. That tells a caller with a valid token which profile names exist. For the broker's faults (500, 502) the message is generic, and the logs say why.
 
 **Contract:** [`exchangev1.yaml`](../cf-oidc-exchange-sdk/openapi/oidc/exchange/v1/exchangev1.yaml). The Worker's types, server and router are generated from it, and requests that don't fit it are refused (`400`) before any handler runs. The action's [`api.ts`](../../packages/cf-oidc-action/src/api.ts) mirrors it.
 
@@ -441,8 +439,6 @@ A token for another service is `token.issue`, with the audience and the token's 
 {"event":"token.issue","provider":"github","profile":"nix-push","sub":"repo:example-org/api:ref:refs/heads/main","ref":"refs/heads/main","repository_id":"200000003","repository_owner_id":"100000001","audience":"https://cf-nix-cache.example.com","jti":"<uuid>","expires_on":"2026-09-28T12:05:00Z"}
 ```
 
-When an isolate first loads the policy, it logs `policy.loaded` with the profile count, e.g. `{"event":"policy.loaded","profiles":3}`. Check this line after deploying.
-
 Denials are `token.deny` with the `error` and `message` of the response. For the broker's own faults, the message is the full one the caller doesn't get:
 
 ```json
@@ -462,47 +458,39 @@ Denials are `token.deny` with the `error` and `message` of the response. For the
 - **One signing key at a time.** Rotating it can't publish the old and new keys side by side, so a token signed just before the rotation fails at a service that has already refetched the JWKS. They're short-lived, and the caller can exchange again.
 - **No JWT replay cache.** A stolen JWT can be exchanged again until it expires. The custom audience and its short lifetime limit this.
 - **Resource IDs aren't checked up front.** Apart from the account check, a wrong zone ID is only caught when Cloudflare rejects the mint (`502`).
-- **Permission names can change.** Cloudflare can rename a permission group. Profiles using the old name fail closed (`500`) until the policy is updated, and the one-hour cache can delay a fix by up to an hour per isolate.
+- **Permission names can change.** Cloudflare can rename a permission group. Profiles using the old name fail closed (`500`) until the policy is updated.
 - **Secrets Store is required, and in open beta.** The broker token is only accepted from Secrets Store, so a plain Worker secret can't end up in Terraform state or deploy tooling. Accounts without Secrets Store can't run the broker yet.
 - **R2 credentials can't be revoked early.** They last their TTL; only rolling the broker token cuts them all off. One bucket per grant, and only buckets outside a jurisdiction.
 - **No rate limit.** A workflow the policy allows can mint as often as it runs. Each token expires within minutes, is revoked at job end and cleaned up hourly, but a compromised workflow could still create many tokens at once. Cloudflare's rate-limit binding was tried and didn't enforce a 30-per-minute limit against ~85 requests a minute, so it was left out. An exact per-repository limit (e.g. a Durable Object) may come later.
 
 ## Code
 
+The crate is laid out as cf-nix-cache's Worker is:
+
 | | |
 |---|---|
-| `src/policy` | The policy: loading, guardrails, matching, bucket prefixes. |
-| `src/oidc.rs` | OIDC tokens: the provider by `iss`, RS256 against the issuer's keys, the standard claims. |
-| `src/github.rs` | People's GitHub tokens, checked with GitHub's API. |
-| `src/issuer.rs` | The broker's own RS256 tokens, for profiles with another service's `audience`. |
-| `src/cloudflare.rs` | Account API tokens and R2 temporary credentials, through [cloudflare-rs](https://github.com/cf-contrib/cloudflare-rs). |
-| `src/service/handler.rs` | The generated API's implementation, as cf-nix-cache's is: each operation's flow (exchange, revocation, discovery, JWKS), the bindings it reads, and the cleanup the cron runs. |
-| `src/service/layer.rs` | Around the generated router: the `Error` body for requests it rejects or no route serves, and `Cache-Control`. |
-| `src/webcrypto.rs` | RS256 and SHA-256 through the runtime's WebCrypto: no RSA crate in the wasm. |
-| `worker/entry.js` | The entry module: hands the Worker `policy.json`, a module beside it. |
+| `src/lib.rs` | The fetch and scheduled events: the configuration, then the SDK's router over it, with the auth layer and the health endpoints. |
+| `src/service/config.rs` | The bindings, read in `Config::from_env` only, and the policy's format: providers, profiles, claim sets, bucket prefixes, and the guardrails parsing checks. |
+| `src/service/layer.rs` | Exchange auth, as a tower layer: the subject token's provider by `iss`, RS256 against the issuer's keys with WebCrypto, the standard claims and the provider's claim sets. And the `Error` body and `Cache-Control` of every response. |
+| `src/service/handler.rs` | The generated API's implementation: the exchange (profiles, Cloudflare tokens and R2 credentials through [cloudflare-rs](https://github.com/cf-contrib/cloudflare-rs), the broker's own tokens), revocation, discovery, the keys, the cleanup the cron runs, and the audit log. |
 
 ## Development
 
-`nix develop` at the repository root has the toolchain.
-
-```sh
-cp policy.example.json policy.json
-wrangler dev
-```
+`nix develop` at the repository root has the toolchain. `wrangler dev` serves the
+Worker with the policy in `wrangler.toml`.
 
 `cargo test` runs the unit tests. The integration tests run the Worker under
 `wrangler dev`, built with the `stand-ins` feature, against stand-ins for the
-OIDC issuers, GitHub and Cloudflare that the tests serve and control:
+OIDC issuers and Cloudflare that the tests serve and control:
 
 ```sh
 tests/run.sh
 ```
 
 It creates made-up secrets in a local Secrets Store, starts `wrangler dev` with
-`wrangler.test.toml` on port 8790, serves the stand-ins on 8791, and runs the
-tests one at a time. A `stand-ins` build takes, on every request, the scenario
-the running test sets: the policy, the account, and which bindings hold the
-broker token and the signing key. A release build never reads it.
+`wrangler.test.toml`, and its policy, on port 8790, serves the stand-ins on
+8791, and runs the tests one at a time. A `stand-ins` build takes Cloudflare's
+API from `CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL`; a release build never reads it.
 
 ## License
 

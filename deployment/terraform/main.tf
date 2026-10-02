@@ -37,22 +37,21 @@ resource "cloudflare_worker_version" "this" {
   account_id         = var.account_id
   worker_id          = cloudflare_worker.this.id
   compatibility_date = var.worker_compatibility_date
-  main_module        = "entry.js"
+  main_module        = "index.js"
 
   lifecycle {
     precondition {
       condition     = local.release_ok
       error_message = "The release's files don't match its SHA256SUMS, or SHA256SUMS doesn't match checksums_sha256."
     }
+
+    precondition {
+      condition     = length(local.policy_json) <= 5120
+      error_message = "The policy is ${length(local.policy_json)} bytes as JSON; a Worker variable holds at most 5 KB."
+    }
   }
 
   modules = [
-    {
-      # Hands the Worker policy.json, then is the Worker.
-      name           = "entry.js"
-      content_type   = "application/javascript+module"
-      content_base64 = base64encode(local.entry_js)
-    },
     {
       name           = "index.js"
       content_type   = "application/javascript+module"
@@ -63,13 +62,6 @@ resource "cloudflare_worker_version" "this" {
       content_type   = "application/wasm"
       content_base64 = local.wasm_base64
     },
-    {
-      # Imported by entry.js. Uploaded as text, which the Worker parses, since
-      # Workers has no JSON module type.
-      name           = "policy.json"
-      content_type   = "text/plain"
-      content_base64 = base64encode(local.policy_json)
-    },
   ]
 
   bindings = concat([
@@ -77,6 +69,11 @@ resource "cloudflare_worker_version" "this" {
       name = "CF_OIDC_EXCHANGE_API_ACCOUNT_ID"
       type = "plain_text"
       text = var.account_id
+    },
+    {
+      name = "CF_OIDC_EXCHANGE_API_POLICY"
+      type = "plain_text"
+      text = local.policy_json
     },
     {
       # Only ever from Secrets Store, so the token never enters Terraform state.

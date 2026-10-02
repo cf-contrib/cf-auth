@@ -14,14 +14,9 @@ locals {
   }
 }
 
-# The Worker's modules: entry.js imports index.js, worker-build's output, which
-# imports the wasm. The release has the wasm as base64 text, so its checksum can
-# be checked here: Terraform only hashes strings.
-data "http" "entry_js" {
-  count = var.worker_dir == null ? 1 : 0
-  url   = local.release_assets["entry.js"]
-}
-
+# The Worker's modules: index.js, worker-build's output, which imports the wasm.
+# The release has the wasm as base64 text, so its checksum can be checked here:
+# Terraform only hashes strings.
 data "http" "index_js" {
   count = var.worker_dir == null ? 1 : 0
   url   = local.release_assets["index.js"]
@@ -38,7 +33,6 @@ data "http" "sha256sums" {
 }
 
 locals {
-  entry_js      = var.worker_dir != null ? file("${var.worker_dir}/entry.js") : data.http.entry_js[0].response_body
   index_js      = var.worker_dir != null ? file("${var.worker_dir}/index.js") : data.http.index_js[0].response_body
   wasm_download = var.worker_dir != null ? "" : data.http.index_bg_wasm[0].response_body
   wasm_base64   = var.worker_dir != null ? filebase64("${var.worker_dir}/index_bg.wasm") : trimspace(local.wasm_download)
@@ -53,7 +47,6 @@ locals {
 
   # Every downloaded file must match SHA256SUMS, and SHA256SUMS must match checksums_sha256 if it's set.
   release_ok = var.worker_dir != null || (
-    lookup(local.checksums, "entry.js", "") == sha256(local.entry_js) &&
     lookup(local.checksums, "index.js", "") == sha256(local.index_js) &&
     lookup(local.checksums, "index_bg.wasm.base64", "") == sha256(local.wasm_download) &&
     (var.checksums_sha256 == null || sha256(local.sha256sums) == var.checksums_sha256)

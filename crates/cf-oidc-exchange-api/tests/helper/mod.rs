@@ -1,11 +1,11 @@
-//! The integration tests' world: stand-ins for the OIDC issuers, GitHub's API
-//! and Cloudflare's, served from the test process, and the scenario the Worker
-//! reads on every request. All IDs, tokens and keys are made up.
+//! The integration tests' world: stand-ins for the OIDC issuers and
+//! Cloudflare's API, served from the test process. The Worker's policy is in
+//! `wrangler.test.toml`. All IDs, tokens and keys are made up.
 
 #![allow(dead_code)]
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     sync::{LazyLock, Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -46,7 +46,6 @@ pub const CACHE: &str = "https://cf-nix-cache.example.com";
 /// The broker tokens `tests/run.sh` puts in the local Secrets Store.
 pub const CLOUDFLARE_TOKEN: &str = "test-cloudflare-token";
 pub const CLOUDFLARE_TOKEN_ID: &str = "tok-broker";
-pub const ROTATED_TOKEN: &str = "test-cloudflare-token-rotated";
 
 pub const GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 pub const ID_TOKEN: &str = "urn:ietf:params:oauth:token-type:id_token";
@@ -66,15 +65,6 @@ pub fn issuer(name: &str) -> String {
     format!("{STAND_INS}/issuers/{name}")
 }
 
-/// A fresh issuer, so the Worker hasn't cached its keys or discovery document.
-pub fn fresh_issuer(prefix: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    issuer(&format!("{prefix}-{nanos}"))
-}
-
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -86,32 +76,16 @@ pub fn now() -> u64 {
 // The world
 // ---------------------------------------------------------------------------
 
-/// What the Worker sees: the scenario it reads, and the stand-ins' state.
+/// What the Worker sees of the stand-ins.
 pub struct World {
-    /// The policy, the account, and which bindings hold the broker token and signing key.
-    pub scenario: Value,
-    /// Discovery documents that differ from the issuer's own, by issuer name.
-    pub discovery: HashMap<String, Value>,
     pub cloudflare: FakeCloudflare,
 }
 
 impl World {
     fn new() -> Self {
         Self {
-            scenario: json!({
-                "policy": test_policy(),
-                "account_id": ACCOUNT_ID,
-                "cloudflare_token": "CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN",
-                "signing_key": "CF_OIDC_EXCHANGE_API_SIGNING_KEY",
-            }),
-            discovery: HashMap::new(),
             cloudflare: FakeCloudflare::new(),
         }
-    }
-
-    /// The policy, to change.
-    pub fn policy(&mut self) -> &mut Value {
-        &mut self.scenario["policy"]
     }
 }
 
@@ -127,7 +101,7 @@ pub fn world() -> MutexGuard<'static, World> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// A test's hold on the world, fresh: the default scenario and stand-ins.
+/// A test's hold on the world, fresh.
 pub struct Test {
     _guard: tokio::sync::MutexGuard<'static, ()>,
     /// Where the Worker's log was when the test began.
@@ -399,60 +373,6 @@ pub async fn verify_broker_token(jwt: &str) -> (Value, Value) {
 }
 
 // ---------------------------------------------------------------------------
-// The test policy
-// ---------------------------------------------------------------------------
-
-/// A version 3 policy: one GitHub Actions provider, `github`, for the `actions`
-/// stand-in issuer, pinned to the test org, and three profiles for it.
-pub fn test_policy() -> Value {
-    json!({
-        "version": 3,
-        "issuer": AUDIENCE,
-        "providers": [{ "name": "github", "issuer": issuer("actions"), "audience": AUDIENCE, "claims": [{ "repository_owner_id": OWNER_ID }] }],
-        "defaults": { "ttl": "15m", "max_ttl": "1h" },
-        "profiles": [
-            {
-                "name": "infra-cloudflare",
-                "provider": "github",
-                "claims": [{ "repository_id": "200000002", "ref": "refs/heads/main", "environment": "prod" }],
-                "ttl": "15m",
-                "token": { "policies": [{
-                    "effect": "allow",
-                    "permissions": ["Zone Write", "DNS Write"],
-                    "resources": { (format!("com.cloudflare.api.account.zone.{ZONE_ID}")): "*" },
-                }]},
-            },
-            {
-                "name": "workers-deploy",
-                "provider": "github",
-                "claims": [{ "repository": "example-org/*", "ref": "refs/heads/main", "environment": "prod" }],
-                "token": { "policies": [{
-                    "effect": "allow",
-                    "permissions": ["Workers Scripts Write"],
-                    "resources": { (format!("com.cloudflare.api.account.{ACCOUNT_ID}")): "*" },
-                }]},
-            },
-            {
-                "name": "service-dns",
-                "provider": "github",
-                "claims": [{ "job_workflow_ref": "example-org/workflows/.github/workflows/deploy.yml@refs/heads/main" }],
-                "ttl": "5m",
-                "token": { "policies": [{
-                    "effect": "allow",
-                    "permissions": ["DNS Write"],
-                    "resources": { (format!("com.cloudflare.api.account.zone.{ZONE_ID}")): "*" },
-                }]},
-            },
-        ],
-    })
-}
-
-/// workers-deploy's token, for profiles that need one.
-pub fn deploy_token() -> Value {
-    test_policy()["profiles"][1]["token"].clone()
-}
-
-// ---------------------------------------------------------------------------
 // The stand-in server
 // ---------------------------------------------------------------------------
 
@@ -461,10 +381,6 @@ static SERVER: LazyLock<()> = LazyLock::new(|| {
         .unwrap_or_else(|err| panic!("the stand-ins can't listen on {STAND_INS_ADDR}: {err}"));
     listener.set_nonblocking(true).unwrap();
     let app = Router::new()
-        .route(
-            "/scenario",
-            get(|| async { Json(world().scenario.clone()) }),
-        )
         .route(
             "/issuers/{name}/.well-known/openid-configuration",
             get(discovery),
@@ -484,10 +400,15 @@ static SERVER: LazyLock<()> = LazyLock::new(|| {
     });
 });
 
+/// An issuer's discovery document. `mismatched`'s and `pinned`'s name another
+/// issuer, which the Worker must refuse: `pinned`'s provider has a `jwks_uri`,
+/// so the Worker never reads it.
 async fn discovery(Path(name): Path<String>) -> Json<Value> {
-    let issuer = issuer(&name);
-    let own = json!({ "issuer": issuer, "jwks_uri": format!("{issuer}/.well-known/jwks") });
-    Json(world().discovery.get(&name).cloned().unwrap_or(own))
+    let issuer = match name.as_str() {
+        "mismatched" | "pinned" => "https://evil.example.com".to_string(),
+        _ => issuer(&name),
+    };
+    Json(json!({ "issuer": issuer, "jwks_uri": format!("{issuer}/.well-known/jwks") }))
 }
 
 async fn jwks() -> Json<Value> {

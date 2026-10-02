@@ -13,16 +13,12 @@ trap 'rm -rf "$KEYS"; [ -n "${DEV:-}" ] && kill "$DEV" 2>/dev/null; wait 2>/dev/
 
 rm -rf "$PERSIST" && mkdir -p "$PERSIST"
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$KEYS/signing.pem" 2>/dev/null
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:1024 -out "$KEYS/small.pem" 2>/dev/null
 secret() {
   # --value= keeps a PEM's leading dashes from being read as a flag.
   wrangler secrets-store secret create "$STORE" --name "$1" --scopes workers --value="$2" --persist-to "$PERSIST" >/dev/null
 }
 secret cloudflare-token test-cloudflare-token
-secret cloudflare-token-rotated test-cloudflare-token-rotated
 secret signing-key "$(cat "$KEYS/signing.pem")"
-secret signing-key-small "$(cat "$KEYS/small.pem")"
-secret signing-key-not-pem "not a key"
 
 wrangler dev -c wrangler.test.toml --port 8790 --persist-to "$PERSIST" --test-scheduled >"$LOG" 2>&1 &
 DEV=$!

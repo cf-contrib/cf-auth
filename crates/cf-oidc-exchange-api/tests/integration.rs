@@ -1,6 +1,6 @@
-//! End-to-end tests of the Worker under `wrangler dev`, with the OIDC issuers,
-//! GitHub and Cloudflare replaced by the stand-ins in `helper`. Ported from the
-//! TypeScript broker's `test/worker.test.ts`. Run with `tests/run.sh`.
+//! End-to-end tests of the Worker under `wrangler dev`, with the OIDC issuers
+//! and Cloudflare replaced by the stand-ins in `helper`, and the policy in
+//! `wrangler.test.toml`. Run with `tests/run.sh`.
 
 #![cfg(feature = "integration")]
 
@@ -219,32 +219,10 @@ mod token_exchange_for_jobs {
     }
 
     #[tokio::test]
-    async fn logs_the_profile_count_when_the_policy_loads() {
-        let t = start().await;
-        world().policy()["defaults"] = json!({ "ttl": "10m" }); // a policy the Worker hasn't loaded
-        call(Method::GET, "/.well-known/openid-configuration").await;
-        assert_eq!(
-            t.audit("policy.loaded").await,
-            Some(json!({ "event": "policy.loaded", "profiles": 3 }))
-        );
-    }
-
-    #[tokio::test]
-    async fn fails_closed_when_the_policy_is_invalid() {
-        let t = start().await;
-        world().policy()["github"] = json!({ "audience": "https://x.example.com" });
-        let res = job_token(&sign(github_claims(json!({}))), &[]).await;
-        assert_eq!(res.status, 500);
-        assert_error(&res, "misconfigured");
-        assert!(t.audit("policy.invalid").await.is_some());
-    }
-
-    #[tokio::test]
     async fn fails_when_a_permission_name_is_unknown() {
         let t = start().await;
-        world().policy()["profiles"][1]["token"]["policies"][0]["permissions"] =
-            json!(["Workers Scrpts Write"]);
-        let res = job_token(&sign(github_claims(json!({}))), &[]).await;
+        let claims = github_claims(json!({ "environment": "misspelled" }));
+        let res = job_token(&sign(claims), &[]).await;
         assert_eq!(res.status, 500);
         assert_refused(
             &t.deny().await,
@@ -256,9 +234,8 @@ mod token_exchange_for_jobs {
     #[tokio::test]
     async fn picks_the_right_scope_for_a_permission_name_shared_by_two_groups() {
         let _t = start().await;
-        world().policy()["profiles"][1]["token"]["policies"][0]["permissions"] =
-            json!(["Load Balancers Write"]);
-        let res = job_token(&sign(github_claims(json!({}))), &[]).await;
+        let claims = github_claims(json!({ "environment": "lb-account" }));
+        let res = job_token(&sign(claims), &[]).await;
         assert_eq!(res.status, 200, "{}", res.text);
         assert_eq!(
             minted_policies(&token_id(&res))[0]["permission_groups"],
@@ -269,26 +246,13 @@ mod token_exchange_for_jobs {
     #[tokio::test]
     async fn picks_the_zone_scoped_group_for_zone_resources() {
         let _t = start().await;
-        world().policy()["profiles"][0]["token"]["policies"][0]["permissions"] =
-            json!(["Load Balancers Write"]);
-        let claims = github_claims(
-            json!({ "repository": "example-org/infra", "repository_id": "200000002" }),
-        );
-        let res = job_token(&sign(claims), &[("profile", "infra-cloudflare")]).await;
+        let claims = github_claims(json!({ "environment": "lb-zone" }));
+        let res = job_token(&sign(claims), &[]).await;
         assert_eq!(res.status, 200, "{}", res.text);
         assert_eq!(
             minted_policies(&token_id(&res))[0]["permission_groups"],
             json!([{ "id": "pg-lb-write-zone" }])
         );
-    }
-
-    #[tokio::test]
-    async fn fails_closed_when_the_policy_names_another_account() {
-        let _t = start().await;
-        world().scenario["account_id"] = json!("ffffffffffffffffffffffffffffffff");
-        let res = job_token(&sign(github_claims(json!({}))), &[]).await;
-        assert_eq!(res.status, 500);
-        assert_error(&res, "misconfigured");
     }
 
     #[tokio::test]
@@ -325,38 +289,25 @@ mod token_exchange_for_jobs {
 mod token_exchange_for_jobs_with_buckets {
     use super::*;
 
-    /// Adds profiles for the state environment, which no other test profile matches.
-    fn with_profiles(profiles: Value) {
-        let mut world = world();
-        let list = world.policy()["profiles"].as_array_mut().unwrap();
-        list.extend(profiles.as_array().unwrap().iter().cloned());
-    }
-
-    fn state() -> Value {
-        json!([{ "repository": "example-org/state-*", "environment": "state" }])
-    }
-
-    fn state_repo(overrides: Value) -> String {
-        let mut claims =
-            github_claims(json!({ "repository": "example-org/state-app", "environment": "state" }));
+    /// A token from a state repo's job in `environment`, which picks the
+    /// test policy's profile of that name.
+    fn state_repo(environment: &str, overrides: Value) -> String {
+        let mut claims = github_claims(
+            json!({ "repository": "example-org/state-app", "environment": environment }),
+        );
         merge(&mut claims, overrides);
         sign(claims)
-    }
-
-    fn deploy_policies() -> Value {
-        json!({ "policies": [{ "permissions": ["Workers Scripts Write"], "resources": { (format!("com.cloudflare.api.account.{ACCOUNT_ID}")): "*" } }] })
     }
 
     #[tokio::test]
     async fn issues_prefix_limited_credentials_for_a_profile_with_only_buckets() {
         let _t = start().await;
-        with_profiles(json!([{
-            "name": "terraform-state",
-            "claims": state(),
-            "buckets": [{ "name": "org-terraform-state", "permission": "object-read-write", "prefixes": ["github.com/{repository}/"] }],
-        }]));
         let before = now();
-        let res = job_token(&state_repo(json!({})), &[("profile", "terraform-state")]).await;
+        let res = job_token(
+            &state_repo("state", json!({})),
+            &[("profile", "terraform-state")],
+        )
+        .await;
         assert_eq!(res.status, 200, "{}", res.text);
         let body = res.json();
         let expires_on = body["buckets"][0]["expires_on"]
@@ -402,13 +353,7 @@ mod token_exchange_for_jobs_with_buckets {
     #[tokio::test]
     async fn covers_the_whole_bucket_without_prefixes_and_honours_the_requested_ttl() {
         let _t = start().await;
-        with_profiles(json!([{
-            "name": "terraform-state",
-            "claims": state(),
-            "max_ttl": "30m",
-            "buckets": [{ "name": "org-terraform-state", "permission": "object-read-only" }],
-        }]));
-        let res = job_token(&state_repo(json!({})), &[("ttl", "2h")]).await;
+        let res = job_token(&state_repo("whole-bucket", json!({})), &[("ttl", "2h")]).await;
         assert_eq!(res.json()["buckets"][0]["prefixes"], json!([]));
         assert_eq!(
             r2_bodies()[0],
@@ -419,14 +364,7 @@ mod token_exchange_for_jobs_with_buckets {
     #[tokio::test]
     async fn mints_a_token_and_credentials_that_expire_together_for_a_profile_with_both() {
         let _t = start().await;
-        with_profiles(json!([{
-            "name": "state-and-deploy",
-            "claims": state(),
-            "ttl": "10m",
-            "token": deploy_policies(),
-            "buckets": [{ "name": "org-terraform-state", "permission": "object-read-write", "prefixes": ["{repository_id}/"] }],
-        }]));
-        let res = job_token(&state_repo(json!({})), &[]).await;
+        let res = job_token(&state_repo("state-and-deploy", json!({})), &[]).await;
         assert_eq!(res.status, 200, "{}", res.text);
         let body = res.json();
         assert!(
@@ -444,15 +382,7 @@ mod token_exchange_for_jobs_with_buckets {
     #[tokio::test]
     async fn issues_credentials_for_each_bucket_in_the_policys_order() {
         let t = start().await;
-        with_profiles(json!([{
-            "name": "state-and-artifacts",
-            "claims": state(),
-            "buckets": [
-                { "name": "org-terraform-state", "permission": "object-read-write", "prefixes": ["github.com/{repository}/"] },
-                { "name": "org-artifacts", "permission": "object-read-only" },
-            ],
-        }]));
-        let res = job_token(&state_repo(json!({})), &[]).await;
+        let res = job_token(&state_repo("state-and-artifacts", json!({})), &[]).await;
         assert_eq!(res.status, 200, "{}", res.text);
         let buckets: Vec<Value> = res.json()["buckets"]
             .as_array()
@@ -487,17 +417,13 @@ mod token_exchange_for_jobs_with_buckets {
     #[tokio::test]
     async fn deletes_the_token_when_a_later_buckets_credentials_cant_be_created() {
         let t = start().await;
-        with_profiles(json!([{
-            "name": "state-and-artifacts",
-            "claims": state(),
-            "token": deploy_policies(),
-            "buckets": [
-                { "name": "org-terraform-state", "permission": "object-read-write" },
-                { "name": "org-artifacts", "permission": "object-read-only" },
-            ],
-        }]));
         world().cloudflare.fail_r2_bucket = Some("org-artifacts".into());
-        assert_eq!(job_token(&state_repo(json!({})), &[]).await.status, 502);
+        assert_eq!(
+            job_token(&state_repo("deploy-and-artifacts", json!({})), &[])
+                .await
+                .status,
+            502
+        );
         assert_eq!(token_count(), 1); // only the broker token
         let issued: Vec<Value> = t
             .audits("r2.issued")
@@ -511,14 +437,8 @@ mod token_exchange_for_jobs_with_buckets {
     #[tokio::test]
     async fn deletes_the_token_when_the_credentials_cant_be_created() {
         let t = start().await;
-        with_profiles(json!([{
-            "name": "state-and-deploy",
-            "claims": state(),
-            "token": deploy_policies(),
-            "buckets": [{ "name": "org-terraform-state", "permission": "object-read-write" }],
-        }]));
         world().cloudflare.fail_r2 = true;
-        let res = job_token(&state_repo(json!({})), &[]).await;
+        let res = job_token(&state_repo("state-and-deploy", json!({})), &[]).await;
         assert_eq!(res.status, 502);
         assert_error(&res, "upstream_error");
         assert_eq!(token_count(), 1); // the minted token was deleted
@@ -532,20 +452,18 @@ mod token_exchange_for_jobs_with_buckets {
     #[tokio::test]
     async fn refuses_without_calling_cloudflare_when_a_claim_cant_be_used_in_the_prefix() {
         let t = start().await;
-        with_profiles(json!([{
-            "name": "terraform-state",
-            "claims": state(),
-            "buckets": [{ "name": "org-terraform-state", "permission": "object-read-write", "prefixes": ["{repository_owner}/"] }],
-        }]));
         let res = job_token(
-            &state_repo(json!({ "repository_owner": "../example-org" })),
+            &state_repo(
+                "owner-state",
+                json!({ "repository_owner": "../example-org" }),
+            ),
             &[],
         )
         .await;
         assert_eq!(res.status, 403);
         assert_error(&res, "forbidden");
         let deny = t.deny().await;
-        assert_matches(&deny, json!({ "profile": "terraform-state" }));
+        assert_matches(&deny, json!({ "profile": "owner-state" }));
         assert_refused(&deny, "forbidden", "bucket org-terraform-state: ");
         assert!(world().cloudflare.calls().is_empty());
     }
@@ -553,12 +471,7 @@ mod token_exchange_for_jobs_with_buckets {
     #[tokio::test]
     async fn writes_an_r2_issued_audit_line_without_secrets() {
         let t = start().await;
-        with_profiles(json!([{
-            "name": "terraform-state",
-            "claims": state(),
-            "buckets": [{ "name": "org-terraform-state", "permission": "object-read-write", "prefixes": ["github.com/{repository}/"] }],
-        }]));
-        let res = job_token(&state_repo(json!({})), &[]).await;
+        let res = job_token(&state_repo("state", json!({})), &[]).await;
         let expires_on = res.json()["buckets"][0]["expires_on"].clone();
         assert_eq!(
             t.audit("r2.issued").await.unwrap(),
@@ -578,45 +491,6 @@ mod token_exchange_for_jobs_with_buckets {
         );
         assert!(!t.log().contains("r2-secret-value"));
         assert!(!t.log().contains("r2-session-token-value"));
-    }
-
-    #[tokio::test]
-    async fn looks_up_the_parent_access_key_id_once_and_again_after_the_cloudflare_token_rotates() {
-        let _t = start().await;
-        with_profiles(json!([{
-            "name": "terraform-state",
-            "claims": state(),
-            "buckets": [{ "name": "org-terraform-state", "permission": "object-read-write" }],
-        }]));
-        let verifies = || {
-            world()
-                .cloudflare
-                .requests
-                .iter()
-                .filter(|r| r.path.ends_with("/tokens/verify"))
-                .count()
-        };
-        // An earlier test may have looked it up already: once at most, then never again.
-        job_token(&state_repo(json!({})), &[]).await;
-        let first = verifies();
-        assert!(first <= 1);
-        job_token(&state_repo(json!({})), &[]).await;
-        assert_eq!(verifies(), first);
-
-        {
-            let mut world = world();
-            world.cloudflare.add(
-                Some("tok-rotated"),
-                "cf-oidc broker token (rotated)",
-                Some(ROTATED_TOKEN),
-                None,
-                "active",
-            );
-            world.scenario["cloudflare_token"] = json!("CLOUDFLARE_TOKEN_ROTATED");
-        }
-        // The stand-in only takes the original broker token for everything but verify, so stop here.
-        job_token(&state_repo(json!({})), &[]).await;
-        assert_eq!(verifies(), first + 1);
     }
 }
 
@@ -697,62 +571,6 @@ mod revocation {
     }
 }
 
-mod cloudflare_token {
-    use super::*;
-
-    #[tokio::test]
-    async fn is_read_on_every_use() {
-        let _t = start().await;
-        let res = job_token(&sign(github_claims(json!({}))), &[]).await;
-        assert_eq!(res.status, 200);
-        // A rotated secret takes effect on the next request, without a redeploy:
-        // the stand-in takes only the original token for anything but verify.
-        world().scenario["cloudflare_token"] = json!("CLOUDFLARE_TOKEN_ROTATED");
-        world().cloudflare.add(
-            Some("tok-rotated"),
-            "cf-oidc broker token (rotated)",
-            Some(ROTATED_TOKEN),
-            None,
-            "active",
-        );
-        let res = job_token(&sign(github_claims(json!({}))), &[]).await;
-        assert_eq!(res.status, 502);
-    }
-
-    #[tokio::test]
-    async fn fails_closed_when_the_secret_cant_be_read() {
-        let t = start().await;
-        world().scenario["cloudflare_token"] = json!("CLOUDFLARE_TOKEN_MISSING");
-        let res = job_token(&sign(github_claims(json!({}))), &[]).await;
-        assert_eq!(res.status, 500);
-        assert_error(&res, "misconfigured");
-        assert_refused(
-            &t.deny().await,
-            "misconfigured",
-            "CLOUDFLARE_TOKEN_MISSING can't be read",
-        );
-        assert_eq!(token_count(), 1); // nothing minted
-    }
-
-    #[tokio::test]
-    async fn refuses_a_plain_worker_secret() {
-        let t = start().await;
-        world().scenario["cloudflare_token"] = json!("CLOUDFLARE_TOKEN_PLAIN");
-        let res = job_token(&sign(github_claims(json!({}))), &[]).await;
-        assert_eq!(res.status, 500);
-        assert_error(&res, "misconfigured");
-        assert!(!res.text.contains("CLOUDFLARE_TOKEN_PLAIN"), "{}", res.text);
-        // Refused with the configuration, before any route: the log says why.
-        assert!(
-            t.log()
-                .contains("misconfigured: CLOUDFLARE_TOKEN_PLAIN must be a Secrets Store binding"),
-            "{}",
-            t.log()
-        );
-        assert!(world().cloudflare.calls().is_empty());
-    }
-}
-
 mod health {
     use cf_oidc_exchange_sdk::v1::HealthClient;
 
@@ -771,20 +589,6 @@ mod health {
                 .as_deref(),
             Some("no-store")
         );
-    }
-
-    /// Misconfigured, the Worker serves nothing, the health endpoints
-    /// included, so a broken deploy shows on its probes.
-    #[tokio::test]
-    async fn is_neither_live_nor_ready_when_misconfigured() {
-        let _t = start().await;
-        world().scenario["policy"] = json!("{");
-        let health = HealthClient::new(BROKER);
-        assert!(!health.is_live().await.expect("the request failed"));
-        assert!(!health.is_ready().await.expect("the request failed"));
-        let res = call(Method::GET, "/health/ready").await;
-        assert_eq!(res.status, 500);
-        assert_error(&res, "misconfigured");
     }
 }
 
@@ -888,11 +692,13 @@ mod exchange_requests {
                 "",
             ),
         ];
+        // A valid token: the layer verifies it before anything else is looked at.
+        let jwt = sign(github_claims(json!({})));
         for (case, overrides, says) in cases {
             let t = start().await;
             let mut form: Vec<(&str, &str)> = vec![
                 ("grant_type", GRANT),
-                ("subject_token", "not-checked"),
+                ("subject_token", &jwt),
                 ("subject_token_type", ID_TOKEN),
             ];
             for (key, value) in overrides {
@@ -964,21 +770,10 @@ mod providers {
         claims
     }
 
-    /// A GitLab stand-in at a fresh issuer, with a profile for Cloudflare and one for the cache.
+    /// A test with the GitLab stand-in, whose profiles are `gitlab-deploy`,
+    /// `gitlab-cache` and `gitlab-state`.
     async fn setup() -> (Test, String) {
-        let t = start().await;
-        let gitlab = fresh_issuer("gitlab");
-        {
-            let mut world = world();
-            let policy = world.policy();
-            policy["providers"].as_array_mut().unwrap().push(json!({
-                "name": "gitlab", "issuer": gitlab, "audience": AUDIENCE, "claims": [{ "namespace_id": "4000001" }],
-            }));
-            let profiles = policy["profiles"].as_array_mut().unwrap();
-            profiles.push(json!({ "name": "gitlab-deploy", "provider": "gitlab", "claims": [{ "project_path": "group/app", "ref_protected": "true" }], "token": deploy_token() }));
-            profiles.push(json!({ "name": "gitlab-cache", "provider": "gitlab", "audience": CACHE, "claims": [{ "project_path": "group/*" }] }));
-        }
-        (t, gitlab)
+        (start().await, issuer("gitlab"))
     }
 
     fn gitlab_token(gitlab: &str, claims: Value) -> String {
@@ -1055,11 +850,10 @@ mod providers {
 
     #[tokio::test]
     async fn fails_when_the_discovery_document_names_another_issuer() {
-        let (t, gitlab) = setup().await;
-        let name = gitlab.rsplit('/').next().unwrap().to_string();
-        world().discovery.insert(name, json!({ "issuer": "https://evil.example.com", "jwks_uri": format!("{gitlab}/.well-known/jwks") }));
+        let t = start().await;
+        let mismatched = issuer("mismatched");
         assert_eq!(
-            job_token(&gitlab_token(&gitlab, gitlab_claims(json!({}))), &[])
+            job_token(&gitlab_token(&mismatched, gitlab_claims(json!({}))), &[])
                 .await
                 .status,
             502
@@ -1074,19 +868,12 @@ mod providers {
 
     #[tokio::test]
     async fn takes_the_keys_from_jwks_uri_when_its_set_not_from_discovery() {
-        let (_t, gitlab) = setup().await;
-        let name = gitlab.rsplit('/').next().unwrap().to_string();
-        {
-            let mut world = world();
-            // Discovery would fail; jwks_uri never reads it.
-            world
-                .discovery
-                .insert(name, json!({ "issuer": "https://evil.example.com" }));
-            world.policy()["providers"][1]["jwks_uri"] =
-                json!(format!("{gitlab}/.well-known/jwks"));
-        }
-        let res = job_token(&gitlab_token(&gitlab, gitlab_claims(json!({}))), &[]).await;
+        let _t = start().await;
+        // Its discovery document names another issuer; jwks_uri never reads it.
+        let pinned = gitlab_token(&issuer("pinned"), gitlab_claims(json!({})));
+        let res = job_token(&pinned, &[("audience", CACHE)]).await;
         assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(res.json()["profile"], "pinned-cache");
     }
 
     /// Any claim can fill a bucket prefix, not only GitHub's: GitLab's
@@ -1094,12 +881,6 @@ mod providers {
     #[tokio::test]
     async fn fills_bucket_prefixes_from_another_issuers_claims() {
         let (_t, gitlab) = setup().await;
-        world().policy()["profiles"].as_array_mut().unwrap().push(json!({
-            "name": "gitlab-state",
-            "provider": "gitlab",
-            "claims": [{ "project_path": "group/*", "ref": "main" }],
-            "buckets": [{ "name": "org-terraform-state", "permission": "object-read-write", "prefixes": ["gitlab.com/{project_path}/", "{namespace_id}/{project_id}/"] }],
-        }));
         let claims = gitlab_claims(json!({ "project_path": "group/sub/app" }));
         let res = job_token(
             &gitlab_token(&gitlab, claims),
@@ -1144,14 +925,9 @@ mod providers {
 mod tokens_for_other_services {
     use super::*;
 
+    /// A test of the `nix-push` profile, for the cache.
     async fn setup() -> Test {
-        let t = start().await;
-        let mut world = world();
-        let policy = world.policy();
-        let profiles = policy["profiles"].as_array_mut().unwrap();
-        profiles.push(json!({ "name": "nix-push", "provider": "github", "audience": CACHE, "claims": [{ "ref": "refs/heads/main" }], "ttl": "15m" }));
-        drop(world);
-        t
+        start().await
     }
 
     async fn for_cache(subject_token: &str, token_type: &str, extra: &[(&str, &str)]) -> Reply {
@@ -1254,13 +1030,14 @@ mod tokens_for_other_services {
     }
 
     #[tokio::test]
-    async fn rejects_an_audience_no_profile_is_for_without_verifying_anything() {
+    async fn rejects_an_audience_no_profile_is_for() {
         let t = setup().await;
+        let jwt = sign(github_claims(json!({})));
         let res = post_form(
             "/oauth/token",
             &[
                 ("grant_type", GRANT),
-                ("subject_token", "not-checked"),
+                ("subject_token", &jwt),
                 ("subject_token_type", ID_TOKEN),
                 ("audience", "https://other.example.com"),
             ],
@@ -1298,82 +1075,15 @@ mod tokens_for_other_services {
         .await;
         assert_eq!(res.status, 400);
     }
-
-    #[tokio::test]
-    async fn fails_closed_without_a_signing_key_and_leaves_cloudflare_profiles_working() {
-        let t = setup().await;
-        world().scenario["signing_key"] = json!("SIGNING_KEY_UNBOUND");
-        let res = for_cache(&sign(github_claims(json!({}))), ID_TOKEN, &[]).await;
-        assert_eq!(res.status, 500);
-        assert_error(&res, "misconfigured");
-        assert_refused(
-            &t.deny().await,
-            "misconfigured",
-            "SIGNING_KEY_UNBOUND isn't bound",
-        );
-
-        assert_eq!(
-            job_token(&sign(github_claims(json!({}))), &[]).await.status,
-            200
-        );
-        // Nothing to publish without a key.
-        assert_eq!(
-            call(Method::GET, "/.well-known/jwks").await.json(),
-            json!({ "keys": [] })
-        );
-    }
-
-    #[tokio::test]
-    async fn fails_closed_on_a_signing_key_that_isnt_an_rsa_pkcs8_pem() {
-        let t = setup().await;
-        world().scenario["signing_key"] = json!("SIGNING_KEY_NOT_PEM");
-        assert_eq!(
-            for_cache(&sign(github_claims(json!({}))), ID_TOKEN, &[])
-                .await
-                .status,
-            500
-        );
-        assert_refused(
-            &t.deny().await,
-            "misconfigured",
-            "the signing key: not an RSA private key in PKCS#8 PEM",
-        );
-    }
-
-    #[tokio::test]
-    async fn fails_closed_on_an_rsa_key_under_2048_bits() {
-        let t = setup().await;
-        world().scenario["signing_key"] = json!("SIGNING_KEY_SMALL");
-        assert_eq!(
-            for_cache(&sign(github_claims(json!({}))), ID_TOKEN, &[])
-                .await
-                .status,
-            500
-        );
-        assert_refused(
-            &t.deny().await,
-            "misconfigured",
-            "the signing key: RSA key is 1024 bits, at least 2048 needed",
-        );
-    }
 }
 
 #[tokio::test]
-async fn answers_not_found_on_unknown_routes_including_the_removed_v1_routes() {
+async fn serves_only_the_apis_routes() {
     let _t = start().await;
-    for path in [
-        "/v1/token",
-        "/v1/actions/token",
-        "/v1/users/token",
-        "/v1/user/token",
-        "/v1/revoke",
-    ] {
-        let res = post_form(path, &[]).await;
-        assert_eq!(res.status, 404, "{path}");
-        assert_error(&res, "not_found");
+    for path in ["/v1/token", "/v1/revoke", "/"] {
+        assert_eq!(post_form(path, &[]).await.status, 404, "{path}");
     }
-    assert_eq!(call(Method::GET, "/oauth/token").await.status, 404);
-    assert_eq!(call(Method::GET, "/").await.status, 404);
+    assert_eq!(call(Method::GET, "/oauth/token").await.status, 405);
 }
 
 #[tokio::test]

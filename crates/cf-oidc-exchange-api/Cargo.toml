@@ -16,26 +16,28 @@ cf-oidc-exchange-sdk = { path = "../cf-oidc-exchange-sdk", features = ["server"]
 # Named by the generated traits and router; the versions the SDK builds with.
 async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["json"] }
+# The auth layer: a tower Layer and Service over the API's routes, which reads
+# the exchange's form body as the generated router does.
+tower-layer = "0.3"
 tower-service = "0.3"
+serde_urlencoded = "0.7"
 
 # The Cloudflare API: account tokens and R2 temporary credentials.
 # Pinned to cf-contrib/cloudflare-rs#3 (token policy id, open scopes) until it merges.
 cloudflare = { git = "https://github.com/cf-contrib/cloudflare-rs", rev = "bf8bd31bf2b456b6bc99d9e2171debf591d992e0", features = ["accounts", "r2", "client"] }
 
+# The policy, token claims, discovery documents and key sets.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The policy: errors by the path of the field they're about, claim patterns, URLs.
-serde_path_to_error = "0.1"
-regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl"] }
-url = "2"
 
-# Calls GitHub, and issuers' discovery documents and keys. Already in the tree
-# via `cloudflare`.
+# Fetches issuers' discovery documents and keys. Already in the tree via
+# `cloudflare`.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
-futures-util = { version = "0.3", default-features = false }
 # JWT segments, PEMs, and the timestamps of the tokens API.
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+# Keys the auth cache by the SHA-256 of the token.
+sha2 = { version = "0.11", default-features = false }
 # WebCrypto bindings for RS256, so no RSA crate ends up in the wasm bundle.
 web-sys = { version = "0.3", features = ["Crypto", "CryptoKey", "SubtleCrypto", "WorkerGlobalScope"] }
 
@@ -55,8 +57,6 @@ rsa = { version = "0.9", features = ["sha2"] }
 [features]
 # Opt-in integration tests which require `wrangler dev` running locally.
 integration = []
-# For the integration tests, never a release: CF_OIDC_EXCHANGE_API_GITHUB_URL
-# and CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL point the Worker at the tests'
-# stand-ins, and CF_OIDC_EXCHANGE_API_SCENARIO_URL at the policy, account and
-# bindings each test chooses.
+# For the integration tests, never a release: CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL
+# points the Worker at the tests' stand-in for Cloudflare's API.
 stand-ins = []

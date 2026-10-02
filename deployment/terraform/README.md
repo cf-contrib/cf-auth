@@ -115,9 +115,9 @@ profiles:
 The format is documented in the [broker's README](../../crates/cf-oidc-exchange-api#policy). A
 fuller sample is in [`tests/fixtures/policy.yaml`](tests/fixtures/policy.yaml).
 
-The rendered policy is uploaded as `policy.json`, a text module in the Worker
-version next to the broker's, so it isn't subject to the 5 KB limit on Worker
-variables. Every policy change creates a new Worker version.
+The rendered policy is bound as `CF_OIDC_EXCHANGE_API_POLICY`, compact JSON. A
+Worker variable holds at most 5 KB, and the plan fails on a policy over that.
+Every policy change creates a new Worker version.
 
 ## Upgrading and pinning
 
@@ -126,8 +126,8 @@ Worker. To upgrade, bump the `ref`, run `tofu init -upgrade`, then `apply` to
 upload a new Worker version and shift all traffic to it. Keep the action's
 version in your workflows on the same release.
 
-A release has the Worker's three modules, `entry.js`, `index.js` and the wasm
-(as base64 text, `index_bg.wasm.base64`), and a `SHA256SUMS` of them. The plan
+A release has the Worker's two modules, `index.js` and the wasm (as base64 text,
+`index_bg.wasm.base64`), and a `SHA256SUMS` of them. The plan
 fails if a download doesn't match `SHA256SUMS`. To pin the artifacts too, set
 `checksums_sha256` to the SHA-256 of the release's `SHA256SUMS`:
 
@@ -142,7 +142,7 @@ and set `worker_dir` to the result. Nothing is downloaded then:
 
 ```sh
 cd crates/cf-oidc-exchange-api
-worker-build --release && cp worker/entry.js build/   # worker_dir = ".../crates/cf-oidc-exchange-api/build"
+worker-build --release   # worker_dir = ".../crates/cf-oidc-exchange-api/build"
 ```
 
 ## Inputs
@@ -156,7 +156,7 @@ worker-build --release && cp worker/entry.js build/   # worker_dir = ".../crates
 | `signing_key_secret` | for profiles with an `audience` | `null` | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the RSA key the broker signs its own tokens with. See [Tokens for other services](../../crates/cf-oidc-exchange-api#tokens-for-other-services). |
 | `policy_file` | yes | | Policy YAML path, rendered as a template. |
 | `policy_vars` | no | `{}` | Extra template variables for the policy. |
-| `worker_dir` | no | `null` | A local build (`entry.js`, `index.js`, `index_bg.wasm`) to deploy instead of a release. |
+| `worker_dir` | no | `null` | A local build (`index.js`, `index_bg.wasm`) to deploy instead of a release. |
 | `release_tag` | no | the module's release | Release to deploy, or `latest`. |
 | `checksums_sha256` | no | `null` | Expected SHA-256 of the release's `SHA256SUMS`. |
 | `worker_name` | no | `cf-oidc-exchange` | Worker script name. |
@@ -170,4 +170,4 @@ worker-build --release && cp worker/entry.js build/   # worker_dir = ".../crates
   needs is declared here.
 - `tofu test` plans the module with mocked providers (no credentials needed) and
   checks the broker token binding, both URL modes, local artifacts, checksums, the
-  policy template (including bucket prefix placeholders) and the policy module.
+  policy template (including bucket prefix placeholders) and its size.
