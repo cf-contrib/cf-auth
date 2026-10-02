@@ -1,10 +1,10 @@
 # Over the 5 KB Worker binding limit, to show the policy module has no such cap.
 version: 2
-issuer: https://cf-auth.example.com
+issuer: https://cf-oidc-exchange.example.com
 providers:
   - name: github
     issuer: https://token.actions.githubusercontent.com
-    audience: https://cf-auth.example.com
+    audience: https://cf-oidc-exchange.example.com
     claims:
       repository_owner_id: "100000001"
 profiles:

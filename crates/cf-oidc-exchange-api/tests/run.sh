@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 STORE=00000000000000000000000000000000
 PERSIST=.wrangler/integration
-LOG=${CF_OIDC_EXCHANGE_LOG:-$PWD/.wrangler/integration.log}
+LOG=${CF_OIDC_EXCHANGE_API_LOG:-$PWD/.wrangler/integration.log}
 KEYS=$(mktemp -d)
 trap 'rm -rf "$KEYS"; [ -n "${DEV:-}" ] && kill "$DEV" 2>/dev/null; wait 2>/dev/null || true' EXIT
 
@@ -32,4 +32,4 @@ for _ in $(seq 120); do
   sleep 1
 done
 
-CF_OIDC_EXCHANGE_LOG="$LOG" cargo test --features integration --test integration -- --test-threads=1 "$@"
+CF_OIDC_EXCHANGE_API_LOG="$LOG" cargo test --features integration --test integration -- --test-threads=1 "$@"

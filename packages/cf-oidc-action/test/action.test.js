@@ -49,7 +49,7 @@ function parseCommandFile(path) {
  * @param {Record<string, string | undefined>} env
  */
 async function action(script, env) {
-  const dir = mkdtempSync(join(tmpdir(), "cf-auth-"));
+  const dir = mkdtempSync(join(tmpdir(), "cf-oidc-exchange-"));
   const files = { GITHUB_ENV: join(dir, "env"), GITHUB_STATE: join(dir, "state"), RUNNER_TEMP: join(dir, "temp") };
   writeFileSync(files.GITHUB_ENV, "");
   writeFileSync(files.GITHUB_STATE, "");
@@ -286,7 +286,7 @@ describe("main", () => {
   });
 
   it("explains a missing id-token permission", async () => {
-    const r = await action("main.js", { "INPUT_BROKER-URL": "https://cf-auth.example.com" });
+    const r = await action("main.js", { "INPUT_BROKER-URL": "https://cf-oidc-exchange.example.com" });
     expect(r.code).toBe(1);
     expect(r.stdout).toContain("::error::OIDC unavailable: add `permissions: id-token: write` to the job");
   });
@@ -298,7 +298,7 @@ describe("main", () => {
   });
 
   it("refuses plain-http brokers that aren't loopback", async () => {
-    const r = await action("main.js", { "INPUT_BROKER-URL": "http://cf-auth.example.com" });
+    const r = await action("main.js", { "INPUT_BROKER-URL": "http://cf-oidc-exchange.example.com" });
     expect(r.code).toBe(1);
     expect(r.stdout).toContain("broker-url must use https");
   });
@@ -351,11 +351,11 @@ describe("post", () => {
   });
 
   it("deletes the credentials file", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cf-auth-"));
+    const dir = mkdtempSync(join(tmpdir(), "cf-oidc-exchange-"));
     const file = join(dir, "credentials");
     writeFileSync(file, "[org-terraform-state]\n");
     const r = await action("post.js", {
-      "INPUT_BROKER-URL": "https://cf-auth.example.com",
+      "INPUT_BROKER-URL": "https://cf-oidc-exchange.example.com",
       STATE_credentials_file: file,
       STATE_r2_expires_on: STUB_BUCKET.expires_on,
     });

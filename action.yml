@@ -1,4 +1,4 @@
-name: cf-oidc-auth
+name: cf-oidc-exchange
 description: Exchange a GitHub OIDC token for a short-lived Cloudflare API token or R2 credentials
 author: cf-contrib
 branding:
@@ -7,7 +7,7 @@ branding:
 inputs:
   broker-url:
     required: true
-    description: Broker base URL, e.g. https://cf-oidc-broker.example.com. Its origin is the OIDC audience.
+    description: Broker base URL, e.g. https://cf-oidc-exchange.example.com. Its origin is the OIDC audience.
   profile:
     required: false
     description: Policy profile to request (not an AWS profile). Recommended when more than one profile could match.

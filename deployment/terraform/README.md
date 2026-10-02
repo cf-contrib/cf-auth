@@ -1,17 +1,17 @@
-# cf-oidc-auth Terraform module
+# cf-oidc-exchange Terraform module
 
-> The Terraform / OpenTofu half of [cf-oidc-auth](../..): deploys the released
+> The Terraform / OpenTofu half of [cf-oidc-exchange](../..): deploys the released
 > broker, a Rust Worker, to Cloudflare, with its bindings, hourly cleanup cron, and
 > a workers.dev URL (or, optionally, a custom domain). No `wrangler` or local
 > build is needed.
 
 ```hcl
 module "cf_oidc_broker" {
-  source = "git::https://github.com/cf-contrib/cf-oidc-auth.git//deployment/terraform?ref=v0.8.0" # x-release-please-version
+  source = "git::https://github.com/cf-contrib/cf-oidc-exchange.git//deployment/terraform?ref=v0.8.0" # x-release-please-version
 
   account_id          = var.account_id
-  hostname            = "cf-auth.example.workers.dev"
-  broker_token_secret = { secret_store_id = var.secret_store_id, secret_name = "cf-auth-broker-token" }
+  hostname            = "cf-oidc-exchange.example.workers.dev"
+  broker_token_secret = { secret_store_id = var.secret_store_id, secret_name = "cf-oidc-exchange-broker-token" }
   policy_file         = "${path.root}/policy.yaml"
 }
 
@@ -45,7 +45,7 @@ by default deploys the broker of the release its `ref` points to.
 ```sh
 # Store the broker token once. Wrangler prompts for the value.
 wrangler secrets-store store list --remote     # note the store ID
-wrangler secrets-store secret create <store-id> --name cf-auth-broker-token --scopes workers --remote
+wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-broker-token --scopes workers --remote
 
 $EDITOR policy.yaml                            # providers, profiles; see Policy below
 
@@ -132,7 +132,7 @@ fails if a download doesn't match `SHA256SUMS`. To pin the artifacts too, set
 `checksums_sha256` to the SHA-256 of the release's `SHA256SUMS`:
 
 ```sh
-curl -fsSL https://github.com/cf-contrib/cf-oidc-auth/releases/download/v0.8.0/SHA256SUMS | sha256sum # x-release-please-version
+curl -fsSL https://github.com/cf-contrib/cf-oidc-exchange/releases/download/v0.8.0/SHA256SUMS | sha256sum # x-release-please-version
 ```
 
 Set `release_tag = "latest"` to track the newest release instead.
@@ -159,7 +159,7 @@ worker-build --release && cp worker/entry.js build/   # worker_dir = ".../crates
 | `worker_dir` | no | `null` | A local build (`entry.js`, `index.js`, `index_bg.wasm`) to deploy instead of a release. |
 | `release_tag` | no | the module's release | Release to deploy, or `latest`. |
 | `checksums_sha256` | no | `null` | Expected SHA-256 of the release's `SHA256SUMS`. |
-| `worker_name` | no | `cf-auth` | Worker script name. |
+| `worker_name` | no | `cf-oidc-exchange` | Worker script name. |
 | `worker_compatibility_date` | no | `2026-08-15` | Workers compatibility date. |
 
 ## Notes

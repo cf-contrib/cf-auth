@@ -1,17 +1,17 @@
-# cf-oidc-auth
+# cf-oidc-exchange
 
 > Keyless Cloudflare API access from GitHub Actions: a job trades its GitHub
 > OIDC token for a short-lived, least-privilege Cloudflare API token, so no
 > workflow stores a `CLOUDFLARE_API_TOKEN` secret.
 
-[![CI](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml)
+[![CI](https://github.com/cf-contrib/cf-oidc-exchange/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-exchange/actions/workflows/ci.yml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Nix Flake](https://img.shields.io/badge/Nix-Flake-5277C3?logo=nixos&logoColor=white)](https://nixos.wiki/wiki/Flakes)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > [!NOTE]
 > **Pre-1.0.** The policy format and the broker API may still change between
-> minor versions. cf-oidc-auth fills a gap until Cloudflare trusts GitHub's OIDC
+> minor versions. cf-oidc-exchange fills a gap until Cloudflare trusts GitHub's OIDC
 > issuer natively. When it does, swap the action and delete the broker.
 
 ```yaml
@@ -19,17 +19,17 @@ permissions:
   id-token: write
 
 steps:
-  - uses: cf-contrib/cf-oidc-auth@v0.8.0 # x-release-please-version
+  - uses: cf-contrib/cf-oidc-exchange@v0.8.0 # x-release-please-version
     with:
-      broker-url: https://cf-oidc-broker.example.com
+      broker-url: https://cf-oidc-exchange.example.com
       profile: workers-deploy
   - run: npx wrangler deploy # CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID are set
 ```
 
 | Component | Ships as | What it is |
 |---|---|---|
-| [Action](packages/cf-oidc-action) | `uses: cf-contrib/cf-oidc-auth@<version>` | Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. No runtime dependencies. |
-| [Broker](crates/cf-oidc-exchange-api) | A Rust Worker in [Releases](https://github.com/cf-contrib/cf-oidc-auth/releases), deployed with the [Terraform module](deployment/terraform) | A Worker in your account that checks the OIDC token against your policy and mints the Cloudflare token. |
+| [Action](packages/cf-oidc-action) | `uses: cf-contrib/cf-oidc-exchange@<version>` | Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. No runtime dependencies. |
+| [Broker](crates/cf-oidc-exchange-api) | A Rust Worker in [Releases](https://github.com/cf-contrib/cf-oidc-exchange/releases), deployed with the [Terraform module](deployment/terraform) | A Worker in your account that checks the OIDC token against your policy and mints the Cloudflare token. |
 
 The action and the broker, with its Terraform module, are released together from one tag, so deploy the broker from the release whose action you use. The action talks only to the broker, never to the Cloudflare API.
 
@@ -43,7 +43,7 @@ Other services can trust the broker too. A profile with an `audience` gets the c
 sequenceDiagram
     participant Job as GitHub Actions job
     participant OIDC as GitHub OIDC
-    participant Broker as cf-oidc-auth broker (Worker)
+    participant Broker as cf-oidc-exchange broker (Worker)
     participant CF as Cloudflare API
 
     Job->>OIDC: 1. request JWT (aud = broker URL)
@@ -70,7 +70,7 @@ A stored `CLOUDFLARE_API_TOKEN` never expires unless someone rotates it. It's us
 | API token as a GitHub secret | yes | long-lived | The status quo |
 | Token in AWS/GCP Secret Manager, read via their OIDC | no | long-lived | Fine if you already use AWS/GCP; the Cloudflare token is still long-lived |
 | [bounded-systems/cf-oidc-token-broker](https://github.com/bounded-systems/cf-oidc-token-broker) | no | short-lived | Same idea. The policy is code you edit and redeploy |
-| **cf-oidc-auth** | **no** | **short-lived** | Declarative policy, prebuilt release, automatic revoke |
+| **cf-oidc-exchange** | **no** | **short-lived** | Declarative policy, prebuilt release, automatic revoke |
 
 If a stored secret is acceptable to you, it's less to run.
 

@@ -214,7 +214,7 @@ mod tests {
 
     fn request<'a>(claims: &'a Claims, not_after: Option<u64>) -> IssueRequest<'a> {
         IssueRequest {
-            issuer: "https://cf-auth.example.com",
+            issuer: "https://cf-oidc-exchange.example.com",
             audience: "https://cf-nix-cache.example.com",
             subject: "repo:example-org/api:ref:refs/heads/main".into(),
             provider: "github",
@@ -247,7 +247,7 @@ mod tests {
                 "groups": "deployers",
                 "provider": "github",
                 "profile": "nix-push",
-                "iss": "https://cf-auth.example.com",
+                "iss": "https://cf-oidc-exchange.example.com",
                 "aud": "https://cf-nix-cache.example.com",
                 "sub": "repo:example-org/api:ref:refs/heads/main",
                 "iat": NOW,

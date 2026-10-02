@@ -447,8 +447,8 @@ mod tests {
     fn policy() -> Policy {
         let policy = json!({
             "version": 2,
-            "issuer": "https://cf-auth.example.com",
-            "providers": [{ "name": "github", "issuer": "https://token.actions.githubusercontent.com", "audience": "https://cf-auth.example.com", "claims": { "repository_owner_id": "100000001" } }],
+            "issuer": "https://cf-oidc-exchange.example.com",
+            "providers": [{ "name": "github", "issuer": "https://token.actions.githubusercontent.com", "audience": "https://cf-oidc-exchange.example.com", "claims": { "repository_owner_id": "100000001" } }],
             "profiles": [
                 { "name": "deploy", "claims": { "ref": "refs/heads/main" }, "token": { "policies": [{ "permissions": ["DNS Write"], "resources": { "com.cloudflare.api.account.zone.fedcba9876543210fedcba9876543210": "*" } }] } },
                 { "name": "nix-push", "audience": "https://cf-nix-cache.example.com", "claims": { "ref": "refs/heads/main" } },
@@ -515,18 +515,18 @@ mod tests {
     #[test]
     fn publishes_the_endpoints() {
         let doc = serde_json::to_value(discovery(&policy()).unwrap()).unwrap();
-        assert_eq!(doc["issuer"], "https://cf-auth.example.com");
+        assert_eq!(doc["issuer"], "https://cf-oidc-exchange.example.com");
         assert_eq!(
             doc["jwks_uri"],
-            "https://cf-auth.example.com/.well-known/jwks"
+            "https://cf-oidc-exchange.example.com/.well-known/jwks"
         );
         assert_eq!(
             doc["token_endpoint"],
-            "https://cf-auth.example.com/oauth/token"
+            "https://cf-oidc-exchange.example.com/oauth/token"
         );
         assert_eq!(
             doc["revocation_endpoint"],
-            "https://cf-auth.example.com/oauth/revoke"
+            "https://cf-oidc-exchange.example.com/oauth/revoke"
         );
     }
 }

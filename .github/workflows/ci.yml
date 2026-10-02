@@ -67,7 +67,7 @@ jobs:
           echo "AWS_SESSION_TOKEN=stale-session-token" >> "$GITHUB_ENV"
       # The stub answers profile smoke-r2 as a profile with one bucket and no token, and
       # smoke-r2-multi as one with two buckets.
-      - name: Run cf-oidc-auth (r2 only)
+      - name: Run cf-oidc-exchange (r2 only)
         uses: ./
         env:
           ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:8787/oidc?api-version=2.0
@@ -92,7 +92,7 @@ jobs:
           test "$(stat -c %a "$AWS_SHARED_CREDENTIALS_FILE")" = 600
           # The same credentials as a named profile.
           test "$(aws configure get aws_access_key_id --profile org-terraform-state)" = stub-r2-access-key-id
-      - name: Run cf-oidc-auth (two buckets)
+      - name: Run cf-oidc-exchange (two buckets)
         uses: ./
         env:
           ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:8787/oidc?api-version=2.0
@@ -111,7 +111,7 @@ jobs:
           test "$(aws configure get aws_access_key_id --profile org-terraform-state)" = stub-r2-access-key-id
           test "$(aws configure get aws_access_key_id --profile org-artifacts)" = stub-r2-access-key-id-2
           test "$CLOUDFLARE_R2_BUCKETS" = '{"org-terraform-state":["github.com/example-org/app/"],"org-artifacts":[]}'
-      - name: Run cf-oidc-auth (token)
+      - name: Run cf-oidc-exchange (token)
         uses: ./
         env:
           ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:8787/oidc?api-version=2.0

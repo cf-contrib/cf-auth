@@ -295,7 +295,7 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
     const ISSUER: &str = "https://token.actions.githubusercontent.com";
-    const AUDIENCE: &str = "https://cf-auth.example.com";
+    const AUDIENCE: &str = "https://cf-oidc-exchange.example.com";
 
     fn provider() -> Provider {
         Provider {

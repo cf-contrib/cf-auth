@@ -10,7 +10,7 @@ const ZONE_ID: &str = "fedcba9876543210fedcba9876543210";
 const OWNER_ID: &str = "100000001";
 const USER_ID: &str = "300000004";
 const TEAM_ID: &str = "400000005";
-const AUDIENCE: &str = "https://cf-auth.example.com";
+const AUDIENCE: &str = "https://cf-oidc-exchange.example.com";
 const CACHE: &str = "https://cf-nix-cache.example.com";
 
 /// A version 2 policy: one GitHub Actions provider, `github`, and three profiles for it.
@@ -707,7 +707,11 @@ mod load_policy {
         #[test]
         fn requires_the_brokers_issuer_to_be_a_bare_origin() {
             let mut p = policy();
-            set(&mut p, "/issuer", json!("https://cf-auth.example.com/"));
+            set(
+                &mut p,
+                "/issuer",
+                json!("https://cf-oidc-exchange.example.com/"),
+            );
             assert!(
                 issues(&p)
                     .join(",")

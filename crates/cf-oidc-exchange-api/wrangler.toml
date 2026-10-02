@@ -19,21 +19,21 @@ crons = ["17 * * * *"] # hourly cleanup of expired cf-oidc:* tokens
 
 # The broker token must come from Secrets Store; a plain `wrangler secret` is
 # refused. For `wrangler dev`, create it in the local store:
-#   wrangler secrets-store secret create <store-id> --name cf-auth-broker-token --scopes workers
+#   wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-broker-token --scopes workers
 [[secrets_store_secrets]]
-binding = "CF_OIDC_BROKER_TOKEN"
+binding = "CF_OIDC_EXCHANGE_API_BROKER_TOKEN"
 store_id = "00000000000000000000000000000000"
-secret_name = "cf-auth-broker-token"
+secret_name = "cf-oidc-exchange-broker-token"
 
 # Only for profiles with an `audience`: the RSA key the broker signs its own
 # tokens with, as a PKCS#8 PEM. Uncomment after creating it in the local store:
 #   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out signing-key.pem
-#   wrangler secrets-store secret create <store-id> --name cf-auth-signing-key --scopes workers
+#   wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-signing-key --scopes workers
 # and paste the PEM when prompted.
 # [[secrets_store_secrets]]
-# binding = "CF_OIDC_BROKER_SIGNING_KEY"
+# binding = "CF_OIDC_EXCHANGE_API_SIGNING_KEY"
 # store_id = "00000000000000000000000000000000"
-# secret_name = "cf-auth-signing-key"
+# secret_name = "cf-oidc-exchange-signing-key"
 
 [vars]
-CF_OIDC_BROKER_ACCOUNT_ID = "00000000000000000000000000000000"
+CF_OIDC_EXCHANGE_API_ACCOUNT_ID = "00000000000000000000000000000000"

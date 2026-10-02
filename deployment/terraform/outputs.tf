@@ -10,5 +10,5 @@ output "worker_name" {
 
 output "release_tag" {
   value       = var.worker_dir != null ? "local" : data.github_release.this[0].release_tag
-  description = "cf-oidc-auth release that was deployed, or \"local\" for worker_dir."
+  description = "cf-oidc-exchange release that was deployed, or \"local\" for worker_dir."
 }

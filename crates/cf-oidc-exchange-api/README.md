@@ -1,13 +1,13 @@
 # cf-oidc-exchange-api
 
-> The broker, the Worker half of [cf-oidc-auth](../..), in Rust: verifies an OIDC token from a CI
+> The broker, the Worker half of [cf-oidc-exchange](../..), in Rust: verifies an OIDC token from a CI
 > provider you trust (GitHub Actions, GitLab CI, …), matches it against your
 > policy, and mints a short-lived Cloudflare API token with exactly that
 > profile's permissions, R2 credentials limited to the repo's key prefix, or
 > both. People can get the same from their GitHub token, through a
 > provider for [`https://github.com`](#people).
 
-[![CI](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml)
+[![CI](https://github.com/cf-contrib/cf-oidc-exchange/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-exchange/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 
 > [!NOTE]
@@ -16,12 +16,12 @@
 
 ```yaml
 version: 2
-issuer: https://cf-oidc-broker.example.com    # the broker's URL
+issuer: https://cf-oidc-exchange.example.com    # the broker's URL
 
 providers:
   - name: github
     issuer: https://token.actions.githubusercontent.com
-    audience: https://cf-oidc-broker.example.com
+    audience: https://cf-oidc-exchange.example.com
     claims:
       repository_owner_id: "100000001"       # your org's numeric ID, required of every token
 
@@ -45,7 +45,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 
 1. **Create the broker token.** In the Cloudflare dashboard, create an **account-owned** API token with **Account API Tokens Write**. If any profile has [`buckets`](#buckets), also give it R2 permissions covering what they delegate. It's the broker's only long-lived credential. This is the one manual step: automating it would need a token that can create tokens. Store it in [Secrets Store](https://developers.cloudflare.com/secrets-store/) so it never passes through your deploy tooling:
    ```sh
-   wrangler secrets-store secret create <store-id> --name cf-auth-broker-token --scopes workers --remote
+   wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-broker-token --scopes workers --remote
    ```
 2. **Look up numeric IDs.** Pin IDs, not names, because a deleted repo or org name can be re-registered by someone else:
    ```sh
@@ -56,15 +56,15 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
    ```sh
    worker-build --release && cp worker/entry.js build/   # then worker_dir = ".../crates/cf-oidc-exchange-api/build"
    ```
-4. **Check** that `<broker-url>/healthz` returns `200` (`https://cf-auth.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or the broker token can't be read; the reasons are in Workers Logs.
+4. **Check** that `<broker-url>/healthz` returns `200` (`https://cf-oidc-exchange.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or the broker token can't be read; the reasons are in Workers Logs.
 
 ## Bindings
 
 | Binding | Type | Required | Description |
 |---|---|---|---|
-| `CF_OIDC_BROKER_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
-| `CF_OIDC_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 permissions covering what profiles' `buckets` delegate. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
-| `CF_OIDC_BROKER_SIGNING_KEY` | Secrets Store secret | for profiles with an `audience` | RSA private key (at least 2048 bits), as a PKCS#8 PEM, the broker signs [its own tokens](#tokens-for-other-services) with. Without it the broker issues none, publishes no keys, and those profiles fail closed with `500`. |
+| `CF_OIDC_EXCHANGE_API_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
+| `CF_OIDC_EXCHANGE_API_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 permissions covering what profiles' `buckets` delegate. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
+| `CF_OIDC_EXCHANGE_API_SIGNING_KEY` | Secrets Store secret | for profiles with an `audience` | RSA private key (at least 2048 bits), as a PKCS#8 PEM, the broker signs [its own tokens](#tokens-for-other-services) with. Without it the broker issues none, publishes no keys, and those profiles fail closed with `500`. |
 
 The hourly cron (`17 * * * *` in the examples) deletes expired `cf-oidc:*` tokens.
 
@@ -83,18 +83,18 @@ The policy is checked when an isolate first serves a request. An invalid one is 
 
 ```yaml
 version: 2
-issuer: https://cf-oidc-broker.example.com   # REQUIRED: the broker's URL, as its own tokens name it
+issuer: https://cf-oidc-exchange.example.com   # REQUIRED: the broker's URL, as its own tokens name it
 
 providers:
   - name: github                             # GitHub Actions
     issuer: https://token.actions.githubusercontent.com   # GitHub Enterprise Cloud: .../<enterprise>
-    audience: https://cf-oidc-broker.example.com          # what the action asks GitHub for: the broker's URL
+    audience: https://cf-oidc-exchange.example.com          # what the action asks GitHub for: the broker's URL
     claims:
       repository_owner_id: "100000001"       # REQUIRED here: numeric org/user ID
 
   - name: gitlab                             # GitLab CI, with id_tokens: { aud: <the broker's URL> }
     issuer: https://gitlab.com
-    audience: https://cf-oidc-broker.example.com
+    audience: https://cf-oidc-exchange.example.com
     claims:
       namespace_id: "4000001"                # REQUIRED here: your group's ID
 
@@ -293,7 +293,7 @@ curl -H "Authorization: Bearer <token>" \
 | One zone | `com.cloudflare.api.account.zone.<zone_id>: "*"` |
 | Every zone in the account | `com.cloudflare.api.account.<account_id>: { com.cloudflare.api.account.zone.*: "*" }` |
 
-Keys must start with `com.cloudflare.`, and account keys must name `CF_OIDC_BROKER_ACCOUNT_ID`. Add a comment with the zone's name next to each zone ID so reviewers can tell them apart. With the Terraform module, write `${account_id}` and it's filled in from `var.account_id`.
+Keys must start with `com.cloudflare.`, and account keys must name `CF_OIDC_EXCHANGE_API_ACCOUNT_ID`. Add a comment with the zone's name next to each zone ID so reviewers can tell them apart. With the Terraform module, write `${account_id}` and it's filled in from `var.account_id`.
 
 ### Buckets
 
@@ -346,11 +346,11 @@ The caller asks for it with [`audience`](#token-exchange) set to the service's U
 
 Services find the public key at [`/.well-known/jwks`](#http-api), or through [`/.well-known/openid-configuration`](#http-api), and should check `iss`, `aud`, `exp` and the `RS256` algorithm.
 
-The key is an RSA private key, at least 2048 bits, in Secrets Store, bound as `CF_OIDC_BROKER_SIGNING_KEY` (`signing_key_secret` in the [Terraform module](../../deployment/terraform)):
+The key is an RSA private key, at least 2048 bits, in Secrets Store, bound as `CF_OIDC_EXCHANGE_API_SIGNING_KEY` (`signing_key_secret` in the [Terraform module](../../deployment/terraform)):
 
 ```sh
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out signing-key.pem
-wrangler secrets-store secret create <store-id> --name cf-auth-signing-key --scopes workers   # paste the PEM
+wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-signing-key --scopes workers   # paste the PEM
 rm signing-key.pem
 ```
 
@@ -382,7 +382,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 | `POST` | `/oauth/token` | `subject_token` in the body | [Token exchange](#token-exchange) (RFC 8693) for jobs and people alike. What the action uses. |
 | `POST` | `/oauth/revoke` | `token` in the body | [Revoke](#revocation) (RFC 7009) a token the broker minted. What the action's post step uses. |
 | `GET` | `/.well-known/openid-configuration` | public | The broker's issuer, key and endpoint URLs, for services that verify [its tokens](#tokens-for-other-services). |
-| `GET` | `/.well-known/jwks` | public | The public key the broker signs its own tokens with. Empty without `CF_OIDC_BROKER_SIGNING_KEY`. |
+| `GET` | `/.well-known/jwks` | public | The public key the broker signs its own tokens with. Empty without `CF_OIDC_EXCHANGE_API_SIGNING_KEY`. |
 | `GET` | `/healthz` | public | `200` if the policy and bindings are valid, else `500`. Never shows the policy. |
 
 ### Token exchange
@@ -390,7 +390,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 `POST /oauth/token` is an [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693) token exchange, form-encoded. The token goes in the body, and `subject_token_type` says whose it is. [`exchangev1.yaml`](../cf-oidc-exchange-sdk/openapi/oidc/exchange/v1/exchangev1.yaml) is the contract.
 
 ```sh
-curl -sS https://cf-oidc-broker.example.com/oauth/token \
+curl -sS https://cf-oidc-exchange.example.com/oauth/token \
   -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
   -d subject_token="$GITHUB_OIDC_TOKEN" \
   -d subject_token_type=urn:ietf:params:oauth:token-type:id_token \
@@ -435,7 +435,7 @@ Errors are the same as on every route.
 `POST /oauth/revoke` is an [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) revocation, form-encoded, with the token in `token` (`token_type_hint` is ignored). Holding the token is the proof. It answers `200` with no body whether the token was revoked, was already gone or was never valid, and `403` for a token the broker didn't mint (one not named `cf-oidc:*`, including the broker token), which it never deletes.
 
 ```sh
-curl -sS https://cf-oidc-broker.example.com/oauth/revoke -d token="$CLOUDFLARE_API_TOKEN"
+curl -sS https://cf-oidc-exchange.example.com/oauth/revoke -d token="$CLOUDFLARE_API_TOKEN"
 ```
 
 **Errors:** `{ "error": "<code>" }` with one of these statuses:
@@ -501,7 +501,7 @@ Denials are `token.deny` with a `reason`:
 
 ## Limitations
 
-- **One account per broker.** Tokens are minted in `CF_OIDC_BROKER_ACCOUNT_ID` only. Deploy one broker per account.
+- **One account per broker.** Tokens are minted in `CF_OIDC_EXCHANGE_API_ACCOUNT_ID` only. Deploy one broker per account.
 - **RS256 only, one provider per issuer.** Issuers that sign with another algorithm (such as ES256) aren't supported yet. To serve several GitHub orgs, list their IDs in the provider's `repository_owner_id`.
 - **People need a github.com account.** GitHub Enterprise Server's API isn't supported for people.
 - **Bucket prefixes use GitHub's claims.** Other issuers' callers can get buckets without `prefixes`, or a token, but not prefix-limited credentials yet.

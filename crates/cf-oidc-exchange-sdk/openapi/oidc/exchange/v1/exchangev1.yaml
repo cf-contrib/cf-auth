@@ -3,7 +3,7 @@
 # the action type-checks against, in step.
 openapi: 3.1.0
 info:
-  title: cf-oidc-broker
+  title: cf-oidc-exchange
   version: "1"
   description: >-
     Bodies are form-encoded, as RFC 8693 and RFC 7009 have it.
@@ -13,7 +13,7 @@ info:
     revokes Cloudflare tokens (RFC 7009 at `POST /oauth/revoke`). Services verify the
     broker's tokens with the keys at `/.well-known/jwks`.
 servers:
-  - url: https://cf-oidc-broker.example.com
+  - url: https://cf-oidc-exchange.example.com
 tags:
   - name: ExchangeService
     description: Token exchange and revocation, and the metadata to verify the broker's own tokens.

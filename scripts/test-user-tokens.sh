@@ -14,7 +14,7 @@
 # Usage:
 #   scripts/test-user-tokens.sh [owner/repo]
 #
-# The repo (default cf-contrib/cf-oidc-auth) must be one you can write to. Its
+# The repo (default cf-contrib/cf-oidc-exchange) must be one you can write to. Its
 # owner is pinned by both providers' claims. Run it inside the dev shell (`nix develop`).
 #
 # Needs:
@@ -22,7 +22,7 @@
 #   - The broker token in the local Secrets Store, under the store_id and
 #     secret_name in crates/cf-oidc-exchange-api/wrangler.toml:
 #       cd crates/cf-oidc-exchange-api
-#       wrangler secrets-store secret create 00000000000000000000000000000000 --name cf-auth-broker-token --scopes workers
+#       wrangler secrets-store secret create 00000000000000000000000000000000 --name cf-oidc-exchange-broker-token --scopes workers
 #   - gh, logged in. The script uses gh's own login, ignoring GITHUB_TOKEN and
 #     GH_TOKEN, as `env -u GITHUB_TOKEN -u GH_TOKEN gh auth token` would.
 #   - Optional TEST_PERMISSION: the permission group the test tokens get
@@ -51,7 +51,7 @@ for arg in "$@"; do
       ;;
   esac
 done
-REPO=${1:-cf-contrib/cf-oidc-auth}
+REPO=${1:-cf-contrib/cf-oidc-exchange}
 OWNER=${REPO%%/*}
 PERMISSION=${TEST_PERMISSION:-Account Settings Read}
 PORT=${TEST_PORT:-8787}
@@ -149,7 +149,7 @@ LIST_ARGS=(secrets-store secret list "$STORE_ID")
   die "no $SECRET_NAME secret in the local store $STORE_ID; create it from crates/cf-oidc-exchange-api (see --help)"
 
 echo "starting wrangler dev on $BROKER"
-DEV_ARGS=(--port "$PORT" --show-interactive-dev-session=false --var "CF_OIDC_BROKER_ACCOUNT_ID:$CLOUDFLARE_ACCOUNT_ID")
+DEV_ARGS=(--port "$PORT" --show-interactive-dev-session=false --var "CF_OIDC_EXCHANGE_API_ACCOUNT_ID:$CLOUDFLARE_ACCOUNT_ID")
 [[ -n ${TEST_PERSIST_TO:-} ]] && DEV_ARGS+=(--persist-to "$TEST_PERSIST_TO")
 (cd "$BROKER_DIR" && exec wrangler dev "${DEV_ARGS[@]}") >"$LOG" 2>&1 &
 WRANGLER_PID=$!
