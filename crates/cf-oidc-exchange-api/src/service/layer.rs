@@ -47,19 +47,17 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tower_layer::Layer;
 use tower_service::Service;
+use tracing::warn;
 use web_sys::{CryptoKey, WorkerGlobalScope};
 use worker::{
-    Date, console_error,
+    Date,
     js_sys::{self, Uint8Array},
     send::SendFuture,
     wasm_bindgen::{JsCast, JsValue},
     wasm_bindgen_futures::JsFuture,
 };
 
-use super::{
-    config::{Config, PolicyConfig, ProviderConfig, check_url},
-    handler::Audit,
-};
+use super::config::{Config, PolicyConfig, ProviderConfig, check_url};
 
 /// Where the token exchange is.
 const TOKEN_PATH: &str = "/oauth/token";
@@ -247,25 +245,23 @@ pub enum AuthError {
 }
 
 impl AuthError {
+    /// Logs the refusal, with why.
     fn audit(&self) {
-        let (code, message) = match self {
-            Self::Unauthorized(msg) => (ErrorCode::Unauthorized, msg),
-            Self::Forbidden(_, msg) => (ErrorCode::Forbidden, msg),
-            Self::Upstream(msg) => (ErrorCode::UpstreamError, msg),
-        };
-        let audit = match self {
-            Self::Forbidden(identity, _) => Audit::new("token.deny").caller(
-                Some(&identity.provider),
-                None,
-                Some(&identity.claims),
-                [],
+        match self {
+            Self::Unauthorized(message) => {
+                warn!(event = "token.deny", error = "unauthorized", %message);
+            }
+            Self::Forbidden(identity, message) => warn!(
+                event = "token.deny",
+                provider = %identity.provider,
+                sub = identity.claims.get("sub").and_then(serde_json::Value::as_str),
+                error = "forbidden",
+                %message,
             ),
-            _ => Audit::new("token.deny"),
-        };
-        audit
-            .with("error", code.as_str())
-            .with("message", message.as_str())
-            .emit();
+            Self::Upstream(message) => {
+                warn!(event = "token.deny", error = "upstream_error", %message);
+            }
+        }
     }
 }
 
@@ -282,16 +278,14 @@ impl IntoResponse for AuthError {
                 StatusCode::FORBIDDEN,
                 v1::Error::new(ErrorCode::Forbidden, msg),
             ),
-            AuthError::Upstream(msg) => {
-                console_error!("auth upstream failure: {msg}");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    v1::Error::new(
-                        ErrorCode::UpstreamError,
-                        "the subject token's issuer couldn't be reached",
-                    ),
-                )
-            }
+            // Why is logged, not returned.
+            AuthError::Upstream(_) => (
+                StatusCode::BAD_GATEWAY,
+                v1::Error::new(
+                    ErrorCode::UpstreamError,
+                    "the subject token's issuer couldn't be reached",
+                ),
+            ),
         };
         (status, Json(body)).into_response()
     }
@@ -672,17 +666,14 @@ pub async fn respond(req: Request, next: Next) -> Response {
             .await
             .unwrap_or_default();
         let err = v1::Error::new(ErrorCode::BadRequest, rejection(&body));
-        // Audited like any refusal, with what was wrong, which never includes
+        // Logged like any refusal, with what was wrong, which never includes
         // the values sent.
         let event = if path == TOKEN_PATH {
             "token.deny"
         } else {
             "token.revoke"
         };
-        Audit::new(event)
-            .with("error", err.error.as_str())
-            .with("message", err.message.as_str())
-            .emit();
+        warn!(event, error = err.error.as_str(), message = %err.message);
         (StatusCode::BAD_REQUEST, Json(err)).into_response()
     } else {
         response

@@ -20,6 +20,8 @@ use axum::{
 };
 use cf_oidc_exchange_sdk::v1::{self, ErrorCode};
 use tower_service::Service;
+use tracing::{error, info};
+use tracing_web::MakeWebConsoleWriter;
 use worker::*;
 
 use crate::service::{
@@ -27,6 +29,21 @@ use crate::service::{
     handler::ExchangeServiceHandler,
     layer::{self, AuthenticateLayer},
 };
+
+/// Logs as JSON lines, one per event with its fields at the top level, which
+/// Workers Logs indexes. The time is left to Workers Logs.
+#[event(start)]
+fn start() {
+    tracing_subscriber::fmt()
+        .json()
+        .flatten_event(true)
+        .with_current_span(false)
+        .with_span_list(false)
+        .with_target(false)
+        .without_time()
+        .with_writer(MakeWebConsoleWriter::new())
+        .init();
+}
 
 #[event(fetch)]
 async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<HttpResponse> {
@@ -48,7 +65,7 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<HttpResponse
         Err(err) => {
             let msg = err.to_string();
             axum::Router::new().fallback(move || async move {
-                console_error!("misconfigured: {msg}");
+                error!(event = "misconfigured", message = %msg);
                 let body = v1::Error::new(ErrorCode::Misconfigured, "the broker is misconfigured");
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
             })
@@ -69,7 +86,11 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         Err(err) => Err(v1::Error::new(ErrorCode::Misconfigured, err.to_string())),
     };
     match deleted {
-        Ok(deleted) => console_log!("cleanup: {deleted} expired tokens deleted"),
-        Err(err) => console_error!("cleanup failed: {err}"),
+        Ok(deleted) => info!(event = "cleanup.done", deleted),
+        Err(err) => error!(
+            event = "cleanup.failed",
+            error = err.error.as_str(),
+            message = %err.message,
+        ),
     }
 }

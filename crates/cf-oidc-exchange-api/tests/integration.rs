@@ -126,15 +126,16 @@ mod token_exchange_for_jobs {
             json!({
                 "profile": "workers-deploy",
                 "sub": "repo:example-org/api:environment:prod",
-                "repository": "example-org/api",
-                "repository_owner_id": OWNER_ID,
-                "ref": "refs/heads/main",
-                "environment": "prod",
+                // Only the claims the policy matches on.
+                "claims": {
+                    "repository": "example-org/api",
+                    "repository_owner_id": OWNER_ID,
+                    "ref": "refs/heads/main",
+                    "environment": "prod",
+                },
                 "token_id": body["token_id"],
             }),
         );
-        // Only the claims the policy matches on, and the subject.
-        assert!(mint.get("run_id").is_none(), "{mint}");
         assert!(!t.log().contains(body["access_token"].as_str().unwrap()));
     }
 
@@ -472,21 +473,24 @@ mod token_exchange_for_jobs_with_buckets {
     async fn writes_an_r2_issued_audit_line_without_secrets() {
         let t = start().await;
         let res = job_token(&state_repo("state", json!({})), &[]).await;
-        let expires_on = res.json()["buckets"][0]["expires_on"].clone();
+        let expires_at = res.json()["expires_at"].clone();
         assert_eq!(
             t.audit("r2.issued").await.unwrap(),
             json!({
+                "level": "INFO",
                 "event": "r2.issued",
                 "provider": "github",
                 "profile": "terraform-state",
                 "sub": "repo:example-org/api:environment:prod",
-                "environment": "state",
-                "repository": "example-org/state-app",
-                "repository_owner_id": OWNER_ID,
+                "claims": {
+                    "environment": "state",
+                    "repository": "example-org/state-app",
+                    "repository_owner_id": OWNER_ID,
+                },
                 "bucket": "org-terraform-state",
                 "prefixes": ["github.com/example-org/state-app/"],
                 "permission": "object-read-write",
-                "expires_on": expires_on,
+                "expires_at": expires_at,
             })
         );
         assert!(!t.log().contains("r2-secret-value"));

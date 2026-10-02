@@ -75,8 +75,8 @@ policy changes with a deploy and rolls back with it. `wrangler dev` takes it fro
 
 The bindings are read on every request. An unset account, an invalid policy or a
 Cloudflare token outside Secrets Store is a `500` on every route, the health
-endpoints' too, with the first problem in the log, such as
-`misconfigured: CF_OIDC_EXCHANGE_API_POLICY: profiles[1].claims must contain at least one claim set`.
+endpoints' too, with the first problem in a `misconfigured` log line, such as
+`{"level":"ERROR","event":"misconfigured","message":"CF_OIDC_EXCHANGE_API_POLICY: profiles[1].claims must contain at least one claim set"}`.
 
 ## Policy
 
@@ -421,28 +421,30 @@ For the caller's own mistakes (400 to 403) the message says what was wrong, for 
 
 ### Audit log
 
-Every mint, issue, denial and revoke emits one JSON line to Workers Logs, with the caller's `provider`, their token's `sub`, and the claims the policy's claim sets for them name. Token values, R2 secrets and JWTs are never logged:
+The broker logs with [`tracing`](https://docs.rs/tracing), as JSON lines that Workers Logs indexes by field. Every mint, issue, denial and revoke is one line, with its `event`, the caller's `provider`, their token's `sub`, and in `claims` the claims the policy's claim sets for them name. Token values, R2 secrets and JWTs are never logged:
 
 ```json
-{"event":"token.mint","provider":"github","profile":"workers-deploy","sub":"repo:example-org/api:environment:prod","environment":"prod","ref":"refs/heads/main","repository":"example-org/api","repository_owner_id":"100000001","token_id":"<token-id>","expires_on":"2026-09-28T12:15:00Z"}
+{"level":"INFO","event":"token.mint","provider":"github","profile":"workers-deploy","sub":"repo:example-org/api:environment:prod","claims":"{\"environment\":\"prod\",\"ref\":\"refs/heads/main\",\"repository\":\"example-org/api\",\"repository_owner_id\":\"100000001\"}","token_id":"<token-id>","expires_at":1790961140}
 ```
+
+`claims` is JSON text, since which claims a policy names is up to the policy. `expires_at` is in seconds since the epoch, as the exchange's response has it.
 
 R2 credentials are `r2.issued`, with the bucket, the filled-in prefixes and the permission:
 
 ```json
-{"event":"r2.issued","provider":"github","profile":"terraform-state","sub":"repo:example-org/api:ref:refs/heads/main","ref":"refs/heads/main","repository_owner_id":"100000001","bucket":"org-terraform-state","prefixes":["100000001/200000003/"],"permission":"object-read-write","expires_on":"2026-09-28T12:15:00Z"}
+{"level":"INFO","event":"r2.issued","provider":"github","profile":"terraform-state","sub":"repo:example-org/api:ref:refs/heads/main","claims":"{\"ref\":\"refs/heads/main\",\"repository_owner_id\":\"100000001\"}","bucket":"org-terraform-state","prefixes":"[\"100000001/200000003/\"]","permission":"object-read-write","expires_at":1790961140}
 ```
 
 A token for another service is `token.issue`, with the audience and the token's `jti`, never the token:
 
 ```json
-{"event":"token.issue","provider":"github","profile":"nix-push","sub":"repo:example-org/api:ref:refs/heads/main","ref":"refs/heads/main","repository_id":"200000003","repository_owner_id":"100000001","audience":"https://cf-nix-cache.example.com","jti":"<uuid>","expires_on":"2026-09-28T12:05:00Z"}
+{"level":"INFO","event":"token.issue","provider":"github","profile":"nix-push","sub":"repo:example-org/api:ref:refs/heads/main","claims":"{\"ref\":\"refs/heads/main\",\"repository_owner_id\":\"100000001\"}","audience":"https://cf-nix-cache.example.com","jti":"<uuid>","expires_at":1790960440}
 ```
 
-Denials are `token.deny` with the `error` and `message` of the response. For the broker's own faults, the message is the full one the caller doesn't get:
+Denials are `token.deny`, a warning, with the `error` and `message` of the response. For the broker's own faults, the message is the full one the caller doesn't get:
 
 ```json
-{"event":"token.deny","provider":"github","profile":"workers-deploy","sub":"repo:example-org/api:environment:prod","repository":"example-org/api","error":"upstream_error","message":"Cloudflare: tokens.create: returned 500"}
+{"level":"WARN","event":"token.deny","provider":"github","profile":"workers-deploy","sub":"repo:example-org/api:environment:prod","claims":"{\"repository\":\"example-org/api\",\"repository_owner_id\":\"100000001\"}","error":"upstream_error","message":"Cloudflare: tokens.create: returned 500"}
 ```
 
 - **Request problems** (`bad_request`, `unauthorized`): what the contract refuses, such as another `grant_type`, `actor_token`, a missing field or a JSON body; an invalid subject token, or one from an issuer no provider is for; a `ttl` or `audience` that doesn't fit.
@@ -469,10 +471,10 @@ The crate is laid out as cf-nix-cache's Worker is:
 
 | | |
 |---|---|
-| `src/lib.rs` | The fetch and scheduled events: the configuration, then the SDK's router over it, with the auth layer and the health endpoints. |
+| `src/lib.rs` | The start, fetch and scheduled events: the JSON logger, the configuration, then the SDK's router over it, with the auth layer and the health endpoints. |
 | `src/service/config.rs` | The bindings, read in `Config::from_env` only, and the policy's format: providers, profiles, claim sets, bucket prefixes, and the guardrails parsing checks. |
 | `src/service/layer.rs` | Exchange auth, as a tower layer: the subject token's provider by `iss`, RS256 against the issuer's keys with WebCrypto, the standard claims and the provider's claim sets. And the `Error` body and `Cache-Control` of every response. |
-| `src/service/handler.rs` | The generated API's implementation: the exchange (profiles, Cloudflare tokens and R2 credentials through [cloudflare-rs](https://github.com/cf-contrib/cloudflare-rs), the broker's own tokens), revocation, discovery, the keys, the cleanup the cron runs, and the audit log. |
+| `src/service/handler.rs` | The generated API's implementation: the exchange (profiles, Cloudflare tokens and R2 credentials through [cloudflare-rs](https://github.com/cf-contrib/cloudflare-rs), the broker's own tokens), revocation, discovery, the keys, and the cleanup the cron runs. |
 
 ## Development
 
