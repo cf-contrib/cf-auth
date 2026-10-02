@@ -206,6 +206,29 @@ impl Test {
     }
 }
 
+/// That an audit line records a refusal with `error`, saying `message` (or
+/// something that contains it).
+#[track_caller]
+pub fn assert_refused(line: &Value, error: &str, message: &str) {
+    assert_eq!(line["error"], error, "{line}");
+    let said = line["message"].as_str().unwrap_or_default();
+    assert!(
+        said.contains(message),
+        "{said:?} doesn't say {message:?}: {line}"
+    );
+}
+
+/// That a response is the error every error is: `error`, with a message.
+#[track_caller]
+pub fn assert_error(reply: &Reply, error: &str) {
+    let body = reply.json();
+    assert_eq!(body["error"], error, "{body}");
+    assert!(
+        body["message"].as_str().is_some_and(|m| !m.is_empty()),
+        "{body}"
+    );
+}
+
 /// Whether `actual` has every field of `expected`, as `toMatchObject` checks.
 #[track_caller]
 pub fn assert_matches(actual: &Value, expected: Value) {

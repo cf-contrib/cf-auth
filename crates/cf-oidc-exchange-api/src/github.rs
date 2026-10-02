@@ -3,15 +3,13 @@
 
 use std::time::Duration;
 
+use cf_oidc_exchange_sdk::v1::{Error, ErrorCode};
 use futures_util::future::join;
 use reqwest::{StatusCode, header::HeaderMap};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use crate::{
-    error::{ErrorCode, HttpError},
-    policy::Claims,
-};
+use crate::policy::Claims;
 
 pub const API_URL: &str = "https://api.github.com";
 
@@ -19,6 +17,12 @@ pub const API_URL: &str = "https://api.github.com";
 const MAX_TEAM_PAGES: u32 = 10;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What a `403` or `404` from GitHub means for each lookup.
+const USER_DENIED: &str = "GitHub won't say whose the token is";
+const REPOSITORY_DENIED: &str = "the repository doesn't exist, or the token can't see it";
+const TEAMS_DENIED: &str =
+    "the token can't list its user's teams: it needs the repo, read:org or user scope";
 
 /// GitHub's permission flags, most to least, under the policy's names for them.
 const ROLES: [(&str, &str); 5] = [
@@ -78,27 +82,29 @@ pub async fn verify_user(
     token: &str,
     repository: Option<&str>,
     check: UserCheck<'_>,
-) -> Result<Claims, HttpError> {
+) -> Result<Claims, Error> {
     let github = GitHub { api, token };
     // GITHUB_TOKEN and other installation tokens identify a repo, not a person.
     if token.starts_with("ghs_") {
-        return Err(
-            HttpError::new(ErrorCode::Unauthorized, "installation_token")
-                .with_detail("GitHub Actions jobs exchange their OIDC token instead"),
-        );
+        return Err(Error::new(
+            ErrorCode::Unauthorized,
+            "a GitHub App installation token identifies a repo, not a person: GitHub Actions jobs exchange their OIDC token instead",
+        ));
     }
 
     let mut claims = Claims::new();
     // Without a repo, only who the person is: one call, for profiles that list who may use them.
     let Some(repository) = repository else {
-        let user: User = github.get("/user", "invalid_user_token").await?;
+        let user: User = github.get("/user", USER_DENIED).await?;
         claims.insert("actor".into(), user.login.into());
         claims.insert("actor_id".into(), user.id.to_string().into());
         return Ok(claims);
     };
     if check.owner_ids.is_empty() {
-        return Err(HttpError::new(ErrorCode::Forbidden, "repository_forbidden")
-            .with_detail("the provider pins no repository_owner_id"));
+        return Err(Error::new(
+            ErrorCode::Forbidden,
+            "the provider for people pins no repository_owner_id, so it takes no repository",
+        ));
     }
 
     let path = if repository.bytes().all(|b| b.is_ascii_digit()) {
@@ -108,8 +114,8 @@ pub async fn verify_user(
     };
     // Both at once, but a bad token is reported as that, not as whatever the repo lookup said.
     let (user, repo) = join(
-        github.get::<User>("/user", "invalid_user_token"),
-        github.get::<Repository>(&path, "repository_forbidden"),
+        github.get::<User>("/user", USER_DENIED),
+        github.get::<Repository>(&path, REPOSITORY_DENIED),
     )
     .await;
     let (user, repo) = (user?, repo?);
@@ -117,8 +123,13 @@ pub async fn verify_user(
     // Checked here rather than left to the owner pin, so another org's repo costs no team lookups.
     let owner_id = repo.owner.id.to_string();
     if !check.owner_ids.contains(&owner_id) {
-        return Err(HttpError::new(ErrorCode::Forbidden, "repository_forbidden")
-            .with_detail(format!("{} is outside the pinned owner", repo.full_name)));
+        return Err(Error::new(
+            ErrorCode::Forbidden,
+            format!(
+                "{} doesn't belong to the owner the provider pins",
+                repo.full_name
+            ),
+        ));
     }
 
     claims.insert("actor".into(), user.login.into());
@@ -154,11 +165,11 @@ struct GitHub<'a> {
 impl GitHub<'_> {
     /// IDs of the caller's teams in the pinned owners. GitHub accepts `repo`,
     /// `read:org` or `user` for it, and gh's token has `repo`.
-    async fn team_ids(&self, owner_ids: &[String]) -> Result<Vec<String>, HttpError> {
+    async fn team_ids(&self, owner_ids: &[String]) -> Result<Vec<String>, Error> {
         let mut ids = Vec::new();
         for page in 1..=MAX_TEAM_PAGES {
             let path = format!("/user/teams?per_page=100&page={page}");
-            let teams: Vec<Team> = self.get(&path, "teams_forbidden").await?;
+            let teams: Vec<Team> = self.get(&path, TEAMS_DENIED).await?;
             for team in &teams {
                 let org = team.organization.as_ref().map(|org| org.id.to_string());
                 if org.is_some_and(|org| owner_ids.contains(&org)) {
@@ -172,15 +183,11 @@ impl GitHub<'_> {
         Ok(ids)
     }
 
-    /// GETs a GitHub API path with the caller's token. `denied` is the reason for a `403` or `404`.
-    async fn get<T: DeserializeOwned>(
-        &self,
-        path: &str,
-        denied: &'static str,
-    ) -> Result<T, HttpError> {
-        let unavailable = |detail: String| {
-            HttpError::new(ErrorCode::UpstreamError, "github_unavailable").with_detail(detail)
-        };
+    /// GETs a GitHub API path with the caller's token. `denied` is what a `403`
+    /// or `404` means.
+    async fn get<T: DeserializeOwned>(&self, path: &str, denied: &'static str) -> Result<T, Error> {
+        let unavailable =
+            |why: String| Error::new(ErrorCode::UpstreamError, format!("GitHub: {why}"));
         let response = reqwest::Client::new()
             .get(format!("{}{path}", self.api))
             .bearer_auth(self.token)
@@ -203,28 +210,34 @@ impl GitHub<'_> {
 }
 
 /// Maps a GitHub API error status to the broker's.
-fn failure(status: StatusCode, headers: &HeaderMap, path: &str, denied: &'static str) -> HttpError {
+fn failure(status: StatusCode, headers: &HeaderMap, path: &str, denied: &'static str) -> Error {
     let rate_limited = status == StatusCode::TOO_MANY_REQUESTS
         || (status == StatusCode::FORBIDDEN
             && headers
                 .get("x-ratelimit-remaining")
                 .is_some_and(|v| v == "0"));
     if status == StatusCode::UNAUTHORIZED {
-        return HttpError::new(ErrorCode::Unauthorized, "invalid_user_token").with_detail(path);
+        return Error::new(ErrorCode::Unauthorized, "GitHub rejected the token");
     }
     if rate_limited {
-        return HttpError::new(ErrorCode::UpstreamError, "github_unavailable")
-            .with_detail(format!("{path}: rate limited"));
+        return Error::new(
+            ErrorCode::UpstreamError,
+            format!("GitHub: {path}: rate limited"),
+        );
     }
     if status == StatusCode::FORBIDDEN && headers.contains_key("x-github-sso") {
-        return HttpError::new(ErrorCode::Forbidden, "sso_required")
-            .with_detail(format!("{path}: authorize the token for SAML SSO"));
+        return Error::new(
+            ErrorCode::Forbidden,
+            "the token isn't authorized for the organization's SAML SSO: authorize it on GitHub",
+        );
     }
     if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
-        return HttpError::new(ErrorCode::Forbidden, denied).with_detail(path);
+        return Error::new(ErrorCode::Forbidden, denied);
     }
-    HttpError::new(ErrorCode::UpstreamError, "github_unavailable")
-        .with_detail(format!("{path}: GitHub returned {}", status.as_u16()))
+    Error::new(
+        ErrorCode::UpstreamError,
+        format!("GitHub: {path}: returned {}", status.as_u16()),
+    )
 }
 
 #[cfg(test)]
@@ -248,40 +261,44 @@ mod tests {
 
     #[test]
     fn maps_githubs_errors() {
-        let reason = |status: u16, headers: &[(&'static str, &'static str)]| {
+        let failed = |status: u16, headers: &[(&'static str, &'static str)]| {
             let mut map = HeaderMap::new();
             for (name, value) in headers {
                 map.insert(*name, HeaderValue::from_static(value));
             }
-            let err = failure(
+            failure(
                 StatusCode::from_u16(status).unwrap(),
                 &map,
                 "/user",
                 "denied",
-            );
-            (err.code, err.reason)
+            )
         };
+        let rejected = failed(401, &[]);
         assert_eq!(
-            reason(401, &[]),
-            (ErrorCode::Unauthorized, "invalid_user_token")
+            (rejected.error, rejected.message.as_str()),
+            (ErrorCode::Unauthorized, "GitHub rejected the token")
         );
+        for (status, headers) in [(403, vec![("x-ratelimit-remaining", "0")]), (429, vec![])] {
+            let limited = failed(status, &headers);
+            assert_eq!(
+                (limited.error, limited.message.as_str()),
+                (ErrorCode::UpstreamError, "GitHub: /user: rate limited")
+            );
+        }
+        let sso = failed(403, &[("x-github-sso", "required; url=x")]);
+        assert_eq!(sso.error, ErrorCode::Forbidden);
+        assert!(sso.message.contains("SAML SSO"), "{}", sso.message);
+        for status in [403, 404] {
+            let denied = failed(status, &[]);
+            assert_eq!(
+                (denied.error, denied.message.as_str()),
+                (ErrorCode::Forbidden, "denied")
+            );
+        }
+        let down = failed(503, &[]);
         assert_eq!(
-            reason(403, &[("x-ratelimit-remaining", "0")]),
-            (ErrorCode::UpstreamError, "github_unavailable")
-        );
-        assert_eq!(
-            reason(429, &[]),
-            (ErrorCode::UpstreamError, "github_unavailable")
-        );
-        assert_eq!(
-            reason(403, &[("x-github-sso", "required; url=x")]),
-            (ErrorCode::Forbidden, "sso_required")
-        );
-        assert_eq!(reason(403, &[]), (ErrorCode::Forbidden, "denied"));
-        assert_eq!(reason(404, &[]), (ErrorCode::Forbidden, "denied"));
-        assert_eq!(
-            reason(503, &[]),
-            (ErrorCode::UpstreamError, "github_unavailable")
+            (down.error, down.message.as_str()),
+            (ErrorCode::UpstreamError, "GitHub: /user: returned 503")
         );
     }
 }

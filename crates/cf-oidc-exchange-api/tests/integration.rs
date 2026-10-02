@@ -144,8 +144,8 @@ mod token_exchange_for_jobs {
         )
         .await;
         assert_eq!(res.status, 400);
-        assert_eq!(res.json(), json!({ "error": "bad_request" }));
-        assert_matches(&t.deny().await, json!({ "reason": "invalid_request" }));
+        assert_error(&res, "bad_request");
+        assert_refused(&t.deny().await, "bad_request", "");
     }
 
     #[tokio::test]
@@ -166,8 +166,8 @@ mod token_exchange_for_jobs {
         let claims = github_claims(json!({ "repository_owner_id": "999999" }));
         let res = job_token(&sign(claims), &[]).await;
         assert_eq!(res.status, 403);
-        assert_eq!(res.json(), json!({ "error": "forbidden" }));
-        assert_matches(&t.deny().await, json!({ "reason": "no_match" }));
+        assert_error(&res, "forbidden");
+        assert_refused(&t.deny().await, "forbidden", "no profile matches the token");
         assert_eq!(token_count(), 1); // only the broker token
     }
 
@@ -178,7 +178,7 @@ mod token_exchange_for_jobs {
             json!({ "repository": "example-org/infra", "repository_id": "200000002" }),
         );
         assert_eq!(job_token(&sign(claims), &[]).await.status, 403);
-        assert_matches(&t.deny().await, json!({ "reason": "ambiguous" }));
+        assert_refused(&t.deny().await, "forbidden", "all match the token");
     }
 
     #[tokio::test]
@@ -190,10 +190,9 @@ mod token_exchange_for_jobs {
         )
         .await;
         assert_eq!(res.status, 403);
-        assert_matches(
-            &t.deny().await,
-            json!({ "reason": "profile_mismatch", "profile": "infra-cloudflare" }),
-        );
+        let deny = t.deny().await;
+        assert_matches(&deny, json!({ "profile": "infra-cloudflare" }));
+        assert_refused(&deny, "forbidden", "profile ");
     }
 
     #[tokio::test]
@@ -229,7 +228,7 @@ mod token_exchange_for_jobs {
         world().policy()["github"] = json!({ "audience": "https://x.example.com" });
         let res = job_token(&sign(github_claims(json!({}))), &[]).await;
         assert_eq!(res.status, 500);
-        assert_eq!(res.json(), json!({ "error": "misconfigured" }));
+        assert_error(&res, "misconfigured");
         assert!(t.audit("policy.invalid").await.is_some());
     }
 
@@ -240,7 +239,11 @@ mod token_exchange_for_jobs {
             json!(["Workers Scrpts Write"]);
         let res = job_token(&sign(github_claims(json!({}))), &[]).await;
         assert_eq!(res.status, 500);
-        assert_matches(&t.deny().await, json!({ "reason": "unknown_permission" }));
+        assert_refused(
+            &t.deny().await,
+            "misconfigured",
+            "no permission group is named Workers Scrpts Write",
+        );
     }
 
     #[tokio::test]
@@ -278,15 +281,30 @@ mod token_exchange_for_jobs {
         world().scenario["account_id"] = json!("ffffffffffffffffffffffffffffffff");
         let res = job_token(&sign(github_claims(json!({}))), &[]).await;
         assert_eq!(res.status, 500);
-        assert_eq!(res.json(), json!({ "error": "misconfigured" }));
+        assert_error(&res, "misconfigured");
     }
 
     #[tokio::test]
     async fn fails_when_the_cloudflare_api_does_without_retrying_the_create() {
-        let _t = start().await;
+        let t = start().await;
         world().cloudflare.fail_create = true;
         let res = job_token(&sign(github_claims(json!({}))), &[]).await;
         assert_eq!(res.status, 502);
+        // The caller is told it's upstream, not what failed; the audit log says.
+        assert_error(&res, "upstream_error");
+        assert!(
+            !res.json()["message"]
+                .as_str()
+                .unwrap()
+                .contains("tokens.create"),
+            "{}",
+            res.text
+        );
+        assert_refused(
+            &t.deny().await,
+            "upstream_error",
+            "Cloudflare: tokens.create: returned 500",
+        );
         let creates = world()
             .cloudflare
             .requests
@@ -495,7 +513,7 @@ mod token_exchange_for_jobs_with_buckets {
         world().cloudflare.fail_r2 = true;
         let res = job_token(&state_repo(json!({})), &[]).await;
         assert_eq!(res.status, 502);
-        assert_eq!(res.json(), json!({ "error": "upstream_error" }));
+        assert_error(&res, "upstream_error");
         assert_eq!(token_count(), 1); // the minted token was deleted
         assert_matches(
             &t.audit("token.revoke").await.unwrap(),
@@ -518,11 +536,10 @@ mod token_exchange_for_jobs_with_buckets {
         )
         .await;
         assert_eq!(res.status, 403);
-        assert_eq!(res.json(), json!({ "error": "forbidden" }));
-        assert_matches(
-            &t.deny().await,
-            json!({ "profile": "terraform-state", "reason": "invalid_r2_prefix" }),
-        );
+        assert_error(&res, "forbidden");
+        let deny = t.deny().await;
+        assert_matches(&deny, json!({ "profile": "terraform-state" }));
+        assert_refused(&deny, "forbidden", "bucket org-terraform-state: ");
         assert!(world().cloudflare.calls().is_empty());
     }
 
@@ -727,10 +744,9 @@ mod token_exchange_for_people {
                 .status,
             403
         );
-        assert_matches(
-            &t.deny().await,
-            json!({ "provider": "people", "reason": "ambiguous" }),
-        );
+        let deny = t.deny().await;
+        assert_matches(&deny, json!({ "provider": "people" }));
+        assert_refused(&deny, "forbidden", "all match the token");
     }
 
     #[tokio::test]
@@ -746,9 +762,10 @@ mod token_exchange_for_people {
         )
         .await;
         assert_eq!(res.status, 403);
-        assert_matches(
+        assert_refused(
             &t.deny().await,
-            json!({ "reason": "profile_mismatch", "detail": "profile workers-deploy isn't for provider people" }),
+            "forbidden",
+            "profile workers-deploy isn't for provider people",
         );
     }
 
@@ -757,10 +774,9 @@ mod token_exchange_for_people {
         let t = setup().await;
         let res = job_token(&sign(github_claims(json!({}))), &[("profile", "tofu-plan")]).await;
         assert_eq!(res.status, 403);
-        assert_matches(
-            &t.deny().await,
-            json!({ "provider": "github", "reason": "profile_mismatch" }),
-        );
+        let deny = t.deny().await;
+        assert_matches(&deny, json!({ "provider": "github" }));
+        assert_refused(&deny, "forbidden", "profile ");
     }
 
     #[tokio::test]
@@ -777,7 +793,7 @@ mod token_exchange_for_people {
         )
         .await;
         assert_eq!(res.status, 403);
-        assert_matches(&t.deny().await, json!({ "reason": "profile_mismatch" }));
+        assert_refused(&t.deny().await, "forbidden", "profile ");
         assert_eq!(token_count(), 1);
     }
 
@@ -791,7 +807,7 @@ mod token_exchange_for_people {
         )
         .await;
         assert_eq!(res.status, 403);
-        assert_matches(&t.deny().await, json!({ "reason": "profile_mismatch" }));
+        assert_refused(&t.deny().await, "forbidden", "profile ");
     }
 
     #[tokio::test]
@@ -803,8 +819,12 @@ mod token_exchange_for_people {
         )
         .await;
         assert_eq!(res.status, 403);
-        assert_eq!(res.json(), json!({ "error": "forbidden" }));
-        assert_matches(&t.deny().await, json!({ "reason": "repository_forbidden" }));
+        assert_error(&res, "forbidden");
+        assert_refused(
+            &t.deny().await,
+            "forbidden",
+            "other-org/infra doesn't belong to the owner the provider pins",
+        );
         assert!(
             !github_requests()
                 .iter()
@@ -821,7 +841,11 @@ mod token_exchange_for_people {
                 .status,
             403
         );
-        assert_matches(&t.deny().await, json!({ "reason": "repository_forbidden" }));
+        assert_refused(
+            &t.deny().await,
+            "forbidden",
+            "the repository doesn't exist, or the token can't see it",
+        );
     }
 
     #[tokio::test]
@@ -851,7 +875,7 @@ mod token_exchange_for_people {
         )
         .await;
         assert_eq!(res.status, 401);
-        assert_matches(&t.deny().await, json!({ "reason": "installation_token" }));
+        assert_refused(&t.deny().await, "unauthorized", "installation token");
         assert!(github_requests().is_empty());
     }
 
@@ -864,7 +888,7 @@ mod token_exchange_for_people {
                 .status,
             401
         );
-        assert_matches(&t.deny().await, json!({ "reason": "invalid_user_token" }));
+        assert_refused(&t.deny().await, "unauthorized", "GitHub rejected the token");
     }
 
     #[tokio::test]
@@ -872,7 +896,7 @@ mod token_exchange_for_people {
         let t = setup().await;
         let res = user_token("", &[("repository", "example-org/api")]).await;
         assert_eq!(res.status, 400);
-        assert_matches(&t.deny().await, json!({ "reason": "invalid_request" }));
+        assert_refused(&t.deny().await, "bad_request", "");
         assert!(github_requests().is_empty());
     }
 
@@ -896,10 +920,9 @@ mod token_exchange_for_people {
         let t = setup().await;
         // Every profile here needs a role on a repo, so none matches.
         assert_eq!(user_token(USER_TOKEN, &[]).await.status, 403);
-        assert_matches(
-            &t.deny().await,
-            json!({ "provider": "people", "reason": "no_match", "actor_id": USER_ID }),
-        );
+        let deny = t.deny().await;
+        assert_matches(&deny, json!({ "provider": "people", "actor_id": USER_ID }));
+        assert_refused(&deny, "forbidden", "no profile matches the token");
         assert_eq!(github_requests(), ["/user"]);
     }
 
@@ -933,7 +956,7 @@ mod token_exchange_for_people {
                 .status,
             403
         );
-        assert_matches(&t.deny().await, json!({ "reason": "profile_mismatch" }));
+        assert_refused(&t.deny().await, "forbidden", "profile ");
     }
 
     #[tokio::test]
@@ -980,7 +1003,7 @@ mod token_exchange_for_people {
         )
         .await;
         assert_eq!(res.status, 403);
-        assert_matches(&t.deny().await, json!({ "reason": "teams_forbidden" }));
+        assert_refused(&t.deny().await, "forbidden", "can't list its user's teams");
         assert_eq!(token_count(), 1);
     }
 
@@ -1001,7 +1024,7 @@ mod token_exchange_for_people {
                 .status,
             403
         );
-        assert_matches(&t.deny().await, json!({ "reason": "sso_required" }));
+        assert_refused(&t.deny().await, "forbidden", "SAML SSO");
     }
 
     #[tokio::test]
@@ -1027,7 +1050,7 @@ mod token_exchange_for_people {
             )
             .await;
             assert_eq!(res.status, 502, "{status}");
-            assert_matches(&t.deny().await, json!({ "reason": "github_unavailable" }));
+            assert_refused(&t.deny().await, "upstream_error", "GitHub: /user");
             drop(t);
         }
     }
@@ -1131,10 +1154,11 @@ mod broker_token {
         world().scenario["broker_token"] = json!("BROKER_TOKEN_MISSING");
         let res = job_token(&sign(github_claims(json!({}))), &[]).await;
         assert_eq!(res.status, 500);
-        assert_eq!(res.json(), json!({ "error": "misconfigured" }));
-        assert_matches(
+        assert_error(&res, "misconfigured");
+        assert_refused(
             &t.deny().await,
-            json!({ "reason": "broker_token_unavailable" }),
+            "misconfigured",
+            "BROKER_TOKEN_MISSING can't be read",
         );
         assert_eq!(token_count(), 1); // nothing minted
     }
@@ -1145,9 +1169,12 @@ mod broker_token {
         world().scenario["broker_token"] = json!("BROKER_TOKEN_PLAIN");
         let res = job_token(&sign(github_claims(json!({}))), &[]).await;
         assert_eq!(res.status, 500);
-        assert_matches(
+        assert_error(&res, "misconfigured");
+        assert!(!res.text.contains("BROKER_TOKEN_PLAIN"), "{}", res.text);
+        assert_refused(
             &t.deny().await,
-            json!({ "reason": "broker_token_unavailable", "detail": "BROKER_TOKEN_PLAIN must be a Secrets Store binding" }),
+            "misconfigured",
+            "BROKER_TOKEN_PLAIN must be a Secrets Store binding",
         );
         assert_eq!(token_count(), 1); // nothing minted
     }
@@ -1184,7 +1211,7 @@ mod health {
         assert!(health.is_ready().await.expect("the request failed"));
         let res = call(Method::GET, "/.well-known/openid-configuration").await;
         assert_eq!(res.status, 500);
-        assert_eq!(res.json(), json!({ "error": "misconfigured" }));
+        assert_error(&res, "misconfigured");
     }
 }
 
@@ -1249,30 +1276,26 @@ mod exchange_requests {
             (
                 "another grant type",
                 &[("grant_type", "client_credentials")],
-                "invalid_request",
+                "",
             ),
-            (
-                "no subject token",
-                &[("subject_token", "")],
-                "invalid_request",
-            ),
+            ("no subject token", &[("subject_token", "")], ""),
             (
                 "an unsupported subject token type",
                 &[(
                     "subject_token_type",
                     "urn:ietf:params:oauth:token-type:saml2",
                 )],
-                "invalid_request",
+                "",
             ),
             (
                 "another audience",
                 &[("audience", "https://cache.example.com")],
-                "invalid_target",
+                "no profile is for audience",
             ),
             (
                 "an actor token",
                 &[("actor_token", "x"), ("actor_token_type", ID_TOKEN)],
-                "invalid_request",
+                "",
             ),
             (
                 "an unsupported requested token type",
@@ -1280,10 +1303,10 @@ mod exchange_requests {
                     "requested_token_type",
                     "urn:ietf:params:oauth:token-type:refresh_token",
                 )],
-                "invalid_request",
+                "",
             ),
         ];
-        for (case, overrides, reason) in cases {
+        for (case, overrides, says) in cases {
             let t = start().await;
             let mut form: Vec<(&str, &str)> = vec![
                 ("grant_type", GRANT),
@@ -1296,8 +1319,13 @@ mod exchange_requests {
             }
             let res = post_form("/oauth/token", &form).await;
             assert_eq!(res.status, 400, "{case}");
-            assert_eq!(res.json(), json!({ "error": "bad_request" }), "{case}");
-            assert_eq!(t.deny().await["reason"], reason, "{case}");
+            assert_error(&res, "bad_request");
+            let deny = t.deny().await;
+            assert_eq!(deny["error"], "bad_request", "{case}: {deny}");
+            assert!(
+                deny["message"].as_str().unwrap_or_default().contains(says),
+                "{case}: {deny}"
+            );
             assert!(world().github.requests.is_empty(), "{case}");
             assert!(world().cloudflare.calls().is_empty(), "{case}");
             drop(t);
@@ -1315,9 +1343,10 @@ mod exchange_requests {
             )
             .await;
             assert_eq!(res.status, 400, "{content_type}");
-            assert_matches(
+            assert_refused(
                 &t.deny().await,
-                json!({ "reason": "invalid_request", "detail": "unsupported_media_type" }),
+                "bad_request",
+                "the body must be form-encoded",
             );
             drop(t);
         }
@@ -1328,7 +1357,11 @@ mod exchange_requests {
         let t = start().await;
         let res = job_token("not-a-jwt", &[]).await;
         assert_eq!(res.status, 401);
-        assert_eq!(t.deny().await["reason"], "invalid_jwt");
+        assert_refused(
+            &t.deny().await,
+            "unauthorized",
+            "the subject token isn't valid: not a JWT",
+        );
         assert!(world().cloudflare.calls().is_empty());
     }
 }
@@ -1397,10 +1430,9 @@ mod providers {
         )
         .await;
         assert_eq!(res.status, 403);
-        assert_matches(
-            &t.deny().await,
-            json!({ "provider": "gitlab", "reason": "no_match" }),
-        );
+        let deny = t.deny().await;
+        assert_matches(&deny, json!({ "provider": "gitlab" }));
+        assert_refused(&deny, "forbidden", "no profile matches the token");
     }
 
     #[tokio::test]
@@ -1412,9 +1444,10 @@ mod providers {
         )
         .await;
         assert_eq!(res.status, 403);
-        assert_matches(
+        assert_refused(
             &t.deny().await,
-            json!({ "reason": "profile_mismatch", "detail": "profile workers-deploy isn't for provider gitlab" }),
+            "forbidden",
+            "profile workers-deploy isn't for provider gitlab",
         );
     }
 
@@ -1428,9 +1461,10 @@ mod providers {
             300,
         );
         assert_eq!(job_token(&jwt, &[]).await.status, 401);
-        assert_matches(
+        assert_refused(
             &t.deny().await,
-            json!({ "reason": "unknown_issuer", "detail": "https://other.example.com" }),
+            "unauthorized",
+            "no provider is for issuer https://other.example.com",
         );
     }
 
@@ -1446,13 +1480,10 @@ mod providers {
             502
         );
         let deny = t.deny().await;
-        assert_eq!(deny["reason"], "jwks_unavailable");
-        assert!(
-            deny["detail"]
-                .as_str()
-                .unwrap()
-                .contains("is for issuer https://evil.example.com"),
-            "{deny}"
+        assert_refused(
+            &deny,
+            "upstream_error",
+            "is for issuer https://evil.example.com",
         );
     }
 
@@ -1653,7 +1684,7 @@ mod tokens_for_other_services {
         )
         .await;
         assert_eq!(res.status, 400);
-        assert_matches(&t.deny().await, json!({ "reason": "invalid_target" }));
+        assert_refused(&t.deny().await, "bad_request", "no profile is for audience");
         assert!(world().github.requests.is_empty());
     }
 
@@ -1667,9 +1698,10 @@ mod tokens_for_other_services {
         )
         .await;
         assert_eq!(res.status, 403);
-        assert_matches(
+        assert_refused(
             &t.deny().await,
-            json!({ "reason": "profile_mismatch", "detail": format!("profile workers-deploy isn't for {CACHE}") }),
+            "forbidden",
+            &format!("profile workers-deploy isn't for {CACHE}"),
         );
     }
 
@@ -1691,10 +1723,11 @@ mod tokens_for_other_services {
         world().scenario["signing_key"] = json!("SIGNING_KEY_UNBOUND");
         let res = for_cache(&sign(github_claims(json!({}))), ID_TOKEN, &[]).await;
         assert_eq!(res.status, 500);
-        assert_eq!(res.json(), json!({ "error": "misconfigured" }));
-        assert_matches(
+        assert_error(&res, "misconfigured");
+        assert_refused(
             &t.deny().await,
-            json!({ "reason": "signing_key_unavailable" }),
+            "misconfigured",
+            "SIGNING_KEY_UNBOUND must be a Secrets Store binding",
         );
 
         assert_eq!(
@@ -1718,9 +1751,10 @@ mod tokens_for_other_services {
                 .status,
             500
         );
-        assert_matches(
+        assert_refused(
             &t.deny().await,
-            json!({ "reason": "signing_key_unavailable", "detail": "not an RSA private key in PKCS#8 PEM" }),
+            "misconfigured",
+            "the signing key: not an RSA private key in PKCS#8 PEM",
         );
     }
 
@@ -1734,9 +1768,10 @@ mod tokens_for_other_services {
                 .status,
             500
         );
-        assert_matches(
+        assert_refused(
             &t.deny().await,
-            json!({ "reason": "signing_key_unavailable", "detail": "RSA key is 1024 bits, at least 2048 needed" }),
+            "misconfigured",
+            "the signing key: RSA key is 1024 bits, at least 2048 needed",
         );
     }
 }
@@ -1753,7 +1788,7 @@ async fn answers_not_found_on_unknown_routes_including_the_removed_v1_routes() {
     ] {
         let res = post_form(path, &[]).await;
         assert_eq!(res.status, 404, "{path}");
-        assert_eq!(res.json(), json!({ "error": "not_found" }));
+        assert_error(&res, "not_found");
     }
     assert_eq!(call(Method::GET, "/oauth/token").await.status, 404);
     assert_eq!(call(Method::GET, "/").await.status, 404);

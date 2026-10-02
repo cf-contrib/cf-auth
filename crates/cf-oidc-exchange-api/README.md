@@ -439,16 +439,16 @@ Errors are the same as on every route.
 curl -sS https://cf-oidc-exchange.example.com/oauth/revoke -d token="$CLOUDFLARE_API_TOKEN"
 ```
 
-**Errors:** `{ "error": "<code>" }` with one of these statuses:
+**Errors:** `{ "error": "<code>", "message": "<what went wrong>" }`, the shape cf-nix-cache uses, with one of these statuses:
 
 - `400 bad_request`
 - `401 unauthorized`
 - `403 forbidden`
 - `404 not_found`
-- `500 misconfigured`
+- `500 misconfigured` or `internal_error`
 - `502 upstream_error`
 
-Bodies are deliberately generic; the reason goes to the audit log.
+For the caller's own mistakes (400 to 404) the message says what was wrong, for example `no profile matches the token` or `profile workers-deploy isn't for provider people`. That tells a caller with a valid token which profile names exist. For the broker's faults (500, 502) the message is generic, and the logs say why.
 
 **Contract:** [`exchangev1.yaml`](../cf-oidc-exchange-sdk/openapi/oidc/exchange/v1/exchangev1.yaml). The Worker's types, server and router are generated from it, and requests that don't fit it are refused (`400`) before any handler runs. The action's [`api.ts`](../../packages/cf-oidc-action/src/api.ts) mirrors it.
 
@@ -494,11 +494,15 @@ A token for another service is `token.issue`, with the audience and the token's 
 
 When an isolate first loads the policy, it logs `policy.loaded` with the profile count, e.g. `{"event":"policy.loaded","profiles":3}`. Check this line after deploying.
 
-Denials are `token.deny` with a `reason`:
+Denials are `token.deny` with the `error` and `message` of the response. For the broker's own faults, the message is the full one the caller doesn't get:
 
-- **Request problems:** `invalid_request` (anything the contract refuses, such as another `grant_type`, `actor_token`, a missing field or a JSON body, with what was wrong in `detail`), `invalid_jwt`, `unknown_issuer`, `invalid_user_token`, `installation_token`, `invalid_ttl`, `no_user_profiles`, `unsupported_requested_token_type`, `invalid_target`
-- **Policy or GitHub didn't allow it:** `no_match`, `ambiguous`, `profile_mismatch`, `invalid_r2_prefix`, `repository_forbidden`, `teams_forbidden`, `sso_required`
-- **Configuration or upstream errors:** `broker_token_unavailable`, `signing_key_unavailable`, `unknown_permission`, `ambiguous_permission`, `jwks_unavailable`, `github_unavailable`, `cloudflare_error`
+```json
+{"event":"token.deny","provider":"github","profile":"workers-deploy","repository":"example-org/api","error":"upstream_error","message":"Cloudflare: tokens.create: returned 500"}
+```
+
+- **Request problems** (`bad_request`, `unauthorized`, `not_found`): what the contract refuses, such as another `grant_type`, `actor_token`, a missing field or a JSON body; an invalid or unknown subject token; a GitHub token GitHub rejects; a `ttl` or `audience` that doesn't fit.
+- **The policy or GitHub didn't allow it** (`forbidden`): no profile matches, several do, the named one doesn't, a claim can't fill a bucket prefix, the repository or teams can't be seen, SAML SSO.
+- **Configuration or upstream faults** (`misconfigured`, `internal_error`, `upstream_error`): a secret that can't be read, an unknown permission name, an issuer's keys, GitHub or Cloudflare failing.
 
 ## Limitations
 
@@ -525,8 +529,8 @@ Denials are `token.deny` with a `reason`:
 | `src/github.rs` | People's GitHub tokens, checked with GitHub's API. |
 | `src/issuer.rs` | The broker's own RS256 tokens, for profiles with another service's `audience`. |
 | `src/cloudflare.rs` | Account API tokens and R2 temporary credentials, through [cloudflare-rs](https://github.com/cf-contrib/cloudflare-rs). |
-| `src/exchange.rs` | The flows: exchange, revocation, discovery, JWKS, cleanup. |
-| `src/service` | The generated API's implementation, and the layer around its router. |
+| `src/service/handler.rs` | The generated API's implementation, as cf-nix-cache's is: each operation's flow (exchange, revocation, discovery, JWKS), the bindings it reads, and the cleanup the cron runs. |
+| `src/service/layer.rs` | Around the generated router: the `Error` body for requests it rejects or no route serves, and `Cache-Control`. |
 | `src/webcrypto.rs` | RS256 and SHA-256 through the runtime's WebCrypto: no RSA crate in the wasm. |
 | `worker/entry.js` | The entry module: hands the Worker `policy.json`, a module beside it. |
 

@@ -9,11 +9,11 @@
 use std::{cell::RefCell, collections::HashMap, time::Duration};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use cf_oidc_exchange_sdk::v1::{Error, ErrorCode};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::{
-    error::{ErrorCode, HttpError},
     policy::{Claims, Provider, ProviderType, is_issuer_url},
     webcrypto,
 };
@@ -35,12 +35,19 @@ thread_local! {
     static KEYS: RefCell<HashMap<String, KeySet>> = RefCell::new(HashMap::new());
 }
 
-fn invalid(detail: impl Into<String>) -> HttpError {
-    HttpError::new(ErrorCode::Unauthorized, "invalid_jwt").with_detail(detail)
+fn invalid(why: &str) -> Error {
+    Error::new(
+        ErrorCode::Unauthorized,
+        format!("the subject token isn't valid: {why}"),
+    )
 }
 
-fn unavailable(detail: impl Into<String>) -> HttpError {
-    HttpError::new(ErrorCode::UpstreamError, "jwks_unavailable").with_detail(detail)
+/// The issuer's keys couldn't be had: the broker's problem, not the caller's.
+fn unavailable(why: String) -> Error {
+    Error::new(
+        ErrorCode::UpstreamError,
+        format!("the issuer's keys: {why}"),
+    )
 }
 
 /// The first 200 characters of something a caller sent, for the audit log.
@@ -58,7 +65,7 @@ pub struct Jwt<'a> {
 }
 
 impl<'a> Jwt<'a> {
-    pub fn decode(jwt: &'a str) -> Result<Self, HttpError> {
+    pub fn decode(jwt: &'a str) -> Result<Self, Error> {
         #[derive(Deserialize)]
         struct Header {
             alg: String,
@@ -87,7 +94,7 @@ impl<'a> Jwt<'a> {
 
 /// The OIDC provider whose issuer the token names. Its `iss` is read unverified,
 /// only to pick the keys to verify it with; the claims check reads it again.
-pub fn provider_for<'p>(jwt: &Jwt, providers: &'p [Provider]) -> Result<&'p Provider, HttpError> {
+pub fn provider_for<'p>(jwt: &Jwt, providers: &'p [Provider]) -> Result<&'p Provider, Error> {
     let iss = jwt
         .claims
         .get("iss")
@@ -97,18 +104,21 @@ pub fn provider_for<'p>(jwt: &Jwt, providers: &'p [Provider]) -> Result<&'p Prov
         .iter()
         .find(|p| p.kind == ProviderType::Oidc && p.issuer == iss)
         .ok_or_else(|| {
-            HttpError::new(ErrorCode::Unauthorized, "unknown_issuer").with_detail(shown(iss))
+            Error::new(
+                ErrorCode::Unauthorized,
+                format!("no provider is for issuer {}", shown(iss)),
+            )
         })
 }
 
 /// Verifies an OIDC token from `provider`: its RS256 signature against the
 /// issuer's keys, then `iss`, `aud`, `exp`, `iat` and `nbf`.
-pub async fn verify(jwt: Jwt<'_>, provider: &Provider, now_ms: u64) -> Result<Claims, HttpError> {
+pub async fn verify(jwt: Jwt<'_>, provider: &Provider, now_ms: u64) -> Result<Claims, Error> {
     let key = find_key(provider, jwt.kid.as_deref(), now_ms).await?;
     let verified =
         webcrypto::verify_rs256(&key.n, &key.e, jwt.signing_input.as_bytes(), &jwt.signature)
             .await
-            .map_err(|err| HttpError::new(ErrorCode::Internal, "webcrypto").with_detail(err))?;
+            .map_err(|err| Error::new(ErrorCode::InternalError, format!("WebCrypto: {err}")))?;
     if !verified {
         return Err(invalid("bad signature"));
     }
@@ -117,7 +127,7 @@ pub async fn verify(jwt: Jwt<'_>, provider: &Provider, now_ms: u64) -> Result<Cl
 }
 
 /// The standard claims of a token whose signature verified.
-pub fn check_claims(claims: &Claims, provider: &Provider, now: u64) -> Result<(), HttpError> {
+pub fn check_claims(claims: &Claims, provider: &Provider, now: u64) -> Result<(), Error> {
     let claim = |name| claims.get(name);
     if claim("iss").and_then(Value::as_str) != Some(provider.issuer.as_str()) {
         return Err(invalid("wrong issuer"));
@@ -222,7 +232,7 @@ impl KeySet {
     }
 }
 
-async fn find_key(provider: &Provider, kid: Option<&str>, now_ms: u64) -> Result<Jwk, HttpError> {
+async fn find_key(provider: &Provider, kid: Option<&str>, now_ms: u64) -> Result<Jwk, Error> {
     let unknown = || invalid("no matching key");
     match KEYS.with_borrow(|sets| KeySet::lookup(sets.get(&provider.issuer), kid, now_ms)) {
         Lookup::Hit(key) => return Ok(key),
@@ -238,7 +248,7 @@ async fn find_key(provider: &Provider, kid: Option<&str>, now_ms: u64) -> Result
 /// Where an issuer's keys are: its configured `jwks_uri`, or what its discovery
 /// document says, which must name the same issuer, so one issuer can't hand out
 /// another's keys.
-async fn jwks_uri(provider: &Provider) -> Result<String, HttpError> {
+async fn jwks_uri(provider: &Provider) -> Result<String, Error> {
     if let Some(uri) = &provider.jwks_uri {
         return Ok(uri.clone());
     }
@@ -270,7 +280,7 @@ async fn jwks_uri(provider: &Provider) -> Result<String, HttpError> {
     }
 }
 
-async fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, HttpError> {
+async fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, Error> {
     let failed = |err: reqwest::Error| unavailable(format!("{url}: {err}"));
     let response = reqwest::Client::new()
         .get(url)
@@ -324,10 +334,15 @@ mod tests {
         claims
     }
 
+    /// Why the claims aren't valid, if they aren't.
     fn check(overrides: Value) -> Option<String> {
         check_claims(&claims(overrides), &provider(), NOW)
             .err()
-            .and_then(|err| err.detail)
+            .map(|err| {
+                err.message
+                    .trim_start_matches("the subject token isn't valid: ")
+                    .to_string()
+            })
     }
 
     fn segment(value: Value) -> String {
@@ -395,11 +410,15 @@ mod tests {
         assert_eq!(decoded.signing_input, format!("{header}.{payload}"));
         assert_eq!(decoded.signature, b"sig");
 
-        let reason = |jwt: &str| Jwt::decode(jwt).err().and_then(|err| err.detail);
-        assert_eq!(reason("gho_notAJwt").as_deref(), Some("not a JWT"));
-        assert_eq!(reason("not.a.jwt").as_deref(), Some("not a JWT"));
+        let reason = |jwt: &str| Jwt::decode(jwt).err().map(|err| err.message);
+        let not_a_jwt = Some("the subject token isn't valid: not a JWT");
+        assert_eq!(reason("gho_notAJwt").as_deref(), not_a_jwt);
+        assert_eq!(reason("not.a.jwt").as_deref(), not_a_jwt);
         let hs256 = format!("{}.{payload}.c2ln", segment(json!({ "alg": "HS256" })));
-        assert_eq!(reason(&hs256).as_deref(), Some("alg must be RS256"));
+        assert_eq!(
+            reason(&hs256).as_deref(),
+            Some("the subject token isn't valid: alg must be RS256")
+        );
     }
 
     #[test]
@@ -427,10 +446,8 @@ mod tests {
         // A person's provider never takes OIDC tokens, even one that names its issuer.
         let token = jwt("https://github.com");
         let err = provider_for(&Jwt::decode(&token).unwrap(), &providers).unwrap_err();
-        assert_eq!(
-            (err.reason, err.detail.as_deref()),
-            ("unknown_issuer", Some("https://github.com"))
-        );
+        assert_eq!(err.error, ErrorCode::Unauthorized);
+        assert_eq!(err.message, "no provider is for issuer https://github.com");
     }
 
     #[test]

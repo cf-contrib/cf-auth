@@ -4,6 +4,7 @@
 
 use std::{cell::RefCell, collections::HashMap};
 
+use cf_oidc_exchange_sdk::v1::{Error, ErrorCode};
 use chrono::{DateTime, SecondsFormat, Utc};
 use cloudflare::v4::{
     ApiOpError, HttpClient, IamCreatePayload, IamEffect, IamPermissionGroup,
@@ -16,7 +17,6 @@ use serde_json::Value;
 
 use crate::{
     audit::Audit,
-    error::{ErrorCode, HttpError},
     policy::{
         Bucket, BucketPermission, Claims, Effect, Provider, ProviderType, ResourceValue,
         TokenPolicy,
@@ -40,17 +40,22 @@ const R2_SCOPE: &str = "com.cloudflare.edge.r2.bucket";
 const PAGE_SIZE: usize = 50;
 
 /// A Cloudflare API failure, reported as a `502`.
-fn upstream<E: std::fmt::Debug>(what: &str, err: ApiOpError<E>) -> HttpError {
-    let detail = match &err {
-        ApiOpError::Api(api) => format!("{what}: Cloudflare returned {}", api.status),
-        ApiOpError::Transport(err) => format!("{what}: {err}"),
+fn upstream<E: std::fmt::Debug>(what: &str, err: ApiOpError<E>) -> Error {
+    let why = match &err {
+        ApiOpError::Api(api) => format!("returned {}", api.status),
+        ApiOpError::Transport(err) => err.to_string(),
     };
-    HttpError::new(ErrorCode::UpstreamError, "cloudflare_error").with_detail(detail)
+    Error::new(
+        ErrorCode::UpstreamError,
+        format!("Cloudflare: {what}: {why}"),
+    )
 }
 
-fn missing(what: &str) -> HttpError {
-    HttpError::new(ErrorCode::UpstreamError, "cloudflare_error")
-        .with_detail(format!("{what} returned nothing"))
+fn missing(what: &str) -> Error {
+    Error::new(
+        ErrorCode::UpstreamError,
+        format!("Cloudflare: {what} returned nothing"),
+    )
 }
 
 /// The status Cloudflare answered with, if it answered.
@@ -156,7 +161,7 @@ impl Cloudflare {
         name: String,
         ttl: u64,
         now_ms: u64,
-    ) -> Result<MintedToken, HttpError> {
+    ) -> Result<MintedToken, Error> {
         let policies = self.resolve(policies, now_ms).await?;
         let expires_on = timestamp(now_ms + ttl).with_nanosecond_zero();
         let payload = IamCreatePayload {
@@ -203,11 +208,7 @@ impl Cloudflare {
 
     /// Revokes a token the caller presents. Holding it is the proof of
     /// authorization. Returns the deleted token's ID, or `None` if it was already gone.
-    pub async fn revoke(
-        &self,
-        api_url: &str,
-        presented: &str,
-    ) -> Result<Option<String>, HttpError> {
+    pub async fn revoke(&self, api_url: &str, presented: &str) -> Result<Option<String>, Error> {
         let presenter = HttpClient::new()
             .with_base_url(api_url)
             .with_api_key(presented);
@@ -234,7 +235,10 @@ impl Cloudflare {
             Err(err) => return Err(upstream("tokens.get", err)),
         };
         if !name.is_some_and(|name| name.starts_with(TOKEN_PREFIX)) {
-            return Err(HttpError::new(ErrorCode::Forbidden, "foreign_token").with_detail(id));
+            return Err(Error::new(
+                ErrorCode::Forbidden,
+                format!("token {id} wasn't minted by the broker, so it isn't revoked here"),
+            ));
         }
 
         match self
@@ -249,7 +253,7 @@ impl Cloudflare {
     }
 
     /// Deletes expired `cf-oidc:` tokens. Returns how many were removed.
-    pub async fn cleanup(&self, now_ms: u64) -> Result<usize, HttpError> {
+    pub async fn cleanup(&self, now_ms: u64) -> Result<usize, Error> {
         // Collect first: deleting while paginating would shift later pages and skip tokens.
         let mut expired = Vec::new();
         for page in 1.. {
@@ -317,7 +321,7 @@ impl Cloudflare {
         prefixes: Vec<String>,
         ttl: u64,
         now_ms: u64,
-    ) -> Result<BucketGrant, HttpError> {
+    ) -> Result<BucketGrant, Error> {
         let parent_access_key_id = self.parent_key_id().await?;
         let request = R2TempAccessCredsRequest {
             bucket: bucket.name.clone(),
@@ -358,7 +362,7 @@ impl Cloudflare {
         })
     }
 
-    async fn parent_key_id(&self) -> Result<String, HttpError> {
+    async fn parent_key_id(&self) -> Result<String, Error> {
         let cached = PARENT.with_borrow(|parent| {
             parent
                 .as_ref()
@@ -386,7 +390,7 @@ impl Cloudflare {
         &self,
         policies: &[TokenPolicy],
         now_ms: u64,
-    ) -> Result<Vec<IamPolicyWithPermissionGroupsAndResources>, HttpError> {
+    ) -> Result<Vec<IamPolicyWithPermissionGroupsAndResources>, Error> {
         let groups = self.permission_groups(now_ms).await?;
         policies
             .iter()
@@ -418,7 +422,7 @@ impl Cloudflare {
 
     /// The account's permission groups: per isolate first, then the Cache API,
     /// which is shared per colo, then Cloudflare.
-    async fn permission_groups(&self, now_ms: u64) -> Result<Vec<Group>, HttpError> {
+    async fn permission_groups(&self, now_ms: u64) -> Result<Vec<Group>, Error> {
         let key = format!("permission-groups/{}", self.account_id);
         let fresh = GROUPS.with_borrow(|groups| {
             groups
@@ -487,7 +491,7 @@ impl WholeSeconds for DateTime<Utc> {
 }
 
 /// A policy's resources in the API's shape: all `"*"`-style values, or all nested maps.
-fn resources(policy: &TokenPolicy) -> Result<IamResources, HttpError> {
+fn resources(policy: &TokenPolicy) -> Result<IamResources, Error> {
     let flat: Option<_> = policy
         .resources
         .iter()
@@ -522,7 +526,12 @@ fn resources(policy: &TokenPolicy) -> Result<IamResources, HttpError> {
                 additional_properties,
             })
         })
-        .ok_or_else(|| HttpError::new(ErrorCode::Misconfigured, "mixed_resources"))
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::Misconfigured,
+                "a token policy's resources mix \"*\" values and nested maps",
+            )
+        })
 }
 
 /// The scope a permission group needs for these resources, used to pick between
@@ -544,7 +553,7 @@ fn scope_for(policy: &TokenPolicy) -> &'static str {
     if nested { ZONE_SCOPE } else { ACCOUNT_SCOPE }
 }
 
-fn pick_group<'g>(groups: &'g [Group], name: &str, scope: &str) -> Result<&'g Group, HttpError> {
+fn pick_group<'g>(groups: &'g [Group], name: &str, scope: &str) -> Result<&'g Group, Error> {
     let named: Vec<&Group> = groups.iter().filter(|g| g.name == name).collect();
     if let [group] = named.as_slice() {
         return Ok(group);
@@ -557,12 +566,12 @@ fn pick_group<'g>(groups: &'g [Group], name: &str, scope: &str) -> Result<&'g Gr
     if let [group] = scoped.as_slice() {
         return Ok(group);
     }
-    let reason = if named.is_empty() {
-        "unknown_permission"
+    let message = if named.is_empty() {
+        format!("no permission group is named {name}")
     } else {
-        "ambiguous_permission"
+        format!("several permission groups are named {name}, at no one scope of the resources")
     };
-    Err(HttpError::new(ErrorCode::Misconfigured, reason).with_detail(name))
+    Err(Error::new(ErrorCode::Misconfigured, message))
 }
 
 #[cfg(test)]
@@ -708,14 +717,14 @@ mod tests {
         assert_eq!(
             pick_group(&groups, "Load Balancers Write", R2_SCOPE)
                 .unwrap_err()
-                .reason,
-            "ambiguous_permission"
+                .message,
+            "several permission groups are named Load Balancers Write, at no one scope of the resources"
         );
         assert_eq!(
             pick_group(&groups, "Nope", ACCOUNT_SCOPE)
                 .unwrap_err()
-                .reason,
-            "unknown_permission"
+                .message,
+            "no permission group is named Nope"
         );
     }
 
@@ -738,6 +747,9 @@ mod tests {
         let mixed = policy(
             json!({ "com.cloudflare.api.account.a": { "x": "*" }, "com.cloudflare.api.account.zone.z": "*" }),
         );
-        assert_eq!(resources(&mixed).unwrap_err().reason, "mixed_resources");
+        assert_eq!(
+            resources(&mixed).unwrap_err().error,
+            ErrorCode::Misconfigured
+        );
     }
 }

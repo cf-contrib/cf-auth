@@ -1,9 +1,9 @@
 //! Which profile a caller gets: their claims against each profile's.
 
+use cf_oidc_exchange_sdk::v1::{Error, ErrorCode};
 use serde_json::{Map, Value};
 
 use super::{MIN_TTL, Policy, Profile, REPOSITORY_PERMISSIONS, parse_duration};
-use crate::error::{ErrorCode, HttpError};
 
 /// A verified token's claims, or a person's as the broker looks them up.
 pub type Claims = Map<String, Value>;
@@ -76,14 +76,14 @@ pub fn matches(profile: &Profile, claims: &Claims) -> bool {
 }
 
 /// Picks the profile to issue with, among those for `provider` and `audience`
-/// only, or refuses with a `403` whose reason goes to the audit log.
+/// only, or refuses with a `403` that says why.
 pub fn select_profile<'a>(
     policy: &'a Policy,
     provider: &str,
     claims: &Claims,
     requested: Option<&str>,
     audience: &str,
-) -> Result<&'a Profile, HttpError> {
+) -> Result<&'a Profile, Error> {
     let mut profiles = policy
         .profiles
         .iter()
@@ -98,45 +98,53 @@ pub fn select_profile<'a>(
             return Ok(profile);
         }
         let named = policy.profiles.iter().find(|p| p.name == requested);
-        let detail = match named {
-            None => Some(format!("unknown profile {requested}")),
+        let message = match named {
+            None => format!("unknown profile {requested}"),
             Some(named) if named.provider != provider => {
-                Some(format!("profile {requested} isn't for provider {provider}"))
+                format!("profile {requested} isn't for provider {provider}")
             }
             Some(named) if named.audience != audience => {
-                Some(format!("profile {requested} isn't for {audience}"))
+                format!("profile {requested} isn't for {audience}")
             }
-            Some(named) if !named.enabled => Some(format!("profile {requested} is disabled")),
-            Some(_) => None,
+            Some(named) if !named.enabled => format!("profile {requested} is disabled"),
+            Some(_) => format!("profile {requested} doesn't match the token"),
         };
-        let error = HttpError::new(ErrorCode::Forbidden, "profile_mismatch");
-        return Err(match detail {
-            Some(detail) => error.with_detail(detail),
-            None => error,
-        });
+        return Err(Error::new(ErrorCode::Forbidden, message));
     }
 
     let candidates: Vec<&Profile> = profiles
         .filter(|p| p.enabled && matches(p, claims))
         .collect();
     match candidates.as_slice() {
-        [] => Err(HttpError::new(ErrorCode::Forbidden, "no_match")),
+        [] => Err(Error::new(
+            ErrorCode::Forbidden,
+            "no profile matches the token",
+        )),
         [profile] => Ok(profile),
         several => {
             let names: Vec<&str> = several.iter().map(|p| p.name.as_str()).collect();
-            Err(HttpError::new(ErrorCode::Forbidden, "ambiguous").with_detail(names.join(",")))
+            Err(Error::new(
+                ErrorCode::Forbidden,
+                format!(
+                    "profiles {} all match the token: name one",
+                    names.join(", ")
+                ),
+            ))
         }
     }
 }
 
 /// Resolves the requested TTL against the profile, in milliseconds. Requests
 /// above `max_ttl` are clamped, not refused.
-pub fn clamp_ttl(requested: Option<&str>, profile: &Profile) -> Result<u64, HttpError> {
+pub fn clamp_ttl(requested: Option<&str>, profile: &Profile) -> Result<u64, Error> {
     let Some(requested) = requested else {
         return Ok(profile.ttl);
     };
     match parse_duration(requested) {
         Some(ttl) if ttl >= MIN_TTL => Ok(ttl.min(profile.max_ttl)),
-        _ => Err(HttpError::new(ErrorCode::BadRequest, "invalid_ttl").with_detail(requested)),
+        _ => Err(Error::new(
+            ErrorCode::BadRequest,
+            format!("ttl {requested} isn't a duration of at least 1m"),
+        )),
     }
 }

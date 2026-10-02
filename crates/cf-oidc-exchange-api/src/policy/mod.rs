@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use self::{
-    matching::{Claims, clamp_ttl, glob, matches, select_profile},
+    matching::{Claims, clamp_ttl, select_profile},
     prefix::r2_prefixes,
 };
 

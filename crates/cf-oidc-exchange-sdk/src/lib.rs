@@ -11,7 +11,7 @@
 //!
 //! - **Types**: [`v1::TokenExchangeRequest`] and [`v1::TokenExchangeResponse`],
 //!   [`v1::TokenRevocationRequest`], the discovery document and JWKS, and
-//!   [`v1::ErrorResponse`], the body of every error.
+//!   [`v1::Error`], the body of every error, with [`v1::Error::new`].
 //! - **Server** (`server` feature): `ExchangeServiceApi`, a response enum per
 //!   operation, and `exchange_service_api_router`, an axum router over it that
 //!   checks requests against the spec before they reach a handler.
@@ -26,8 +26,9 @@
 //! `openapi/oidc/exchange/v1/exchangev1.yaml` is the source. `build.rs` runs
 //! [openapi-to-rust](https://github.com/gpu-cli/openapi-to-rust) over it into
 //! `OUT_DIR`, so none of it is checked in or edited by hand. What is
-//! hand-written is in `service/`, mounted into `v1` beside it: the health
-//! endpoints in `service/handler.rs`.
+//! hand-written is in `service/`, mounted into `v1` beside it: the models'
+//! companions in `service/model.rs`, the health endpoints in
+//! `service/handler.rs`.
 
 mod service;
 

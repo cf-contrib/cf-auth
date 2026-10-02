@@ -6,10 +6,10 @@
 
 use std::sync::LazyLock;
 
+use cf_oidc_exchange_sdk::v1::{Error, ErrorCode};
 use regex::Regex;
 
 use super::{Bucket, Claims};
-use crate::error::{ErrorCode, HttpError};
 
 /// A `{claim}` placeholder. Not `${claim}`, which Terraform's templatefile would try to fill in.
 static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{([^{}]*)\}").unwrap());
@@ -97,9 +97,12 @@ pub(super) fn template_problem(template: &str) -> Option<String> {
 
 /// Fills in a bucket's prefix templates from the verified token's claims, or
 /// refuses with a `403` if a claim is missing or can't safely be used in a key.
-pub fn r2_prefixes(bucket: &Bucket, claims: &Claims) -> Result<Vec<String>, HttpError> {
-    let refuse = |detail: String| {
-        HttpError::new(ErrorCode::Forbidden, "invalid_r2_prefix").with_detail(detail)
+pub fn r2_prefixes(bucket: &Bucket, claims: &Claims) -> Result<Vec<String>, Error> {
+    let refuse = |why: String| {
+        Error::new(
+            ErrorCode::Forbidden,
+            format!("bucket {}: {why}", bucket.name),
+        )
     };
     bucket
         .prefixes
@@ -114,7 +117,7 @@ pub fn r2_prefixes(bucket: &Bucket, claims: &Claims) -> Result<Vec<String>, Http
                     (Some(value), Some(allowed)) if allowed.is_match(value) => value,
                     _ => {
                         return Err(refuse(format!(
-                            "{name} claim is missing or not usable in a prefix"
+                            "the {name} claim is missing or not usable in a prefix"
                         )));
                     }
                 };
@@ -124,7 +127,7 @@ pub fn r2_prefixes(bucket: &Bucket, claims: &Claims) -> Result<Vec<String>, Http
             }
             prefix.push_str(&template[rest..]);
             match prefix_problem(&prefix) {
-                Some(problem) => Err(refuse(format!("{prefix}: {problem}"))),
+                Some(problem) => Err(refuse(format!("prefix {prefix} {problem}"))),
                 None => Ok(prefix),
             }
         })
