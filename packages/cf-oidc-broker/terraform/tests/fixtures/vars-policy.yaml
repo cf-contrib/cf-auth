@@ -1,11 +1,15 @@
 # Uses policy_vars, for tests/main.tftest.hcl.
-version: 1
-github:
-  audience: ${broker_url}
-  owner_id: "${owner_id}"
+version: 2
+issuer: ${broker_url}
+providers:
+  - name: github
+    issuer: https://token.actions.githubusercontent.com
+    audience: ${broker_url}
+    claims:
+      repository_owner_id: "${owner_id}"
 profiles:
   - name: e2e
-    match:
+    claims:
       repository_id: "${repository_id}"
     token:
       policies:

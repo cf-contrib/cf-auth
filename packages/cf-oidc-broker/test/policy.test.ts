@@ -3,7 +3,7 @@ import { HttpError } from "../src/errors.js";
 import {
   CLOUDFLARE_AUDIENCE,
   clampTTL,
-  DEFAULT_ISSUER,
+  GITHUB_ACTIONS_ISSUER,
   glob,
   loadPolicy,
   matches,
@@ -18,13 +18,14 @@ import {
   AUDIENCE,
   githubClaims,
   OWNER_ID,
+  PEOPLE,
   TEAM_ID,
   type TestPolicy,
   testPolicy,
   USER_ID,
 } from "./helpers.js";
 
-const policy = () => testPolicy(DEFAULT_ISSUER);
+const policy = () => testPolicy(GITHUB_ACTIONS_ISSUER);
 
 /** Loads a policy and returns its issues, or [] if it's valid. */
 function issues(input: unknown): string[] {
@@ -88,32 +89,48 @@ describe("glob", () => {
 describe("loadPolicy", () => {
   it("accepts the example policy and applies defaults", () => {
     const p = loadPolicy(JSON.stringify(policy()));
-    expect(p.github.issuer).toBe(DEFAULT_ISSUER);
+    expect(p.issuer).toBe(AUDIENCE);
+    expect(p.providers).toEqual([
+      {
+        name: "github",
+        type: "oidc",
+        issuer: GITHUB_ACTIONS_ISSUER,
+        audience: AUDIENCE,
+        claims: { repository_owner_id: OWNER_ID },
+      },
+    ]);
     const deploy = p.profiles.find((r) => r.name === "workers-deploy");
+    expect(deploy?.provider).toBe("github");
     expect(deploy?.ttl).toBe(15 * 60_000);
     expect(deploy?.max_ttl).toBe(60 * 60_000);
     expect(deploy?.policies?.[0]?.effect).toBe("allow");
   });
 
-  it("adds the owner pin to every profile", () => {
+  it("adds the provider's claims to every profile", () => {
     for (const profile of loadPolicy(policy()).profiles) {
-      expect(profile.match.repository_owner_id).toBe(OWNER_ID);
+      expect(profile.claims.repository_owner_id).toBe(OWNER_ID);
     }
   });
 
-  it("defaults the issuer to github.com", () => {
+  it("lets profiles leave the provider out when there's only one", () => {
     const p = policy();
-    const { issuer: _, ...github } = p.github;
-    expect(loadPolicy({ ...p, github }).github.issuer).toBe(DEFAULT_ISSUER);
+    for (const profile of p.profiles) delete profile.provider;
+    expect(loadPolicy(p).profiles.every((r) => r.provider === "github")).toBe(true);
   });
 
   it("accepts unquoted numeric IDs from YAML", () => {
     const p = policy();
-    p.github.owner_id = Number(OWNER_ID) as unknown as string;
-    (p.profiles[0] as { match: Record<string, unknown> }).match.repository_id = 200000002;
+    (p.providers[0] as { claims: Record<string, unknown> }).claims.repository_owner_id = Number(OWNER_ID);
+    (p.profiles[0] as TestPolicy["profiles"][number]).claims.repository_id = 200000002;
     const loaded = loadPolicy(p);
-    expect(loaded.github.owner_id).toBe(OWNER_ID);
-    expect(loaded.profiles[0]?.match.repository_id).toBe("200000002");
+    expect(loaded.providers[0]?.claims.repository_owner_id).toBe(OWNER_ID);
+    expect(loaded.profiles[0]?.claims.repository_id).toBe("200000002");
+  });
+
+  it("refuses version 1 with a pointer to the migration", () => {
+    expect(issues({ version: 1, github: {}, profiles: [] })).toEqual([
+      "version 1 is no longer supported: move github: to providers: and match: to claims: (see the broker README's migration table)",
+    ]);
   });
 
   it("rejects invalid JSON", () => {
@@ -124,36 +141,122 @@ describe("loadPolicy", () => {
     expect(issues({ ...policy(), extra: true }).join()).toMatch(/extra/);
   });
 
+  it("rejects the old token.ttl", () => {
+    const p = policy();
+    (p.profiles[1]?.token as Record<string, unknown>).ttl = "10m";
+    expect(issues(p).join()).toMatch(/profiles\.1\.token\.ttl/);
+  });
+
+  describe("providers", () => {
+    it("rejects duplicate names and issuers", () => {
+      const p = policy();
+      p.providers.push({ ...(p.providers[0] as (typeof p.providers)[number]) });
+      expect(issues(p)).toEqual([
+        "providers.1 (github): duplicate provider name",
+        "providers.1 (github).issuer: another provider has the same issuer",
+      ]);
+    });
+
+    it("requires an issuer and an audience for an oidc provider", () => {
+      const p = policy();
+      p.providers.push({ name: "other", claims: {} });
+      expect(issues(p)).toEqual([
+        "providers.1 (other).issuer: required for an oidc provider",
+        "providers.1 (other).audience: required for an oidc provider",
+      ]);
+    });
+
+    it.each([
+      ["http://127.0.0.1:8788", true],
+      ["http://localhost", true],
+      ["http://[::1]:9000", true],
+      ["https://issuer.example.com", true],
+      ["http://issuer.example.com", false],
+    ])("only allows plain http on loopback: %s", (issuer, ok) => {
+      const p = policy();
+      p.providers.push({ name: "local", issuer, audience: AUDIENCE, claims: {} });
+      expect(issues(p).join().includes("must be an https:// URL")).toBe(!ok);
+    });
+
+    it("refuses issuer fields on a github-user provider", () => {
+      const p = policy();
+      p.providers.push({ ...PEOPLE, issuer: "https://github.com" });
+      expect(issues(p)).toEqual(["providers.1 (people).issuer: not for a github-user provider"]);
+    });
+
+    it("allows only one github-user provider", () => {
+      const p = policy();
+      p.providers.push({ ...PEOPLE }, { ...PEOPLE, name: "more-people" });
+      expect(issues(p)).toEqual(["providers.2 (more-people): only one github-user provider is allowed"]);
+    });
+
+    it("refuses roles and teams on a github-user provider", () => {
+      const p = policy();
+      p.providers.push({ ...PEOPLE, claims: { ...PEOPLE.claims, team_id: TEAM_ID } });
+      expect(issues(p)).toEqual(["providers.1 (people).claims: repository_permission and team_id go on profiles"]);
+    });
+  });
+
   describe("guardrails", () => {
-    it("1: requires github.owner_id", () => {
+    it("1: requires GitHub Actions providers to pin the owner", () => {
       const p = policy();
-      const { owner_id: _, ...github } = p.github;
-      expect(issues({ ...p, github }).join()).toMatch(/owner_id/);
+      (p.providers[0] as { claims: Record<string, unknown> }).claims = {};
+      expect(issues(p)).toEqual([
+        `providers.0 (github).claims: must pin repository_owner_id: ${GITHUB_ACTIONS_ISSUER} issues tokens to anyone's projects`,
+      ]);
     });
 
-    it("1: rejects a non-numeric owner_id", () => {
+    it.each([
+      ["https://gitlab.com", "namespace_id or project_id"],
+      ["https://app.terraform.io", "terraform_organization_id"],
+      [`${GITHUB_ACTIONS_ISSUER}/example-enterprise`, "repository_owner_id"],
+    ])("1: requires %s to pin the tenant", (issuer, pin) => {
       const p = policy();
-      p.github.owner_id = "example-org";
-      expect(issues(p).join()).toMatch(/owner_id: must be a numeric ID/);
+      p.providers.push({ name: "other", issuer, audience: AUDIENCE, claims: {} });
+      expect(issues(p)).toEqual([
+        `providers.1 (other).claims: must pin ${pin}: ${issuer} issues tokens to anyone's projects`,
+      ]);
     });
 
-    it("1: rejects a profile that overrides the owner pin", () => {
+    it("1: lets a single-tenant issuer go without a pin", () => {
       const p = policy();
-      (p.profiles[1]?.match as Record<string, string>).repository_owner_id = "999";
-      expect(issues(p).join()).toMatch(/conflicts with github.owner_id/);
+      p.providers.push({ name: "gitlab-self", issuer: "https://gitlab.example.com", audience: AUDIENCE, claims: {} });
+      expect(issues(p)).toEqual([]);
+    });
+
+    it("1: requires a github-user provider to pin the owner", () => {
+      const p = policy();
+      p.providers.push({ name: "people", type: "github-user", claims: {} });
+      expect(issues(p)).toEqual([
+        "providers.1 (people).claims.repository_owner_id: required, a numeric GitHub org or user ID",
+      ]);
+    });
+
+    it("1: rejects a profile that overrides its provider's claims", () => {
+      const p = policy();
+      (p.profiles[1] as { claims: Record<string, unknown> }).claims.repository_owner_id = "999";
+      expect(issues(p)).toEqual([
+        "profiles.1 (workers-deploy).claims.repository_owner_id: conflicts with provider github",
+      ]);
     });
 
     it("2: rejects globs on ID claims", () => {
       const p = policy();
-      (p.profiles[0]?.match as Record<string, string>).repository_id = "2000*";
+      (p.profiles[0] as { claims: Record<string, unknown> }).claims.repository_id = "2000*";
       expect(issues(p).join()).toMatch(/repository_id: ID claims must be exact/);
+    });
+
+    it("2: checks provider claims the same way", () => {
+      const p = policy();
+      (p.providers[0] as { claims: Record<string, unknown> }).claims.repository_owner_id = "1000*";
+      expect(issues(p).join()).toMatch(/providers\.0 \(github\)\.claims\.repository_owner_id: ID claims must be exact/);
     });
 
     it.each(["*", "*/api", "example-org/*/api", "example-org/**"])("2: rejects the pattern %s", (pattern) => {
       const p = policy();
-      (p.profiles[1]?.match as Record<string, string>).repository = pattern;
+      (p.profiles[1] as { claims: Record<string, unknown> }).claims.repository = pattern;
       expect(issues(p)).toEqual([
-        "profiles.1 (workers-deploy).match.repository: * is only allowed once, at the end, after a prefix (e.g. example-org/*)",
+        "profiles.1 (workers-deploy).claims.repository: * is only allowed once, at the end, after a prefix (e.g. example-org/*)",
       ]);
     });
 
@@ -178,7 +281,7 @@ describe("loadPolicy", () => {
 
     it("4: caps max_ttl at 24h", () => {
       const p = policy();
-      (p.profiles[1]?.token as Record<string, unknown>).max_ttl = "25h";
+      (p.profiles[1] as TestPolicy["profiles"][number]).max_ttl = "25h";
       expect(issues(p).join()).toMatch(/max_ttl: must be at most 24h/);
     });
 
@@ -190,26 +293,22 @@ describe("loadPolicy", () => {
 
     it("4: rejects a profile ttl above the default max_ttl", () => {
       const p = policy();
-      (p.profiles[1]?.token as Record<string, unknown>).ttl = "2h";
+      (p.profiles[1] as TestPolicy["profiles"][number]).ttl = "2h";
       expect(issues(p).join()).toMatch(/ttl: must not exceed max_ttl/);
-    });
-
-    it("5: requires an audience", () => {
-      const p = policy();
-      const { audience: _, ...github } = p.github;
-      expect(issues({ ...p, github }).join()).toMatch(/audience/);
     });
 
     it.each(["https://github.com/example-org", "https://github.com"])("5: rejects GitHub's audience %s", (aud) => {
       const p = policy();
-      p.github.audience = aud;
-      expect(issues(p).join()).toMatch(/must be a bare origin|default audience/);
+      (p.providers[0] as { audience: string }).audience = aud;
+      expect(issues(p)).toEqual([
+        "providers.0 (github).audience: must not be GitHub's default audience; use the broker's URL",
+      ]);
     });
 
-    it("5: requires the audience to be a bare origin", () => {
+    it("requires the broker's issuer to be a bare origin", () => {
       const p = policy();
-      p.github.audience = "https://cf-auth.example.com/";
-      expect(issues(p).join()).toMatch(/bare origin/);
+      p.issuer = "https://cf-auth.example.com/";
+      expect(issues(p).join()).toMatch(/issuer: must be a bare origin/);
     });
   });
 
@@ -217,6 +316,21 @@ describe("loadPolicy", () => {
     const p = policy();
     p.profiles.push({ ...(p.profiles[1] as (typeof p.profiles)[number]) });
     expect(issues(p).join()).toMatch(/duplicate profile name/);
+  });
+
+  it("requires a profile's provider when there are several", () => {
+    const p = policy();
+    p.providers.push({ ...PEOPLE });
+    delete p.profiles[0]?.provider;
+    expect(issues(p)).toEqual([
+      "profiles.0 (infra-cloudflare).provider: required when the policy has several providers",
+    ]);
+  });
+
+  it("rejects a provider that doesn't exist", () => {
+    const p = policy();
+    (p.profiles[0] as TestPolicy["profiles"][number]).provider = "gitlab";
+    expect(issues(p)).toEqual(["profiles.0 (infra-cloudflare).provider: no provider named gitlab"]);
   });
 
   describe("resources", () => {
@@ -261,7 +375,7 @@ describe("loadPolicy", () => {
   it("reports every problem at once", () => {
     const p = policy();
     p.defaults = { ttl: "2h", max_ttl: "30h" };
-    (p.profiles[0]?.match as Record<string, string>).repository_id = "*";
+    (p.profiles[0] as { claims: Record<string, unknown> }).claims.repository_id = "*";
     expect(issues(p).length).toBeGreaterThanOrEqual(3);
   });
 });
@@ -290,22 +404,22 @@ describe("matching", () => {
   });
 
   it("selects the single matching profile", () => {
-    expect(selectProfile(loaded, "actions", githubClaims()).name).toBe("workers-deploy");
+    expect(selectProfile(loaded, "github", githubClaims()).name).toBe("workers-deploy");
   });
 
   it("denies when nothing matches", () => {
-    expect(denial(() => selectProfile(loaded, "actions", githubClaims({ ref: "refs/heads/dev" })))).toBe("no_match");
+    expect(denial(() => selectProfile(loaded, "github", githubClaims({ ref: "refs/heads/dev" })))).toBe("no_match");
   });
 
   it("denies when several profiles match and none is named", () => {
     const claims = githubClaims({ repository: "example-org/infra", repository_id: "200000002" });
-    expect(denial(() => selectProfile(loaded, "actions", claims))).toBe("ambiguous");
-    expect(selectProfile(loaded, "actions", claims, "infra-cloudflare").name).toBe("infra-cloudflare");
+    expect(denial(() => selectProfile(loaded, "github", claims))).toBe("ambiguous");
+    expect(selectProfile(loaded, "github", claims, "infra-cloudflare").name).toBe("infra-cloudflare");
   });
 
   it("denies a named profile that doesn't match", () => {
-    expect(denial(() => selectProfile(loaded, "actions", githubClaims(), "infra-cloudflare"))).toBe("profile_mismatch");
-    expect(denial(() => selectProfile(loaded, "actions", githubClaims(), "nope"))).toBe("profile_mismatch");
+    expect(denial(() => selectProfile(loaded, "github", githubClaims(), "infra-cloudflare"))).toBe("profile_mismatch");
+    expect(denial(() => selectProfile(loaded, "github", githubClaims(), "nope"))).toBe("profile_mismatch");
   });
 
   it("enables profiles unless they say otherwise", () => {
@@ -319,10 +433,10 @@ describe("matching", () => {
     const p = policy();
     (p.profiles[1] as Record<string, unknown>).enabled = false;
     const disabled = loadPolicy(p);
-    expect(denial(() => selectProfile(disabled, "actions", githubClaims()))).toBe("no_match");
+    expect(denial(() => selectProfile(disabled, "github", githubClaims()))).toBe("no_match");
     let detail: string | undefined;
     try {
-      selectProfile(disabled, "actions", githubClaims(), "workers-deploy");
+      selectProfile(disabled, "github", githubClaims(), "workers-deploy");
     } catch (err) {
       detail = (err as HttpError).detail;
     }
@@ -345,7 +459,13 @@ describe("service audiences", () => {
   /** The test policy plus a profile issuing the broker's own token for the cache. */
   function withService(extra: Record<string, unknown> = {}) {
     const p = policy();
-    p.profiles.push({ name: "nix-push", audience: CACHE, match: { ref: "refs/heads/main" }, ...extra } as never);
+    p.profiles.push({
+      name: "nix-push",
+      provider: "github",
+      audience: CACHE,
+      claims: { ref: "refs/heads/main" },
+      ...extra,
+    } as never);
     return p;
   }
 
@@ -375,11 +495,11 @@ describe("service audiences", () => {
 
   it("only selects profiles for the requested audience", () => {
     const loaded = loadPolicy(withService());
-    expect(selectProfile(loaded, "actions", githubClaims()).name).toBe("workers-deploy");
-    expect(selectProfile(loaded, "actions", githubClaims(), undefined, CACHE).name).toBe("nix-push");
+    expect(selectProfile(loaded, "github", githubClaims()).name).toBe("workers-deploy");
+    expect(selectProfile(loaded, "github", githubClaims(), undefined, CACHE).name).toBe("nix-push");
     let detail: string | undefined;
     try {
-      selectProfile(loaded, "actions", githubClaims(), "workers-deploy", CACHE);
+      selectProfile(loaded, "github", githubClaims(), "workers-deploy", CACHE);
     } catch (err) {
       detail = (err as HttpError).detail;
     }
@@ -387,14 +507,15 @@ describe("service audiences", () => {
   });
 });
 
-describe("user profiles", () => {
+describe("profiles for people", () => {
   type TestProfile = TestPolicy["profiles"][number];
 
-  /** The test policy plus one user profile, with workers-deploy's token. */
-  const withUser = (match: Record<string, unknown>, extra: Partial<TestProfile> = {}) => {
+  /** The test policy plus the people provider and one profile for it, with workers-deploy's token. */
+  const withUser = (claims: Record<string, unknown>, extra: Partial<TestProfile> = {}) => {
     const p = policy();
+    p.providers.push({ ...PEOPLE });
     const token = (p.profiles[1] as TestProfile).token;
-    p.profiles.push({ name: "tofu-plan", subject: "users", match, token, ...extra });
+    p.profiles.push({ name: "tofu-plan", provider: "people", claims, token, ...extra });
     return p;
   };
 
@@ -411,53 +532,55 @@ describe("user profiles", () => {
     ...overrides,
   });
 
-  it("defaults subject to actions", () => {
-    for (const profile of loadPolicy(policy()).profiles) expect(profile.subject).toBe("actions");
-  });
-
-  it("accepts a user profile", () => {
+  it("gives profiles their provider's type", () => {
     const p = loadPolicy(withUser({ team_id: TEAM_ID, repository_permission: "write" }));
-    expect(p.profiles.find((r) => r.name === "tofu-plan")?.subject).toBe("users");
+    expect(p.profiles.find((r) => r.name === "workers-deploy")?.type).toBe("oidc");
+    expect(p.profiles.find((r) => r.name === "tofu-plan")).toMatchObject({ provider: "people", type: "github-user" });
   });
 
-  it("rejects an unknown subject", () => {
-    expect(issues(withUser({ repository_permission: "write" }, { subject: "robot" }))).toEqual([
-      "profiles.3.subject: must be actions or users",
-    ]);
+  it("adds the people provider's owner pin", () => {
+    const p = loadPolicy(withUser({ repository_permission: "write" }));
+    expect(p.profiles.find((r) => r.name === "tofu-plan")?.claims.repository_owner_id).toBe(OWNER_ID);
+  });
+
+  it("rejects an unknown provider type", () => {
+    const p = withUser({ repository_permission: "write" });
+    (p.providers[1] as Record<string, unknown>).type = "robot";
+    expect(issues(p)).toEqual(["providers.1.type: must be oidc or github-user"]);
   });
 
   it("6: requires repository_permission", () => {
     expect(issues(withUser({ team_id: TEAM_ID }))).toEqual([
-      "profiles.3 (tofu-plan).match.repository_permission: required for a user profile",
+      "profiles.3 (tofu-plan).claims.repository_permission: required for a github-user provider",
     ]);
   });
 
-  it("6: rejects claims only Actions jobs have", () => {
+  it("6: rejects claims only jobs have", () => {
     expect(issues(withUser({ repository_permission: "write", ref: "refs/heads/main", environment: "prod" }))).toEqual([
-      expect.stringMatching(/^profiles\.3 \(tofu-plan\)\.match\.ref: not available for people/),
-      expect.stringMatching(/^profiles\.3 \(tofu-plan\)\.match\.environment: not available for people/),
+      expect.stringMatching(/^profiles\.3 \(tofu-plan\)\.claims\.ref: not available for people/),
+      expect.stringMatching(/^profiles\.3 \(tofu-plan\)\.claims\.environment: not available for people/),
     ]);
   });
 
-  it("6: rejects person-only keys in an Actions profile", () => {
+  it("6: rejects person-only claims in an oidc profile", () => {
     const p = policy();
-    (p.profiles[0] as TestProfile).match.team_id = TEAM_ID;
-    (p.profiles[0] as TestProfile).match.repository_permission = "write";
+    (p.profiles[0] as TestProfile).claims.team_id = TEAM_ID;
+    (p.profiles[0] as TestProfile).claims.repository_permission = "write";
     expect(issues(p)).toEqual([
-      "profiles.0 (infra-cloudflare).match.team_id: only for user profiles (subject: users)",
-      "profiles.0 (infra-cloudflare).match.repository_permission: only for user profiles (subject: users)",
+      "profiles.0 (infra-cloudflare).claims.team_id: only for github-user providers",
+      "profiles.0 (infra-cloudflare).claims.repository_permission: only for github-user providers",
     ]);
   });
 
   it("rejects an unknown repository_permission", () => {
     expect(issues(withUser({ repository_permission: "push" }))).toEqual([
-      "profiles.3 (tofu-plan).match.repository_permission: must be one of read, triage, write, maintain, admin",
+      "profiles.3 (tofu-plan).claims.repository_permission: must be one of read, triage, write, maintain, admin",
     ]);
   });
 
   it("2: rejects a globbed team_id", () => {
     expect(issues(withUser({ team_id: "4000*", repository_permission: "write" }))).toEqual([
-      "profiles.3 (tofu-plan).match.team_id: ID claims must be exact, globs are not allowed",
+      "profiles.3 (tofu-plan).claims.team_id: ID claims must be exact, globs are not allowed",
     ]);
   });
 
@@ -496,17 +619,17 @@ describe("user profiles", () => {
       expect(matches(user, person({ repository_owner_id: "999999" }))).toBe(false);
     });
 
-    it("never picks an Actions profile for a person", () => {
+    it("never picks a job's profile for a person", () => {
       // workers-deploy matches repository example-org/*, which a person's claims have too.
-      expect(selectProfile(loaded, "users", person()).name).toBe("tofu-plan");
-      expect(denial(() => selectProfile(loaded, "users", person(), "workers-deploy"))).toBe("profile_mismatch");
-      expect(denial(() => selectProfile(loaded, "users", person({ team_ids: [] })))).toBe("no_match");
+      expect(selectProfile(loaded, "people", person()).name).toBe("tofu-plan");
+      expect(denial(() => selectProfile(loaded, "people", person(), "workers-deploy"))).toBe("profile_mismatch");
+      expect(denial(() => selectProfile(loaded, "people", person({ team_ids: [] })))).toBe("no_match");
     });
 
-    it("never picks a user profile for a job", () => {
+    it("never picks a person's profile for a job", () => {
       const job = githubClaims({ ...person(), ref: "refs/heads/dev" });
-      expect(denial(() => selectProfile(loaded, "actions", job))).toBe("no_match");
-      expect(denial(() => selectProfile(loaded, "actions", job, "tofu-plan"))).toBe("profile_mismatch");
+      expect(denial(() => selectProfile(loaded, "github", job))).toBe("no_match");
+      expect(denial(() => selectProfile(loaded, "github", job, "tofu-plan"))).toBe("profile_mismatch");
     });
   });
 });
@@ -550,14 +673,6 @@ describe("buckets", () => {
     const p = policy();
     Object.assign(p.profiles[1] as object, { ttl: "5m" });
     expect(loaded(p).ttl).toBe(5 * 60_000);
-  });
-
-  it("still takes ttl from token, but not from both places", () => {
-    const p = policy();
-    (p.profiles[1] as TestPolicy["profiles"][number]).token.ttl = "5m";
-    expect(loaded(p).ttl).toBe(5 * 60_000);
-    Object.assign(p.profiles[1] as object, { max_ttl: "30m" });
-    expect(issues(p).join()).toMatch(/set ttl and max_ttl on the profile or on its token, not both/);
   });
 
   it("accepts a profile with a token and buckets", () => {

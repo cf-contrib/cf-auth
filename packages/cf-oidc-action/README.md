@@ -49,7 +49,7 @@ A floating `v1` tag will follow each release from 1.0 on.
 
 | Input | Required | Description |
 |---|---|---|
-| `broker-url` | yes | Broker base URL, e.g. `https://cf-oidc-broker.example.com`. Its origin is the OIDC audience and must equal `github.audience` in the policy. |
+| `broker-url` | yes | Broker base URL, e.g. `https://cf-oidc-broker.example.com`. Its origin is the OIDC audience and must equal the GitHub provider's `audience` in the policy. |
 | `profile` | no | Policy profile to request (not an AWS profile). Recommended when more than one profile could match. |
 | `ttl` | no | Requested lifetime such as `5m` or `1h`. Defaults to the profile's `ttl`, capped at its `max_ttl`. |
 
@@ -150,7 +150,7 @@ jobs:
 | Error | Cause |
 |---|---|
 | `OIDC unavailable: add permissions: id-token: write to the job` | The job can't request an OIDC token. Add the permission. Fork PRs on `pull_request` never get it. |
-| `broker returned 401 (unauthorized)` | The broker rejected the OIDC token, usually because `broker-url` doesn't match `github.audience` in the policy. |
+| `broker returned 401 (unauthorized)` | The broker rejected the OIDC token, usually because `broker-url` doesn't match the GitHub provider's `audience` in the policy. |
 | `broker returned 403 (forbidden)` | No profile allows this workflow, or the named `profile` doesn't match. The broker's audit log (`token.deny`) has the reason. |
 | `broker returned 502 (upstream_error)` | The Cloudflare API refused a call; the audit log has the message. For a profile with `buckets`, it's usually a broker token without enough R2 permissions on the bucket. |
 | `broker returned 500 (misconfigured)` | The broker's policy or bindings are invalid. Check `/healthz` and its logs. |

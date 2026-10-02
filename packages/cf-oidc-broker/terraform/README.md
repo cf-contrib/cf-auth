@@ -47,7 +47,7 @@ by default deploys the `broker.js` of the release its `ref` points to.
 wrangler secrets-store store list --remote     # note the store ID
 wrangler secrets-store secret create <store-id> --name cf-auth-broker-token --scopes workers --remote
 
-$EDITOR policy.yaml                            # owner_id, profiles; see Policy below
+$EDITOR policy.yaml                            # providers, profiles; see Policy below
 
 export CLOUDFLARE_API_TOKEN=...                # deploy token, not the broker token
 tofu init
@@ -77,21 +77,26 @@ Either way the broker is reachable on exactly one URL, the `url` output, which i
 
 `policy_file` is rendered with `templatefile`. The module fills in:
 
-- `${broker_url}`: use it for `github.audience`, so the audience always matches the deployed URL.
+- `${broker_url}`: use it for the top-level `issuer` and for each provider's `audience`, so both always match the deployed URL.
 - `${account_id}`: use it for account resources.
 - Anything in `policy_vars`, e.g. repository IDs looked up with the `github` provider, so no IDs are hard-coded.
 
 Bucket prefixes use the broker's own `{claim}` placeholders, which `templatefile` leaves alone. Don't write `${repository}`: Terraform would try to fill it in and fail the plan.
 
 ```yaml
-version: 1
+version: 2
+issuer: ${broker_url}
 
-github:
-  audience: ${broker_url}
-  owner_id: "${owner_id}"          # policy_vars = { owner_id = data.github_organization.org.id }
+providers:
+  - name: github
+    issuer: https://token.actions.githubusercontent.com
+    audience: ${broker_url}
+    claims:
+      repository_owner_id: "${owner_id}"  # policy_vars = { owner_id = data.github_organization.org.id }
+
 profiles:
   - name: deploy
-    match:
+    claims:
       repository_id: "${repo_id}"  # policy_vars = { repo_id = data.github_repository.app.repo_id }
     token:
       policies:
@@ -99,7 +104,7 @@ profiles:
           resources:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: terraform-state          # every repo gets its own prefix in one shared bucket
-    match:
+    claims:
       ref: refs/heads/main
     buckets:
       - name: org-terraform-state

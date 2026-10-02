@@ -1,7 +1,7 @@
 import type { IssuedTokenType, SubjectTokenType, TokenExchangeRequest } from "./api.js";
 import { HttpError } from "./errors.js";
 import { REPOSITORY } from "./github.js";
-import { CLOUDFLARE_AUDIENCE, type Subject } from "./policy.js";
+import { CLOUDFLARE_AUDIENCE, type ProviderType } from "./policy.js";
 
 export const TOKEN_EXCHANGE =
   "urn:ietf:params:oauth:grant-type:token-exchange" satisfies TokenExchangeRequest["grant_type"];
@@ -9,14 +9,14 @@ export const ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token" sati
 export const R2_CREDENTIALS = "urn:cf-oidc-auth:params:oauth:token-type:r2-credentials" satisfies IssuedTokenType;
 export const JWT = "urn:ietf:params:oauth:token-type:jwt" satisfies IssuedTokenType;
 
-/** Who presents each kind of subject token. */
-const SUBJECTS: Record<SubjectTokenType, Subject> = {
-  "urn:ietf:params:oauth:token-type:id_token": "actions",
-  "urn:ietf:params:oauth:token-type:jwt": "actions",
-  "urn:ietf:params:oauth:token-type:access_token": "users",
+/** Which kind of provider each kind of subject token is checked against. */
+const PROVIDER_TYPES: Record<SubjectTokenType, ProviderType> = {
+  "urn:ietf:params:oauth:token-type:id_token": "oidc",
+  "urn:ietf:params:oauth:token-type:jwt": "oidc",
+  "urn:ietf:params:oauth:token-type:access_token": "github-user",
 };
 
-/** A GitHub OIDC token is a few KB at most, and a GitHub user token far less. */
+/** An OIDC token is a few KB at most, and a GitHub user token far less. */
 const MAX_SUBJECT_TOKEN = 8192;
 
 /** The broker's own exchange parameters, once checked. */
@@ -25,14 +25,14 @@ export type TokenFields = Pick<TokenExchangeRequest, "profile" | "ttl" | "reposi
 const invalid = (detail: string) => new HttpError("bad_request", "invalid_body", detail);
 
 /** Checks `profile`, `ttl` and, for people, `repository`. They end up in the audit log, so they're bounded. */
-function checkFields(subject: Subject, fields: Record<string, unknown>): TokenFields {
+function checkFields(type: ProviderType, fields: Record<string, unknown>): TokenFields {
   const { profile, ttl } = fields;
   if ((profile !== undefined && typeof profile !== "string") || (ttl !== undefined && typeof ttl !== "string")) {
     throw invalid("profile and ttl must be strings");
   }
   // Profile names are at most 64 characters anyway.
   if ((profile?.length ?? 0) > 64 || (ttl?.length ?? 0) > 16) throw invalid("profile or ttl too long");
-  if (subject === "actions") return { profile, ttl };
+  if (type === "oidc") return { profile, ttl };
 
   const { repository } = fields;
   if (typeof repository !== "string" || repository.length > 200 || !REPOSITORY.test(repository)) {
@@ -62,9 +62,9 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
   throw invalid("content-type must be application/x-www-form-urlencoded or application/json");
 }
 
-/** A parsed `POST /oauth/token`: who's asking, with what token, for what. */
+/** A parsed `POST /oauth/token`: what kind of token, which token, for what. */
 export interface Exchange {
-  subject: Subject;
+  type: ProviderType;
   token: string;
   /** Cloudflare, or a service the policy issues the broker's own tokens for. Checked against the policy later. */
   audience: string;
@@ -93,11 +93,11 @@ export async function readExchangeRequest(request: Request): Promise<Exchange> {
   }
   if (typeof subject_token !== "string" || subject_token === "") throw invalid("subject_token is required");
   if (subject_token.length > MAX_SUBJECT_TOKEN) throw invalid("subject_token too long");
-  const subject =
-    typeof subject_token_type === "string" && Object.hasOwn(SUBJECTS, subject_token_type)
-      ? SUBJECTS[subject_token_type as SubjectTokenType]
+  const type =
+    typeof subject_token_type === "string" && Object.hasOwn(PROVIDER_TYPES, subject_token_type)
+      ? PROVIDER_TYPES[subject_token_type as SubjectTokenType]
       : undefined;
-  if (subject === undefined) {
+  if (type === undefined) {
     throw new HttpError("bad_request", "unsupported_subject_token_type", shown(subject_token_type));
   }
   if (audience !== undefined && (typeof audience !== "string" || audience === "" || audience.length > 200)) {
@@ -108,7 +108,7 @@ export async function readExchangeRequest(request: Request): Promise<Exchange> {
   if (requested_token_type !== undefined && !issuable.includes(requested_token_type)) {
     throw new HttpError("bad_request", "unsupported_requested_token_type", shown(requested_token_type));
   }
-  return { subject, token: subject_token, audience: target, fields: checkFields(subject, body) };
+  return { type, token: subject_token, audience: target, fields: checkFields(type, body) };
 }
 
 /**
