@@ -21,13 +21,11 @@
 //!
 //! # Configuration
 //!
-//! The policy is loaded once per isolate, from the `policy.json` module beside
-//! the Worker, and checked against the account. Secrets come from Secrets
-//! Store only, and are read on every use, so a rotated one takes effect at
-//! once. Any problem with either is a `500 misconfigured`: the broker fails
-//! closed.
+//! What the Worker is configured with comes from [`Config`], which the crate
+//! root reads from the bindings once per request. The handler never reads
+//! `Env`.
 
-use std::{cell::RefCell, rc::Rc};
+use std::sync::Arc;
 
 use cf_oidc_exchange_sdk::v1::{
     self, BucketCredentials, Discovery, Error, ErrorCode, ExchangeServiceApi, IssuedTokenType,
@@ -36,62 +34,26 @@ use cf_oidc_exchange_sdk::v1::{
     TokenExchangeResponseTokenType as TokenType, TokenRevocationRequest,
 };
 use serde_json::Value;
-use worker::{
-    Env, console_error, js_sys,
-    send::SendFuture,
-    wasm_bindgen::{JsCast, JsValue},
-};
+use worker::{console_error, send::SendFuture};
 
+use super::config::Config;
 use crate::{
     audit::Audit,
-    cloudflare::{self, BucketGrant, Cloudflare, MintedToken, rfc3339, token_name},
+    cloudflare::{BucketGrant, MintedToken, rfc3339, token_name},
     github::{self, UserCheck},
-    issuer::{self, ALGORITHM, IssueRequest, SigningKey},
+    issuer::{self, ALGORITHM, IssueRequest},
     oidc::{self, Jwt, shown},
     policy::{
-        CLOUDFLARE_AUDIENCE, Claims, Policy, PolicyError, Profile, Provider, ProviderType,
-        clamp_ttl, load_policy, r2_prefixes, select_profile,
+        CLOUDFLARE_AUDIENCE, Claims, Policy, Profile, Provider, ProviderType, clamp_ttl,
+        r2_prefixes, select_profile,
     },
 };
-
-/// The binding of the account the broker token belongs to and tokens are
-/// minted in.
-const ACCOUNT_KEY: &str = "CF_OIDC_EXCHANGE_API_ACCOUNT_ID";
-
-/// The binding of the broker token: account-owned, with "Account API Tokens
-/// Write", plus R2 permissions covering what profiles' `buckets` delegate.
-const BROKER_TOKEN_KEY: &str = "CF_OIDC_EXCHANGE_API_BROKER_TOKEN";
-
-/// The binding of the RSA private key (PKCS#8 PEM, at least 2048 bits) the
-/// broker signs its own tokens with. Optional: without it, the broker issues
-/// none and publishes no keys.
-const SIGNING_KEY_KEY: &str = "CF_OIDC_EXCHANGE_API_SIGNING_KEY";
-
-/// Where the entry module puts `policy.json`, which Terraform uploads beside the
-/// Worker as a text module. See `worker/entry.js`.
-const POLICY_GLOBAL: &str = "CF_OIDC_EXCHANGE_API_POLICY";
 
 /// The token exchange grant, RFC 8693's.
 const TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 
-thread_local! {
-    // Parsed once per isolate. The policy and env are fixed for the lifetime of a deployment.
-    static LOADED: RefCell<Option<Loaded>> = const { RefCell::new(None) };
-}
-
-/// The policy, loaded, and what it was loaded from.
-struct Loaded {
-    raw: String,
-    account_id: String,
-    result: Result<Rc<Policy>, PolicyError>,
-}
-
 fn now_ms() -> u64 {
     worker::Date::now().as_millis()
-}
-
-fn misconfigured(message: impl Into<String>) -> Error {
-    Error::new(ErrorCode::Misconfigured, message)
 }
 
 /// What a caller is told of a fault of the broker's, instead of why. `None` for
@@ -116,197 +78,6 @@ fn public(err: Error) -> Error {
             Error::new(err.error, message)
         }
         None => err,
-    }
-}
-
-/// The Worker's configuration: the policy, and the bindings it reads.
-struct Config {
-    policy: Rc<Policy>,
-    account_id: String,
-    /// The bindings of the broker token and the signing key.
-    broker_token: String,
-    signing_key: String,
-    env: Env,
-}
-
-/// Which bindings the Worker reads, and the policy. Always the constants above
-/// and the policy module, except in a `stand-ins` build, where the integration
-/// tests choose them.
-struct Bindings {
-    account_id: String,
-    broker_token: String,
-    signing_key: String,
-    policy: String,
-}
-
-impl Bindings {
-    async fn read(env: &Env) -> Result<Self, Error> {
-        #[cfg(feature = "stand-ins")]
-        if let Ok(url) = env.var("CF_OIDC_EXCHANGE_API_SCENARIO_URL") {
-            return Self::scenario(&url.to_string()).await;
-        }
-        Ok(Self {
-            account_id: env
-                .var(ACCOUNT_KEY)
-                .map(|var| var.to_string())
-                .unwrap_or_default(),
-            broker_token: BROKER_TOKEN_KEY.into(),
-            signing_key: SIGNING_KEY_KEY.into(),
-            policy: Self::policy_text()?,
-        })
-    }
-
-    /// The policy file's text: a string, or the parsed object when a bundler
-    /// has already inlined it.
-    fn policy_text() -> Result<String, Error> {
-        let not_loaded = || misconfigured("policy.json is not loaded");
-        let value = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str(POLICY_GLOBAL))
-            .map_err(|_| not_loaded())?;
-        if let Some(text) = value.as_string() {
-            return Ok(text);
-        }
-        if value.is_object() {
-            return js_sys::JSON::stringify(&value)
-                .map(String::from)
-                .map_err(|_| not_loaded());
-        }
-        Err(not_loaded())
-    }
-
-    /// The integration tests' scenario: the policy, the account, and which
-    /// bindings hold the broker token and the signing key.
-    #[cfg(feature = "stand-ins")]
-    async fn scenario(url: &str) -> Result<Self, Error> {
-        #[derive(serde::Deserialize)]
-        struct Scenario {
-            policy: Value,
-            account_id: String,
-            broker_token: String,
-            signing_key: String,
-        }
-        let failed = |err: reqwest::Error| misconfigured(format!("the scenario: {err}"));
-        let scenario: Scenario = reqwest::get(url)
-            .await
-            .map_err(failed)?
-            .json()
-            .await
-            .map_err(failed)?;
-        Ok(Self {
-            account_id: scenario.account_id,
-            broker_token: scenario.broker_token,
-            signing_key: scenario.signing_key,
-            policy: match scenario.policy {
-                Value::String(text) => text,
-                other => other.to_string(),
-            },
-        })
-    }
-}
-
-impl Config {
-    /// Loads the policy, or the copy already loaded, and the bindings to read.
-    async fn load(env: &Env) -> Result<Self, Error> {
-        let Bindings {
-            account_id,
-            broker_token,
-            signing_key,
-            policy: raw,
-        } = Bindings::read(env).await?;
-        if account_id.is_empty() {
-            return Err(misconfigured(format!("{ACCOUNT_KEY} must be set")));
-        }
-        let policy = LOADED.with_borrow_mut(|loaded| {
-            let stale = loaded
-                .as_ref()
-                .is_none_or(|l| l.raw != raw || l.account_id != account_id);
-            if stale {
-                let result =
-                    load_policy(&Value::String(raw.clone()), Some(&account_id)).map(Rc::new);
-                match &result {
-                    Ok(policy) => Audit::new("policy.loaded")
-                        .with("profiles", policy.profiles.len())
-                        .emit(),
-                    Err(err) => Audit::new("policy.invalid")
-                        .with("issues", err.issues.clone())
-                        .emit(),
-                }
-                *loaded = Some(Loaded {
-                    raw,
-                    account_id: account_id.clone(),
-                    result,
-                });
-            }
-            loaded.as_ref().map(|l| l.result.clone())
-        });
-        match policy {
-            Some(Ok(policy)) => Ok(Self {
-                policy,
-                account_id,
-                broker_token,
-                signing_key,
-                env: env.clone(),
-            }),
-            _ => Err(misconfigured(
-                "the policy is invalid; its policy.invalid line says why",
-            )),
-        }
-    }
-
-    /// A secret from a Secrets Store binding, read on every use, never cached
-    /// here. A plain Worker secret is refused rather than accepted as a weaker
-    /// setup.
-    async fn secret(&self, binding: &str) -> Result<String, Error> {
-        let store = self
-            .env
-            .secret_store(binding)
-            .map_err(|_| misconfigured(format!("{binding} must be a Secrets Store binding")))?;
-        match store.get().await {
-            Ok(Some(value)) if !value.is_empty() => Ok(value),
-            Ok(_) => Err(misconfigured(format!("{binding} is empty"))),
-            Err(err) => Err(misconfigured(format!("{binding} can't be read: {err}"))),
-        }
-    }
-
-    /// The Cloudflare API, as the broker token.
-    async fn cloudflare(&self) -> Result<Cloudflare, Error> {
-        let token = self.secret(&self.broker_token).await?;
-        Ok(Cloudflare::new(
-            &self.cloudflare_api(),
-            &self.account_id,
-            &token,
-        ))
-    }
-
-    /// Whether a signing key is bound at all. Without one, the broker issues no
-    /// tokens of its own and publishes no keys.
-    fn has_signing_key(&self) -> bool {
-        let env: &JsValue = self.env.as_ref();
-        js_sys::Reflect::get(env.unchecked_ref(), &JsValue::from_str(&self.signing_key))
-            .is_ok_and(|binding| !binding.is_undefined())
-    }
-
-    async fn signing_key(&self) -> Result<Rc<SigningKey>, Error> {
-        let pem = self.secret(&self.signing_key).await?;
-        issuer::signing_key(&pem).await
-    }
-
-    fn github_api(&self) -> String {
-        self.upstream("CF_OIDC_EXCHANGE_API_GITHUB_URL", github::API_URL)
-    }
-
-    fn cloudflare_api(&self) -> String {
-        self.upstream("CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL", cloudflare::API_URL)
-    }
-
-    /// An upstream's base URL. Only a `stand-ins` build, for the integration
-    /// tests, takes another one from the environment.
-    #[allow(unused_variables)]
-    fn upstream(&self, binding: &str, default: &str) -> String {
-        #[cfg(feature = "stand-ins")]
-        if let Ok(url) = self.env.var(binding) {
-            return url.to_string();
-        }
-        default.to_string()
     }
 }
 
@@ -390,22 +161,22 @@ impl<'r> Exchange<'r> {
     }
 }
 
-/// The broker's API, over the Worker's bindings.
+/// The broker's API, over the Worker's configuration.
 #[derive(Clone)]
 pub struct ExchangeServiceHandler {
-    env: Env,
+    config: Arc<Config>,
 }
 
 impl ExchangeServiceHandler {
-    /// Creates a handler over the Worker's bindings.
-    pub fn new(env: Env) -> Self {
-        Self { env }
+    /// Creates a handler over the Worker's configuration.
+    pub fn new(config: Arc<Config>) -> Self {
+        Self { config }
     }
 
     /// Deletes expired `cf-oidc:` tokens, for the hourly cron. Returns how many.
     pub async fn cleanup(&self) -> Result<usize, Error> {
-        let config = Config::load(&self.env).await?;
-        config.cloudflare().await?.cleanup(now_ms()).await
+        let cloudflare = self.config.cloudflare().await?;
+        cloudflare.cleanup(now_ms()).await
     }
 
     /// Authenticates the caller, whose token is in the body.
@@ -448,7 +219,7 @@ impl ExchangeServiceHandler {
             .unwrap_or_default();
         let check = UserCheck { owner_ids, teams };
         let claims = github::verify_user(
-            &config.github_api(),
+            config.github_api(),
             exchange.token,
             exchange.repository,
             check,
@@ -474,7 +245,7 @@ impl ExchangeServiceHandler {
         };
         let now = now_ms() / 1000;
         let request = IssueRequest {
-            issuer: &config.policy.issuer,
+            issuer: &config.policy().issuer,
             audience: &profile.audience,
             subject,
             provider: &provider.name,
@@ -612,7 +383,7 @@ impl ExchangeServiceHandler {
         };
         Ok(TokenExchangeResponse {
             access_token,
-            account_id: Some(config.account_id.clone()),
+            account_id: Some(config.account_id().into()),
             buckets: (!buckets.is_empty()).then_some(buckets),
             expires_at,
             expires_in: (expires_at - (now / 1000) as i64).max(0),
@@ -632,12 +403,11 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
     /// providers, for what the profile it matches hands out.
     async fn exchange_token(&self, request: TokenExchangeRequest) -> v1::ExchangeTokenResponse {
         SendFuture::new(async move {
+            let config = &self.config;
+            let policy = config.policy();
             let mut caller: Option<Caller> = None;
             let mut profile: Option<String> = request.profile.clone();
-            let config = Config::load(&self.env).await;
             let exchanged = async {
-                let config = config.as_ref().map_err(Clone::clone)?;
-                let policy = &config.policy;
                 let exchange = Exchange::read(&request, policy)?;
                 let verified = Self::authenticate(config, policy, &exchange).await?;
                 let caller = caller.insert(verified);
@@ -694,10 +464,9 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
     async fn revoke_token(&self, request: TokenRevocationRequest) -> v1::RevokeTokenResponse {
         SendFuture::new(async move {
             let revoked = async {
-                let config = Config::load(&self.env).await?;
-                let cloudflare = config.cloudflare().await?;
+                let cloudflare = self.config.cloudflare().await?;
                 cloudflare
-                    .revoke(&config.cloudflare_api(), &request.token)
+                    .revoke(self.config.cloudflare_api(), &request.token)
                     .await
             };
             let audit = Audit::new("token.revoke");
@@ -737,12 +506,14 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
     async fn discovery(&self) -> v1::DiscoveryResponse {
         SendFuture::new(async move {
             let document = async {
-                let config = Config::load(&self.env).await?;
-                let issuer = &config.policy.issuer;
+                let issuer = &self.config.policy().issuer;
                 let url = |path: &str| {
-                    format!("{issuer}{path}")
-                        .parse()
-                        .map_err(|_| misconfigured(format!("issuer {issuer} makes no URLs")))
+                    format!("{issuer}{path}").parse().map_err(|_| {
+                        Error::new(
+                            ErrorCode::Misconfigured,
+                            format!("issuer {issuer} makes no URLs"),
+                        )
+                    })
                 };
                 Ok::<_, Error>(Discovery {
                     issuer: issuer.clone(),
@@ -770,11 +541,10 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
     async fn jwks(&self) -> v1::JwksResponse {
         SendFuture::new(async move {
             let keys = async {
-                let config = Config::load(&self.env).await?;
-                if !config.has_signing_key() {
+                if !self.config.has_signing_key() {
                     return Ok(Jwks { keys: vec![] });
                 }
-                let key = config.signing_key().await?;
+                let key = self.config.signing_key().await?;
                 let jwk: JwksKeysItem =
                     serde_json::from_value(key.public_jwk()).map_err(|err| {
                         Error::new(ErrorCode::InternalError, format!("the public key: {err}"))
@@ -796,6 +566,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::policy::load_policy;
 
     fn policy() -> Policy {
         let policy = json!({
