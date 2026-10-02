@@ -697,6 +697,14 @@ describe("POST /v1/users/token", () => {
     expect(github.requests).toEqual([]);
   });
 
+  it("404s when every profile for people is disabled, without calling GitHub", async () => {
+    const policy = JSON.parse(policyFile as string) as TestPolicy;
+    for (const p of policy.profiles) if (p.subject === "users") (p as Record<string, unknown>).enabled = false;
+    policyFile = JSON.stringify(policy);
+    expect((await mintFor({ repository: "example-org/api" })).status).toBe(404);
+    expect(github.requests).toEqual([]);
+  });
+
   it("403s when the token can't list teams", async () => {
     // What GitHub answers a classic token without the repo, read:org or user scope.
     github.fail = { path: "/user/teams", status: 404 };

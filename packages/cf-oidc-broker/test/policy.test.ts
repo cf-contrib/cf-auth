@@ -67,6 +67,12 @@ describe("glob", () => {
     expect(glob("a.b*", "a.bc")).toBe(true);
     expect(glob("a.b*", "axbc")).toBe(false);
   });
+
+  it("only treats a trailing * after a prefix as a wildcard", () => {
+    expect(glob("example-org/*", "example-org/")).toBe(true);
+    expect(glob("*", "anything")).toBe(false);
+    expect(glob("a*b", "axb")).toBe(false);
+  });
 });
 
 describe("loadPolicy", () => {
@@ -131,6 +137,14 @@ describe("loadPolicy", () => {
       const p = policy();
       (p.profiles[0]?.match as Record<string, string>).repository_id = "2000*";
       expect(issues(p).join()).toMatch(/repository_id: ID claims must be exact/);
+    });
+
+    it.each(["*", "*/api", "example-org/*/api", "example-org/**"])("2: rejects the pattern %s", (pattern) => {
+      const p = policy();
+      (p.profiles[1]?.match as Record<string, string>).repository = pattern;
+      expect(issues(p)).toEqual([
+        "profiles.1 (workers-deploy).match.repository: * is only allowed once, at the end, after a prefix (e.g. example-org/*)",
+      ]);
     });
 
     it.each(["API Tokens Write", "Account API Tokens Write", "API Tokens Read"])(
@@ -282,6 +296,27 @@ describe("matching", () => {
   it("denies a named profile that doesn't match", () => {
     expect(denial(() => selectProfile(loaded, "actions", githubClaims(), "infra-cloudflare"))).toBe("profile_mismatch");
     expect(denial(() => selectProfile(loaded, "actions", githubClaims(), "nope"))).toBe("profile_mismatch");
+  });
+
+  it("enables profiles unless they say otherwise", () => {
+    expect(loaded.profiles.every((p) => p.enabled)).toBe(true);
+    const p = policy();
+    (p.profiles[1] as Record<string, unknown>).enabled = "no";
+    expect(issues(p)).toEqual(["profiles.1.enabled: must be true or false"]);
+  });
+
+  it("never matches a disabled profile, even by name", () => {
+    const p = policy();
+    (p.profiles[1] as Record<string, unknown>).enabled = false;
+    const disabled = loadPolicy(p);
+    expect(denial(() => selectProfile(disabled, "actions", githubClaims()))).toBe("no_match");
+    let detail: string | undefined;
+    try {
+      selectProfile(disabled, "actions", githubClaims(), "workers-deploy");
+    } catch (err) {
+      detail = (err as HttpError).detail;
+    }
+    expect(detail).toBe("profile workers-deploy is disabled");
   });
 
   it("clamps ttl to max_ttl and rejects nonsense", () => {
