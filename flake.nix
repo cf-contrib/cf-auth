@@ -1,5 +1,5 @@
 {
-  description = "cf-oidc-auth - exchange an OIDC identity for short-lived Cloudflare credentials.";
+  description = "cf-oidc-exchange - exchange an OIDC identity for short-lived Cloudflare credentials.";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -29,7 +29,7 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          name = "cf-oidc-auth";
+          name = "cf-oidc-exchange";
           packages = [
             # The TypeScript broker and the action, until the Rust Worker replaces the broker.
             pkgs.nodejs_24

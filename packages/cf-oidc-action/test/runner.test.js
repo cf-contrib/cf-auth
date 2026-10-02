@@ -29,9 +29,9 @@ function stubFetch(outcomes) {
 describe("idToken", () => {
   it("requests the given audience with the runner's bearer token", async () => {
     const fetch = stubFetch([200]);
-    expect(await idToken("https://cf-auth.example.com")).toBe("jwt");
+    expect(await idToken("https://cf-oidc-exchange.example.com")).toBe("jwt");
     const [url, init] = /** @type {[URL, RequestInit]} */ (fetch.mock.calls[0]);
-    expect(url.searchParams.get("audience")).toBe("https://cf-auth.example.com");
+    expect(url.searchParams.get("audience")).toBe("https://cf-oidc-exchange.example.com");
     expect(url.searchParams.get("api-version")).toBe("2.0");
     expect(init.headers).toEqual({ authorization: "bearer request-token" });
   });
@@ -69,7 +69,7 @@ describe("input", () => {
 
 describe("write", () => {
   it("appends a heredoc with a random delimiter", () => {
-    const file = join(mkdtempSync(join(tmpdir(), "cf-auth-")), "env");
+    const file = join(mkdtempSync(join(tmpdir(), "cf-oidc-exchange-")), "env");
     vi.stubEnv("GITHUB_ENV", file);
     write("GITHUB_ENV", "A", "one\ntwo");
     write("GITHUB_ENV", "B", "three");
@@ -79,11 +79,17 @@ describe("write", () => {
 });
 
 describe("brokerURL", () => {
-  it.each(["https://cf-auth.example.com", "http://localhost:8787", "http://127.0.0.1:8787"])("accepts %s", (url) => {
-    expect(brokerURL(url).href).toContain(new URL(url).host);
-  });
+  it.each(["https://cf-oidc-exchange.example.com", "http://localhost:8787", "http://127.0.0.1:8787"])(
+    "accepts %s",
+    (url) => {
+      expect(brokerURL(url).href).toContain(new URL(url).host);
+    },
+  );
 
-  it.each(["", "not a url", "http://cf-auth.example.com", "ftp://cf-auth.example.com"])("rejects %j", (url) => {
-    expect(() => brokerURL(url)).toThrow();
-  });
+  it.each(["", "not a url", "http://cf-oidc-exchange.example.com", "ftp://cf-oidc-exchange.example.com"])(
+    "rejects %j",
+    (url) => {
+      expect(() => brokerURL(url)).toThrow();
+    },
+  );
 });

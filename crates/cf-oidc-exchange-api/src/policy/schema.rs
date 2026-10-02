@@ -353,7 +353,7 @@ fn origin_problem(value: &str) -> Option<&'static str> {
     match url::Url::parse(value) {
         Err(_) => Some("must be a URL"),
         Ok(url) if url.origin().ascii_serialization() != value => {
-            Some("must be a bare origin such as https://cf-oidc-broker.example.com")
+            Some("must be a bare origin such as https://cf-oidc-exchange.example.com")
         }
         Ok(_) => None,
     }

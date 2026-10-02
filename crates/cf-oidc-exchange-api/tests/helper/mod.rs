@@ -104,8 +104,8 @@ impl World {
             scenario: json!({
                 "policy": test_policy(),
                 "account_id": ACCOUNT_ID,
-                "broker_token": "CF_OIDC_BROKER_TOKEN",
-                "signing_key": "CF_OIDC_BROKER_SIGNING_KEY",
+                "broker_token": "CF_OIDC_EXCHANGE_API_BROKER_TOKEN",
+                "signing_key": "CF_OIDC_EXCHANGE_API_SIGNING_KEY",
             }),
             discovery: HashMap::new(),
             cloudflare: FakeCloudflare::new(),
@@ -154,7 +154,7 @@ pub async fn start() -> Test {
 // ---------------------------------------------------------------------------
 
 fn log_path() -> String {
-    std::env::var("CF_OIDC_EXCHANGE_LOG").unwrap_or_else(|_| ".wrangler/integration.log".into())
+    std::env::var("CF_OIDC_EXCHANGE_API_LOG").unwrap_or_else(|_| ".wrangler/integration.log".into())
 }
 
 fn log_len() -> u64 {

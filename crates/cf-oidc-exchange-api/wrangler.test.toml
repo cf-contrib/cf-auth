@@ -10,14 +10,14 @@ compatibility_date = "2026-08-15"
 command = "worker-build --dev -d build-test . --features stand-ins && cp worker/entry.js build-test/ && cp policy.example.json build-test/policy.json"
 
 [vars]
-CF_OIDC_EXCHANGE_SCENARIO_URL = "http://127.0.0.1:8791/scenario"
-CF_OIDC_EXCHANGE_GITHUB_API_URL = "http://127.0.0.1:8791/github"
-CF_OIDC_EXCHANGE_CLOUDFLARE_API_URL = "http://127.0.0.1:8791/cloudflare/client/v4"
+CF_OIDC_EXCHANGE_API_SCENARIO_URL = "http://127.0.0.1:8791/scenario"
+CF_OIDC_EXCHANGE_API_GITHUB_URL = "http://127.0.0.1:8791/github"
+CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL = "http://127.0.0.1:8791/cloudflare/client/v4"
 # A broker token as a plain variable, which the Worker must refuse.
 BROKER_TOKEN_PLAIN = "test-broker-token"
 
 [[secrets_store_secrets]]
-binding = "CF_OIDC_BROKER_TOKEN"
+binding = "CF_OIDC_EXCHANGE_API_BROKER_TOKEN"
 store_id = "00000000000000000000000000000000"
 secret_name = "broker-token"
 
@@ -33,7 +33,7 @@ store_id = "00000000000000000000000000000000"
 secret_name = "broker-token-missing"
 
 [[secrets_store_secrets]]
-binding = "CF_OIDC_BROKER_SIGNING_KEY"
+binding = "CF_OIDC_EXCHANGE_API_SIGNING_KEY"
 store_id = "00000000000000000000000000000000"
 secret_name = "signing-key"
 

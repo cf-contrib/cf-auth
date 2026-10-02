@@ -18,20 +18,20 @@ use crate::{
 };
 
 /// The account the broker token belongs to and tokens are minted in.
-const ACCOUNT_ID: &str = "CF_OIDC_BROKER_ACCOUNT_ID";
+const ACCOUNT_ID: &str = "CF_OIDC_EXCHANGE_API_ACCOUNT_ID";
 
 /// Account-owned token with "Account API Tokens Write", plus R2 permissions
 /// covering what profiles' `buckets` delegate. Must be a Secrets Store binding.
-const BROKER_TOKEN: &str = "CF_OIDC_BROKER_TOKEN";
+const BROKER_TOKEN: &str = "CF_OIDC_EXCHANGE_API_BROKER_TOKEN";
 
 /// RSA private key (PKCS#8 PEM, at least 2048 bits) the broker signs its own
 /// tokens with. Optional: without it, the broker issues none and publishes no
 /// keys. Must be a Secrets Store binding.
-const SIGNING_KEY: &str = "CF_OIDC_BROKER_SIGNING_KEY";
+const SIGNING_KEY: &str = "CF_OIDC_EXCHANGE_API_SIGNING_KEY";
 
 /// Where the entry module puts `policy.json`, which Terraform uploads beside the
 /// Worker as a text module. See `worker/entry.js`.
-const POLICY_GLOBAL: &str = "CF_OIDC_EXCHANGE_POLICY";
+const POLICY_GLOBAL: &str = "CF_OIDC_EXCHANGE_API_POLICY";
 
 /// The policy, loaded, and what it was loaded from.
 struct Loaded {
@@ -79,7 +79,7 @@ struct Bindings {
 impl Bindings {
     async fn read(env: &Env) -> Result<Self, HttpError> {
         #[cfg(feature = "stand-ins")]
-        if let Ok(url) = env.var("CF_OIDC_EXCHANGE_SCENARIO_URL") {
+        if let Ok(url) = env.var("CF_OIDC_EXCHANGE_API_SCENARIO_URL") {
             return Self::scenario(&url.to_string()).await;
         }
         Ok(Self {
@@ -223,11 +223,11 @@ impl Config {
     }
 
     pub fn github_api(&self) -> String {
-        self.upstream("CF_OIDC_EXCHANGE_GITHUB_API_URL", github::API_URL)
+        self.upstream("CF_OIDC_EXCHANGE_API_GITHUB_URL", github::API_URL)
     }
 
     pub fn cloudflare_api(&self) -> String {
-        self.upstream("CF_OIDC_EXCHANGE_CLOUDFLARE_API_URL", cloudflare::API_URL)
+        self.upstream("CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL", cloudflare::API_URL)
     }
 
     /// An upstream's base URL. Only a `stand-ins` build, for the integration

@@ -53,8 +53,8 @@ rsa = { version = "0.9", features = ["sha2"] }
 [features]
 # Opt-in integration tests which require `wrangler dev` running locally.
 integration = []
-# For the integration tests, never a release: CF_OIDC_EXCHANGE_GITHUB_API_URL
-# and CF_OIDC_EXCHANGE_CLOUDFLARE_API_URL point the Worker at the tests'
-# stand-ins, and CF_OIDC_EXCHANGE_SCENARIO_URL at the policy, account and
+# For the integration tests, never a release: CF_OIDC_EXCHANGE_API_GITHUB_URL
+# and CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL point the Worker at the tests'
+# stand-ins, and CF_OIDC_EXCHANGE_API_SCENARIO_URL at the policy, account and
 # bindings each test chooses.
 stand-ins = []

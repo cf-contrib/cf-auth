@@ -1,5 +1,5 @@
 {
-  "name": "cf-oidc-auth",
+  "name": "cf-oidc-exchange",
   "version": "0.8.0",
   "private": true,
   "description": "Keyless Cloudflare API access from GitHub Actions via OIDC",
