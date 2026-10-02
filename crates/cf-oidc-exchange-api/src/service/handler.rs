@@ -38,9 +38,8 @@ use cf_oidc_exchange_sdk::v1::{
 use chrono::{DateTime, Utc};
 use cloudflare::v4::{
     ApiOpError, HttpClient, IamCreatePayload, IamEffect, IamPermissionGroup,
-    IamPolicyWithPermissionGroupsAndResources, IamResources, IamResourcesTypeObjectNested,
-    IamResourcesTypeObjectNestedAdditionalProperty, IamResourcesTypeObjectString,
-    R2TempAccessCredsRequest, R2TempAccessCredsRequestPermission,
+    IamPolicyWithPermissionGroupsAndResources, R2TempAccessCredsRequest,
+    R2TempAccessCredsRequestPermission,
 };
 use serde::ser::{Serialize, SerializeMap, Serializer};
 use serde_json::{Map, Value, json};
@@ -55,8 +54,8 @@ use worker::{
 
 use super::{
     config::{
-        BucketConfig, BucketPermission, CLOUDFLARE_AUDIENCE, Config, Effect, MIN_TTL, PolicyConfig,
-        ProfileConfig, ProviderConfig, ResourceValue, TokenPolicy, parse_duration,
+        BucketConfig, BucketPermission, CLOUDFLARE_AUDIENCE, Config, Effect, PolicyConfig,
+        ProfileConfig, ProviderConfig, TokenPolicyConfig,
     },
     layer::{self, Identity},
 };
@@ -80,10 +79,6 @@ const NAME_MAX: usize = 120;
 
 /// Tokens listed per page by the cleanup.
 const PAGE_SIZE: usize = 50;
-
-const ACCOUNT_SCOPE: &str = "com.cloudflare.api.account";
-const ZONE_SCOPE: &str = "com.cloudflare.api.account.zone";
-const R2_SCOPE: &str = "com.cloudflare.edge.r2.bucket";
 
 /// The broker's API, over the Worker's configuration.
 #[derive(Clone)]
@@ -296,11 +291,57 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
             let mut caller: Option<Caller> = None;
             let mut named: Option<&ProfileConfig> = None;
             let exchanged = async {
-                let exchange = Exchange::read(&request, policy)?;
+                // What the generated validation can't check: the audience,
+                // and whether what's asked for can be issued for it.
+                // Cloudflare's gets Cloudflare credentials; any other, a
+                // JWT.
+                let bad_request = |message: String| Err(Error::new(ErrorCode::BadRequest, message));
+                let audience = request.audience.as_deref().unwrap_or(CLOUDFLARE_AUDIENCE);
+                if audience.is_empty() {
+                    return bad_request("audience must not be empty".into());
+                }
+                let shown: String = audience.chars().take(200).collect();
+                let issuable = match (
+                    audience == CLOUDFLARE_AUDIENCE,
+                    &request.requested_token_type,
+                ) {
+                    (_, None) => true,
+                    (true, Some(t)) => matches!(
+                        t,
+                        IssuedTokenType::UrnIetfParamsOauthTokenTypeAccessToken
+                            | IssuedTokenType::UrnCfOidcAuthParamsOauthTokenTypeR2Credentials
+                    ),
+                    (false, Some(t)) => matches!(
+                        t,
+                        IssuedTokenType::UrnIetfParamsOauthTokenTypeJwt
+                            | IssuedTokenType::UrnIetfParamsOauthTokenTypeAccessToken
+                    ),
+                };
+                if let (false, Some(requested)) = (issuable, &request.requested_token_type) {
+                    return bad_request(format!("{requested} can't be issued for {shown}"));
+                }
+                if audience != CLOUDFLARE_AUDIENCE
+                    && !policy.profiles.iter().any(|p| p.audience == audience)
+                {
+                    return bad_request(format!("no profile is for audience {shown}"));
+                }
+                // `id_token` and `jwt` alike: an OIDC token is a JWT.
+                let (SubjectTokenType::UrnIetfParamsOauthTokenTypeIdToken
+                | SubjectTokenType::UrnIetfParamsOauthTokenTypeJwt) = request.subject_token_type;
+
                 let caller = caller.insert(Caller::of(&request.subject_token, policy)?);
-                let profile = policy.profile_for(caller, exchange.profile, exchange.audience)?;
+                let profile = policy
+                    .profile_for(
+                        &caller.provider.name,
+                        &caller.identity.claims,
+                        request.profile.as_deref(),
+                        audience,
+                    )
+                    .map_err(|why| Error::new(ErrorCode::Forbidden, why))?;
                 named = Some(profile);
-                let ttl = profile.ttl_for(exchange.ttl)?;
+                let ttl = profile
+                    .ttl_for(request.ttl.as_deref())
+                    .map_err(|why| Error::new(ErrorCode::BadRequest, why))?;
                 if profile.audience == CLOUDFLARE_AUDIENCE {
                     self.cloudflare_credentials(caller, profile, ttl).await
                 } else {
@@ -455,60 +496,6 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
     }
 }
 
-/// The broker's own exchange parameters, and what the caller asked for.
-struct Exchange<'r> {
-    /// Cloudflare, or a service the policy issues the broker's own tokens for.
-    audience: &'r str,
-    profile: Option<&'r str>,
-    ttl: Option<&'r str>,
-}
-
-impl<'r> Exchange<'r> {
-    /// Checks what the generated validation can't: which audience, and what it
-    /// can hand out.
-    fn read(request: &'r TokenExchangeRequest, policy: &PolicyConfig) -> Result<Self, Error> {
-        let bad_request = |message: String| Err(Error::new(ErrorCode::BadRequest, message));
-        let audience = request.audience.as_deref().unwrap_or(CLOUDFLARE_AUDIENCE);
-        if audience.is_empty() {
-            return bad_request("audience must not be empty".into());
-        }
-        let shown: String = audience.chars().take(200).collect();
-        // Cloudflare credentials, or a JWT for any other service.
-        let issuable = match (
-            audience == CLOUDFLARE_AUDIENCE,
-            &request.requested_token_type,
-        ) {
-            (_, None) => true,
-            (true, Some(t)) => matches!(
-                t,
-                IssuedTokenType::UrnIetfParamsOauthTokenTypeAccessToken
-                    | IssuedTokenType::UrnCfOidcAuthParamsOauthTokenTypeR2Credentials
-            ),
-            (false, Some(t)) => matches!(
-                t,
-                IssuedTokenType::UrnIetfParamsOauthTokenTypeJwt
-                    | IssuedTokenType::UrnIetfParamsOauthTokenTypeAccessToken
-            ),
-        };
-        if let (false, Some(requested)) = (issuable, &request.requested_token_type) {
-            return bad_request(format!("{requested} can't be issued for {shown}"));
-        }
-        if audience != CLOUDFLARE_AUDIENCE
-            && !policy.profiles.iter().any(|p| p.audience == audience)
-        {
-            return bad_request(format!("no profile is for audience {shown}"));
-        }
-        // `id_token` and `jwt` alike: an OIDC token is a JWT.
-        let (SubjectTokenType::UrnIetfParamsOauthTokenTypeIdToken
-        | SubjectTokenType::UrnIetfParamsOauthTokenTypeJwt) = request.subject_token_type;
-        Ok(Self {
-            audience,
-            profile: request.profile.as_deref(),
-            ttl: request.ttl.as_deref(),
-        })
-    }
-}
-
 /// The caller of an exchange: who the auth layer verified it is, and its
 /// provider.
 struct Caller<'p> {
@@ -567,80 +554,6 @@ impl<'p> Caller<'p> {
             Some(&self.identity.claims),
             self.matched(profile),
         )
-    }
-}
-
-impl PolicyConfig {
-    /// The profile to issue with, among those for the caller's provider and
-    /// `audience` only, or a `403` that says why not. The token must match one
-    /// of the profile's claim sets; the layer held it to its provider's.
-    fn profile_for(
-        &self,
-        caller: &Caller,
-        requested: Option<&str>,
-        audience: &str,
-    ) -> Result<&ProfileConfig, Error> {
-        let forbidden = |message: String| Err(Error::new(ErrorCode::Forbidden, message));
-        let provider = &caller.provider.name;
-        let matches = |p: &ProfileConfig| {
-            p.enabled
-                && p.claims
-                    .iter()
-                    .any(|set| set.matches(&caller.identity.claims))
-        };
-        let mut profiles = self
-            .profiles
-            .iter()
-            .filter(|p| p.provider == *provider && p.audience == audience);
-
-        if let Some(requested) = requested {
-            if let Some(profile) = profiles.find(|p| p.name == requested)
-                && matches(profile)
-            {
-                return Ok(profile);
-            }
-            return forbidden(match self.profiles.iter().find(|p| p.name == requested) {
-                None => format!("unknown profile {requested}"),
-                Some(named) if named.provider != *provider => {
-                    format!("profile {requested} isn't for provider {provider}")
-                }
-                Some(named) if named.audience != audience => {
-                    format!("profile {requested} isn't for {audience}")
-                }
-                Some(named) if !named.enabled => format!("profile {requested} is disabled"),
-                Some(_) => format!("profile {requested} doesn't match the token"),
-            });
-        }
-
-        let candidates: Vec<&ProfileConfig> = profiles.filter(|p| matches(p)).collect();
-        match candidates.as_slice() {
-            [] => forbidden("no profile matches the token".into()),
-            [profile] => Ok(profile),
-            several => {
-                let names: Vec<&str> = several.iter().map(|p| p.name.as_str()).collect();
-                forbidden(format!(
-                    "profiles {} all match the token: name one",
-                    names.join(", ")
-                ))
-            }
-        }
-    }
-}
-
-impl ProfileConfig {
-    /// The TTL to issue with, in milliseconds: the requested one, clamped to
-    /// `max_ttl` rather than refused, or the profile's.
-    fn ttl_for(&self, requested: Option<&str>) -> Result<u64, Error> {
-        let Some(requested) = requested else {
-            return Ok(self.ttl);
-        };
-        match parse_duration(requested) {
-            Some(ttl) if ttl >= MIN_TTL => Ok(ttl.min(self.max_ttl)),
-            _ => Err(Error::new(
-                ErrorCode::BadRequest,
-                format!("ttl {requested} isn't a duration of at least 1m"),
-            )),
-        }
     }
 }
 
@@ -778,7 +691,7 @@ impl Cloudflare {
     /// the cleanup removes.
     async fn mint(
         &self,
-        policies: &[TokenPolicy],
+        policies: &[TokenPolicyConfig],
         name: String,
         expires_on: DateTime<Utc>,
     ) -> Result<MintedToken, Error> {
@@ -988,7 +901,7 @@ impl Cloudflare {
     /// drop.
     async fn resolve(
         &self,
-        policies: &[TokenPolicy],
+        policies: &[TokenPolicyConfig],
     ) -> Result<Vec<IamPolicyWithPermissionGroupsAndResources>, Error> {
         let groups: Vec<Group> = self
             .client
@@ -1032,62 +945,6 @@ impl Cloudflare {
                 })
             })
             .collect()
-    }
-}
-
-impl TokenPolicy {
-    /// The resources in the API's shape: all `"*"`-style values, or all nested
-    /// maps, as the policy's checks made sure.
-    fn iam_resources(&self) -> IamResources {
-        let flat: Option<_> = self
-            .resources
-            .iter()
-            .map(|(key, value)| match value {
-                ResourceValue::Scope(scope) => Some((key.clone(), scope.clone())),
-                ResourceValue::Nested(_) => None,
-            })
-            .collect();
-        if let Some(additional_properties) = flat {
-            return IamResources::IamResourcesTypeObjectString(IamResourcesTypeObjectString {
-                additional_properties,
-            });
-        }
-        let additional_properties = self
-            .resources
-            .iter()
-            .filter_map(|(key, value)| match value {
-                ResourceValue::Nested(nested) => Some((
-                    key.clone(),
-                    IamResourcesTypeObjectNestedAdditionalProperty {
-                        additional_properties: nested.clone(),
-                    },
-                )),
-                ResourceValue::Scope(_) => None,
-            })
-            .collect();
-        IamResources::IamResourcesTypeObjectNested(IamResourcesTypeObjectNested {
-            additional_properties,
-        })
-    }
-
-    /// The scope a permission group needs for the resources, used to pick
-    /// between same-named groups.
-    fn scope(&self) -> &'static str {
-        let zone = format!("{ZONE_SCOPE}.");
-        let keys = || self.resources.keys();
-        if keys().any(|k| k.starts_with(R2_SCOPE)) {
-            return R2_SCOPE;
-        }
-        if keys().any(|k| k.starts_with(&zone)) {
-            return ZONE_SCOPE;
-        }
-        // Nested form: `account.<id>: { "account.zone.*": "*" }` grants every zone
-        // in the account.
-        let nested = self.resources.values().any(|value| match value {
-            ResourceValue::Nested(nested) => nested.keys().any(|k| k.starts_with(&zone)),
-            ResourceValue::Scope(_) => false,
-        });
-        if nested { ZONE_SCOPE } else { ACCOUNT_SCOPE }
     }
 }
 
@@ -1329,10 +1186,11 @@ fn copyable(value: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use cf_oidc_exchange_sdk::v1::TokenExchangeRequestGrantType;
-
     use super::*;
-    use crate::service::config::tests::{CACHE, NOW, claims, parse, policy};
+    use crate::service::config::{
+        ACCOUNT_SCOPE, R2_SCOPE, ZONE_SCOPE,
+        tests::{CACHE, NOW, claims, parse, policy},
+    };
 
     fn caller<'p>(policy: &'p PolicyConfig, claims: Map<String, Value>) -> Caller<'p> {
         Caller {
@@ -1341,185 +1199,6 @@ mod tests {
                 claims,
             },
             provider: &policy.providers[0],
-        }
-    }
-
-    fn request(audience: Option<&str>, requested: Option<IssuedTokenType>) -> TokenExchangeRequest {
-        let mut request = TokenExchangeRequest::new(
-            TokenExchangeRequestGrantType::UrnIetfParamsOauthGrantTypeTokenExchange,
-            "a.b.c".into(),
-            SubjectTokenType::UrnIetfParamsOauthTokenTypeIdToken,
-        );
-        request.audience = audience.map(String::from);
-        request.requested_token_type = requested;
-        request
-    }
-
-    /// Why the exchange is refused before a profile is picked, if it is.
-    fn refusal(request: &TokenExchangeRequest) -> Option<String> {
-        Exchange::read(request, &parse(&policy()))
-            .err()
-            .map(|err| err.message)
-    }
-
-    #[test]
-    fn defaults_to_the_cloudflare_audience() {
-        let policy = parse(&policy());
-        let request = request(None, None);
-        assert_eq!(
-            Exchange::read(&request, &policy).unwrap().audience,
-            CLOUDFLARE_AUDIENCE
-        );
-    }
-
-    #[test]
-    fn refuses_an_audience_no_profile_is_for() {
-        assert_eq!(
-            refusal(&request(Some("https://other.example.com"), None)).as_deref(),
-            Some("no profile is for audience https://other.example.com")
-        );
-        assert_eq!(
-            refusal(&request(Some(""), None)).as_deref(),
-            Some("audience must not be empty")
-        );
-        assert_eq!(refusal(&request(Some(CACHE), None)), None);
-    }
-
-    #[test]
-    fn refuses_token_types_the_audience_cant_have() {
-        let jwt = Some(IssuedTokenType::UrnIetfParamsOauthTokenTypeJwt);
-        let r2 = Some(IssuedTokenType::UrnCfOidcAuthParamsOauthTokenTypeR2Credentials);
-        assert_eq!(
-            refusal(&request(None, jwt.clone())).as_deref(),
-            Some(
-                "urn:ietf:params:oauth:token-type:jwt can't be issued for https://api.cloudflare.com"
-            )
-        );
-        assert_eq!(refusal(&request(None, r2.clone())), None);
-        assert!(refusal(&request(Some(CACHE), r2)).is_some());
-        assert_eq!(refusal(&request(Some(CACHE), jwt)), None);
-    }
-
-    /// The profile a caller with `claims` gets, or why not.
-    fn selected(
-        policy: &Value,
-        claims: Map<String, Value>,
-        requested: Option<&str>,
-        audience: &str,
-    ) -> Result<String, String> {
-        let policy = parse(policy);
-        let caller = caller(&policy, claims);
-        policy
-            .profile_for(&caller, requested, audience)
-            .map(|profile| profile.name.clone())
-            .map_err(|err| err.message)
-    }
-
-    fn ok(name: &str) -> Result<String, String> {
-        Ok(name.to_string())
-    }
-
-    fn err(message: &str) -> Result<String, String> {
-        Err(message.to_string())
-    }
-
-    #[test]
-    fn selects_the_one_matching_profile_or_says_why_not() {
-        let policy = policy();
-        let main = claims();
-        assert_eq!(
-            selected(&policy, main.clone(), None, CLOUDFLARE_AUDIENCE),
-            ok("deploy")
-        );
-        assert_eq!(selected(&policy, main.clone(), None, CACHE), ok("nix-push"));
-
-        let mut dev = claims();
-        dev.insert("ref".into(), "refs/heads/dev".into());
-        let cases = [
-            (
-                dev.clone(),
-                None,
-                CLOUDFLARE_AUDIENCE,
-                "no profile matches the token",
-            ),
-            (
-                dev,
-                Some("deploy"),
-                CLOUDFLARE_AUDIENCE,
-                "profile deploy doesn't match the token",
-            ),
-            (
-                main.clone(),
-                Some("nope"),
-                CLOUDFLARE_AUDIENCE,
-                "unknown profile nope",
-            ),
-            (
-                main,
-                Some("deploy"),
-                CACHE,
-                "profile deploy isn't for https://cf-nix-cache.example.com",
-            ),
-        ];
-        for (claims, requested, audience, expected) in cases {
-            assert_eq!(
-                selected(&policy, claims, requested, audience),
-                err(expected)
-            );
-        }
-    }
-
-    #[test]
-    fn refuses_when_several_profiles_match_and_none_is_named() {
-        let mut policy = policy();
-        let mut again = policy["profiles"][0].clone();
-        again["name"] = json!("deploy-again");
-        policy["profiles"].as_array_mut().unwrap().push(again);
-        assert_eq!(
-            selected(&policy, claims(), None, CLOUDFLARE_AUDIENCE),
-            err("profiles deploy, deploy-again all match the token: name one")
-        );
-        assert_eq!(
-            selected(&policy, claims(), Some("deploy-again"), CLOUDFLARE_AUDIENCE),
-            ok("deploy-again")
-        );
-    }
-
-    #[test]
-    fn never_matches_a_disabled_profile_even_by_name() {
-        let mut policy = policy();
-        policy["profiles"][0]["enabled"] = json!(false);
-        assert_eq!(
-            selected(&policy, claims(), Some("deploy"), CLOUDFLARE_AUDIENCE),
-            err("profile deploy is disabled")
-        );
-        assert_eq!(
-            selected(&policy, claims(), None, CLOUDFLARE_AUDIENCE),
-            err("no profile matches the token")
-        );
-    }
-
-    #[test]
-    fn never_gives_one_providers_token_anothers_profile() {
-        let mut policy = policy();
-        policy["providers"].as_array_mut().unwrap().push(json!({ "name": "gitlab", "issuer": "https://gitlab.com", "audience": "https://cf-oidc-exchange.example.com", "claims": [{ "ref": "refs/heads/main" }] }));
-        policy["profiles"][0]["provider"] = json!("gitlab");
-        policy["profiles"][1]["provider"] = json!("github");
-        assert_eq!(
-            selected(&policy, claims(), Some("deploy"), CLOUDFLARE_AUDIENCE),
-            err("profile deploy isn't for provider github")
-        );
-    }
-
-    #[test]
-    fn clamps_the_ttl_to_max_ttl_and_rejects_nonsense() {
-        let policy = parse(&policy());
-        let profile = &policy.profiles[0];
-        assert_eq!(profile.ttl_for(None).ok(), Some(15 * 60_000));
-        assert_eq!(profile.ttl_for(Some("5m")).ok(), Some(5 * 60_000));
-        assert_eq!(profile.ttl_for(Some("12h")).ok(), Some(60 * 60_000));
-        for ttl in ["30s", "forever", "600"] {
-            assert!(profile.ttl_for(Some(ttl)).is_err(), "{ttl}");
         }
     }
 
@@ -1624,27 +1303,6 @@ mod tests {
         assert_eq!(pkcs8_der("not a pem"), None);
     }
 
-    fn token_policy(resources: Value) -> TokenPolicy {
-        serde_json::from_value(json!({ "permissions": ["x"], "resources": resources })).unwrap()
-    }
-
-    #[test]
-    fn picks_the_scope_from_the_resources() {
-        let zone = "com.cloudflare.api.account.zone.fedcba9876543210fedcba9876543210";
-        let account = "com.cloudflare.api.account.0123456789abcdef0123456789abcdef";
-        let scope = |resources: Value| token_policy(resources).scope();
-        assert_eq!(scope(json!({ zone: "*" })), ZONE_SCOPE);
-        assert_eq!(scope(json!({ account: "*" })), ACCOUNT_SCOPE);
-        assert_eq!(
-            scope(json!({ account: { "com.cloudflare.api.account.zone.*": "*" } })),
-            ZONE_SCOPE
-        );
-        assert_eq!(
-            scope(json!({ "com.cloudflare.edge.r2.bucket.x_default_y": "*" })),
-            R2_SCOPE
-        );
-    }
-
     #[test]
     fn picks_permission_groups_by_name_then_scope() {
         let group = |id: &str, name: &str, scope: &str| Group {
@@ -1679,17 +1337,5 @@ mod tests {
             pick("Nope", ACCOUNT_SCOPE),
             Err("no permission group is named Nope".into())
         );
-    }
-
-    #[test]
-    fn passes_resources_through_in_either_form() {
-        let json = |resources: Value| {
-            serde_json::to_value(token_policy(resources).iam_resources()).unwrap()
-        };
-        let flat = json!({ "com.cloudflare.api.account.zone.z": "*" });
-        let nested =
-            json!({ "com.cloudflare.api.account.a": { "com.cloudflare.api.account.zone.*": "*" } });
-        assert_eq!(json(flat.clone()), flat);
-        assert_eq!(json(nested.clone()), nested);
     }
 }
