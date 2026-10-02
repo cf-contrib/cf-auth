@@ -29,7 +29,7 @@ variable "zone_id" {
   }
 }
 
-variable "broker_token_secret" {
+variable "cloudflare_token_secret" {
   type = object({
     secret_store_id = string
     secret_name     = string

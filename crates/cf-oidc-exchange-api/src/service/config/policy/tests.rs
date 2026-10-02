@@ -134,7 +134,7 @@ fn github_claims(overrides: Value) -> Claims {
     with(base, overrides)
 }
 
-fn load(input: &Value) -> Policy {
+fn load(input: &Value) -> PolicyConfig {
     load_policy(input, None).unwrap_or_else(|err| panic!("{err}"))
 }
 
@@ -146,7 +146,7 @@ fn issues(input: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn profile<'a>(policy: &'a Policy, name: &str) -> &'a Profile {
+fn profile<'a>(policy: &'a PolicyConfig, name: &str) -> &'a ProfileConfig {
     policy.profiles.iter().find(|p| p.name == name).unwrap()
 }
 
@@ -156,11 +156,11 @@ fn denial<T>(result: Result<T, Error>) -> Option<String> {
 }
 
 fn select<'a>(
-    policy: &'a Policy,
+    policy: &'a PolicyConfig,
     provider: &str,
     claims: &Claims,
     requested: Option<&str>,
-) -> Result<&'a Profile, Error> {
+) -> Result<&'a ProfileConfig, Error> {
     select_profile(policy, provider, claims, requested, CLOUDFLARE_AUDIENCE)
 }
 
@@ -230,7 +230,7 @@ mod load_policy {
         assert_eq!(p.issuer, AUDIENCE);
         assert_eq!(
             p.providers,
-            vec![Provider {
+            vec![ProviderConfig {
                 name: "github".into(),
                 kind: ProviderType::Oidc,
                 issuer: GITHUB_ACTIONS_ISSUER.into(),
@@ -248,7 +248,7 @@ mod load_policy {
 
     #[test]
     fn accepts_the_example_policy_file() {
-        let example = include_str!("../../policy.example.json");
+        let example = include_str!("../../../../policy.example.json");
         load(&Value::String(example.into()));
     }
 
@@ -1271,7 +1271,7 @@ mod people {
     mod matching {
         use super::*;
 
-        fn loaded() -> Policy {
+        fn loaded() -> PolicyConfig {
             let claims = json!({ "team_id": TEAM_ID, "repository_permission": "write" });
             load(&with_user(claims, json!({})))
         }
@@ -1383,7 +1383,7 @@ mod buckets {
         with_bucket(json!({ "prefixes": prefixes }), json!({}), false)
     }
 
-    fn loaded(p: &Value) -> Profile {
+    fn loaded(p: &Value) -> ProfileConfig {
         load(p).profiles[1].clone()
     }
 

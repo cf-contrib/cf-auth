@@ -115,7 +115,7 @@ pub enum ProviderType {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Provider {
+pub struct ProviderConfig {
     pub name: String,
     pub kind: ProviderType,
     /// The token's `iss`, exactly; `https://github.com` for people's GitHub tokens.
@@ -168,7 +168,7 @@ pub struct TokenPolicy {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Profile {
+pub struct ProfileConfig {
     pub name: String,
     /// The provider whose tokens the profile is for.
     pub provider: String,
@@ -191,11 +191,11 @@ pub struct Profile {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Policy {
+pub struct PolicyConfig {
     /// The broker's own URL.
     pub issuer: String,
-    pub providers: Vec<Provider>,
-    pub profiles: Vec<Profile>,
+    pub providers: Vec<ProviderConfig>,
+    pub profiles: Vec<ProfileConfig>,
 }
 
 /// Every problem found in a policy, so an admin can fix them all in one go.
@@ -242,7 +242,7 @@ fn tenant_claims(issuer: &str) -> Option<&'static [&'static str]> {
 
 /// Parses and validates a policy, from its JSON text or an already parsed value.
 /// With `account_id`, account resources must name that account.
-pub fn load_policy(input: &Value, account_id: Option<&str>) -> Result<Policy, PolicyError> {
+pub fn load_policy(input: &Value, account_id: Option<&str>) -> Result<PolicyConfig, PolicyError> {
     let fail = |issues: Vec<String>| Err(PolicyError { issues });
     let parsed;
     let raw = match input {
@@ -294,8 +294,8 @@ impl Loader<'_> {
         self.issues.push(issue);
     }
 
-    fn policy(&mut self, raw: schema::Policy) -> Policy {
-        let mut providers: Vec<Provider> = Vec::new();
+    fn policy(&mut self, raw: schema::Policy) -> PolicyConfig {
+        let mut providers: Vec<ProviderConfig> = Vec::new();
         for (i, provider) in raw.providers.into_iter().enumerate() {
             let at = format!("providers.{i} ({})", provider.name);
             if providers.iter().any(|p| p.name == provider.name) {
@@ -314,7 +314,7 @@ impl Loader<'_> {
         let default_ttl = default_ttl.unwrap_or(DEFAULT_TTL.min(default_max));
         self.check_ttls("defaults", default_ttl, default_max);
 
-        let mut profiles: Vec<Profile> = Vec::new();
+        let mut profiles: Vec<ProfileConfig> = Vec::new();
         for (i, profile) in raw.profiles.into_iter().enumerate() {
             let at = format!("profiles.{i} ({})", profile.name);
             if profiles.iter().any(|p| p.name == profile.name) {
@@ -325,14 +325,14 @@ impl Loader<'_> {
             profiles.push(profile);
         }
 
-        Policy {
+        PolicyConfig {
             issuer: raw.issuer,
             providers,
             profiles,
         }
     }
 
-    fn provider(&mut self, at: &str, raw: schema::Provider) -> Provider {
+    fn provider(&mut self, at: &str, raw: schema::Provider) -> ProviderConfig {
         let claims = self.claims(&format!("{at}.claims"), raw.claims);
 
         if raw.issuer == GITHUB_USERS_ISSUER {
@@ -352,7 +352,7 @@ impl Loader<'_> {
                     ));
                 }
             }
-            return Provider {
+            return ProviderConfig {
                 name: raw.name,
                 kind: ProviderType::GithubUser,
                 issuer: raw.issuer,
@@ -394,7 +394,7 @@ impl Loader<'_> {
                 "{at}.audience: must not be GitHub's default audience; use the broker's URL"
             ));
         }
-        Provider {
+        ProviderConfig {
             name: raw.name,
             kind: ProviderType::Oidc,
             issuer: raw.issuer,
@@ -409,9 +409,9 @@ impl Loader<'_> {
         at: &str,
         raw: schema::Profile,
         issuer: &str,
-        providers: &[Provider],
+        providers: &[ProviderConfig],
         (default_ttl, default_max): (u64, u64),
-    ) -> Profile {
+    ) -> ProfileConfig {
         // With one provider, it's the only one a profile can be for.
         let named = match (&raw.provider, providers) {
             (Some(name), _) => Some(name.as_str()),
@@ -526,7 +526,7 @@ impl Loader<'_> {
 
         let mut effective = inherited;
         effective.extend(claims);
-        Profile {
+        ProfileConfig {
             name: raw.name,
             provider: provider_name.into(),
             kind,

@@ -11,7 +11,7 @@ use cf_oidc_exchange_sdk::v1::{Error, ErrorCode};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    policy::Claims,
+    service::config::Claims,
     webcrypto::{self, PrivateKey},
 };
 

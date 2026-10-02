@@ -4,7 +4,7 @@
 use serde::ser::{Serialize, SerializeMap, Serializer};
 use serde_json::Value;
 
-use crate::policy::Claims;
+use crate::service::config::Claims;
 
 /// Claims copied into audit lines. None of them are secret.
 const CLAIMS: [&str; 12] = [

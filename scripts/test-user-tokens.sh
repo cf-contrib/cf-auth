@@ -22,7 +22,7 @@
 #   - The broker token in the local Secrets Store, under the store_id and
 #     secret_name in crates/cf-oidc-exchange-api/wrangler.toml:
 #       cd crates/cf-oidc-exchange-api
-#       wrangler secrets-store secret create 00000000000000000000000000000000 --name cf-oidc-exchange-broker-token --scopes workers
+#       wrangler secrets-store secret create 00000000000000000000000000000000 --name cf-oidc-exchange-cloudflare-token --scopes workers
 #   - gh, logged in. The script uses gh's own login, ignoring GITHUB_TOKEN and
 #     GH_TOKEN, as `env -u GITHUB_TOKEN -u GH_TOKEN gh auth token` would.
 #   - Optional TEST_PERMISSION: the permission group the test tokens get

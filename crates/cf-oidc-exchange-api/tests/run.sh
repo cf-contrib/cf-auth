@@ -18,8 +18,8 @@ secret() {
   # --value= keeps a PEM's leading dashes from being read as a flag.
   wrangler secrets-store secret create "$STORE" --name "$1" --scopes workers --value="$2" --persist-to "$PERSIST" >/dev/null
 }
-secret broker-token test-broker-token
-secret broker-token-rotated test-broker-token-rotated
+secret cloudflare-token test-cloudflare-token
+secret cloudflare-token-rotated test-cloudflare-token-rotated
 secret signing-key "$(cat "$KEYS/signing.pem")"
 secret signing-key-small "$(cat "$KEYS/small.pem")"
 secret signing-key-not-pem "not a key"

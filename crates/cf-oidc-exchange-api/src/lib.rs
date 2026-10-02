@@ -6,7 +6,6 @@ mod cloudflare;
 mod github;
 mod issuer;
 mod oidc;
-mod policy;
 mod service;
 mod webcrypto;
 

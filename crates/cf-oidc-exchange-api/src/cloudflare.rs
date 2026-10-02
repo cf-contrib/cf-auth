@@ -17,8 +17,8 @@ use serde_json::Value;
 
 use crate::{
     audit::Audit,
-    policy::{
-        Bucket, BucketPermission, Claims, Effect, Provider, ProviderType, ResourceValue,
+    service::config::{
+        Bucket, BucketPermission, Claims, Effect, ProviderConfig, ProviderType, ResourceValue,
         TokenPolicy,
     },
 };
@@ -76,7 +76,7 @@ fn timestamp(ms: u64) -> DateTime<Utc> {
 /// `cf-oidc:user:<login>:<repo>` for a person, and `cf-oidc:<provider>:<sub>` for
 /// any other issuer's caller, cut to fit 120 characters. A repo name can't
 /// contain `:`, so the GitHub forms never collide.
-pub fn token_name(claims: &Claims, provider: &Provider) -> String {
+pub fn token_name(claims: &Claims, provider: &ProviderConfig) -> String {
     let text = |key: &str, default: &'static str| match claims.get(key).and_then(Value::as_str) {
         Some(value) if !value.is_empty() => value,
         _ => default,
@@ -580,8 +580,8 @@ mod tests {
 
     use super::*;
 
-    fn provider(name: &str, kind: ProviderType) -> Provider {
-        Provider {
+    fn provider(name: &str, kind: ProviderType) -> ProviderConfig {
+        ProviderConfig {
             name: name.into(),
             kind,
             issuer: "https://issuer.example.com".into(),

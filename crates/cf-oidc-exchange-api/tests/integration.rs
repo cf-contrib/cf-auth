@@ -367,7 +367,7 @@ mod token_exchange_for_jobs_with_buckets {
                 "profile": "terraform-state",
                 "buckets": [{
                     "name": "org-terraform-state",
-                    "access_key_id": BROKER_TOKEN_ID,
+                    "access_key_id": CLOUDFLARE_TOKEN_ID,
                     "secret_access_key": "r2-secret-value",
                     "session_token": "r2-session-token-value",
                     "prefixes": ["github.com/example-org/state-app/"],
@@ -383,7 +383,7 @@ mod token_exchange_for_jobs_with_buckets {
             r2_bodies(),
             [json!({
                 "bucket": "org-terraform-state",
-                "parentAccessKeyId": BROKER_TOKEN_ID,
+                "parentAccessKeyId": CLOUDFLARE_TOKEN_ID,
                 "permission": "object-read-write",
                 "ttlSeconds": 900.0,
                 "prefixes": ["github.com/example-org/state-app/"],
@@ -405,7 +405,7 @@ mod token_exchange_for_jobs_with_buckets {
         assert_eq!(res.json()["buckets"][0]["prefixes"], json!([]));
         assert_eq!(
             r2_bodies()[0],
-            json!({ "bucket": "org-terraform-state", "parentAccessKeyId": BROKER_TOKEN_ID, "permission": "object-read-only", "ttlSeconds": 1800.0 })
+            json!({ "bucket": "org-terraform-state", "parentAccessKeyId": CLOUDFLARE_TOKEN_ID, "permission": "object-read-only", "ttlSeconds": 1800.0 })
         );
     }
 
@@ -580,7 +580,7 @@ mod token_exchange_for_jobs_with_buckets {
     }
 
     #[tokio::test]
-    async fn looks_up_the_parent_access_key_id_once_and_again_after_the_broker_token_rotates() {
+    async fn looks_up_the_parent_access_key_id_once_and_again_after_the_cloudflare_token_rotates() {
         let _t = start().await;
         with_profiles(json!([{
             "name": "terraform-state",
@@ -611,7 +611,7 @@ mod token_exchange_for_jobs_with_buckets {
                 None,
                 "active",
             );
-            world.scenario["broker_token"] = json!("BROKER_TOKEN_ROTATED");
+            world.scenario["cloudflare_token"] = json!("CLOUDFLARE_TOKEN_ROTATED");
         }
         // The stand-in only takes the original broker token for everything but verify, so stop here.
         job_token(&state_repo(json!({})), &[]).await;
@@ -1102,9 +1102,9 @@ mod revocation {
     }
 
     #[tokio::test]
-    async fn refuses_to_delete_the_broker_token() {
+    async fn refuses_to_delete_the_cloudflare_token() {
         let _t = start().await;
-        assert_eq!(revoke(Some(BROKER_TOKEN)).await.status, 403);
+        assert_eq!(revoke(Some(CLOUDFLARE_TOKEN)).await.status, 403);
     }
 
     #[tokio::test]
@@ -1126,7 +1126,7 @@ mod revocation {
     }
 }
 
-mod broker_token {
+mod cloudflare_token {
     use super::*;
 
     #[tokio::test]
@@ -1136,7 +1136,7 @@ mod broker_token {
         assert_eq!(res.status, 200);
         // A rotated secret takes effect on the next request, without a redeploy:
         // the stand-in takes only the original token for anything but verify.
-        world().scenario["broker_token"] = json!("BROKER_TOKEN_ROTATED");
+        world().scenario["cloudflare_token"] = json!("CLOUDFLARE_TOKEN_ROTATED");
         world().cloudflare.add(
             Some("tok-rotated"),
             "cf-oidc broker token (rotated)",
@@ -1151,14 +1151,14 @@ mod broker_token {
     #[tokio::test]
     async fn fails_closed_when_the_secret_cant_be_read() {
         let t = start().await;
-        world().scenario["broker_token"] = json!("BROKER_TOKEN_MISSING");
+        world().scenario["cloudflare_token"] = json!("CLOUDFLARE_TOKEN_MISSING");
         let res = job_token(&sign(github_claims(json!({}))), &[]).await;
         assert_eq!(res.status, 500);
         assert_error(&res, "misconfigured");
         assert_refused(
             &t.deny().await,
             "misconfigured",
-            "BROKER_TOKEN_MISSING can't be read",
+            "CLOUDFLARE_TOKEN_MISSING can't be read",
         );
         assert_eq!(token_count(), 1); // nothing minted
     }
@@ -1166,15 +1166,15 @@ mod broker_token {
     #[tokio::test]
     async fn refuses_a_plain_worker_secret() {
         let t = start().await;
-        world().scenario["broker_token"] = json!("BROKER_TOKEN_PLAIN");
+        world().scenario["cloudflare_token"] = json!("CLOUDFLARE_TOKEN_PLAIN");
         let res = job_token(&sign(github_claims(json!({}))), &[]).await;
         assert_eq!(res.status, 500);
         assert_error(&res, "misconfigured");
-        assert!(!res.text.contains("BROKER_TOKEN_PLAIN"), "{}", res.text);
+        assert!(!res.text.contains("CLOUDFLARE_TOKEN_PLAIN"), "{}", res.text);
         // Refused with the configuration, before any route: the log says why.
         assert!(
             t.log()
-                .contains("misconfigured: BROKER_TOKEN_PLAIN must be a Secrets Store binding"),
+                .contains("misconfigured: CLOUDFLARE_TOKEN_PLAIN must be a Secrets Store binding"),
             "{}",
             t.log()
         );

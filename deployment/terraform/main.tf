@@ -80,10 +80,10 @@ resource "cloudflare_worker_version" "this" {
     },
     {
       # Only ever from Secrets Store, so the token never enters Terraform state.
-      name        = "CF_OIDC_EXCHANGE_API_BROKER_TOKEN"
+      name        = "CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN"
       type        = "secrets_store_secret"
-      store_id    = var.broker_token_secret.secret_store_id
-      secret_name = var.broker_token_secret.secret_name
+      store_id    = var.cloudflare_token_secret.secret_store_id
+      secret_name = var.cloudflare_token_secret.secret_name
     },
     ], var.signing_key_secret == null ? [] : [
     {
