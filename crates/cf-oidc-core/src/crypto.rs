@@ -1,5 +1,6 @@
-//! Signing tokens with RS256, for a Worker that issues its own: the key never
-//! leaves the runtime's WebCrypto, and no RSA crate ends up in the wasm.
+//! RS256 through the runtime's WebCrypto: verifying an issuer's signatures,
+//! and signing tokens, for a Worker that issues its own. No RSA crate ends up
+//! in the wasm, and a signing key never leaves WebCrypto.
 
 use std::fmt;
 
@@ -21,7 +22,8 @@ pub const ALGORITHM: &str = "RS256";
 /// The smallest RSA key accepted, as NIST requires.
 const MIN_MODULUS_BITS: usize = 2048;
 
-/// Why a key can't be imported, or a token signed with it.
+/// What WebCrypto refused: a key that can't be imported, or a signature it
+/// can't make or check.
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyError(String);
 
@@ -145,6 +147,41 @@ impl SigningKey {
             jwt: format!("{signing_input}.{signature}"),
             jti,
         })
+    }
+}
+
+/// Verifies an RS256 (RSASSA-PKCS1-v1_5 with SHA-256) signature with the RSA
+/// public key `n` and `e`, base64url. A signature WebCrypto refuses to check,
+/// such as one of the wrong length, doesn't verify.
+pub(crate) async fn verify_rs256(
+    n: &str,
+    e: &str,
+    signing_input: &[u8],
+    signature: &[u8],
+) -> Result<bool, KeyError> {
+    let subtle = subtle()?;
+    let algorithm = rs256()?;
+    let jwk = json!({ "kty": "RSA", "n": n, "e": e, "alg": ALGORITHM });
+    let jwk: js_sys::Object = js_sys::JSON::parse(&jwk.to_string())
+        .map(JsCast::unchecked_into)
+        .map_err(webcrypto)?;
+    let usages = js_sys::Array::of1(&JsValue::from_str("verify"));
+    let key: CryptoKey =
+        promised(subtle.import_key_with_object("jwk", &jwk, &algorithm, false, &usages))
+            .await?
+            .unchecked_into();
+
+    let verified = subtle.verify_with_object_and_buffer_source_and_buffer_source(
+        &algorithm,
+        &key,
+        &Uint8Array::from(signature),
+        &Uint8Array::from(signing_input),
+    );
+    match verified {
+        Ok(promise) => {
+            Ok(JsFuture::from(promise).await.ok().and_then(|v| v.as_bool()) == Some(true))
+        }
+        Err(_) => Ok(false),
     }
 }
 
