@@ -29,13 +29,13 @@ steps:
 | Component | Ships as | What it is |
 |---|---|---|
 | [Action](packages/cf-oidc-action) | `uses: cf-contrib/cf-oidc-auth@<version>` | Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. No runtime dependencies. |
-| [Broker](packages/cf-oidc-broker) | `broker.js` in [Releases](https://github.com/cf-contrib/cf-oidc-auth/releases) | A Worker in your account that checks the OIDC token against your policy and mints the Cloudflare token. |
+| [Broker](crates/cf-oidc-exchange-api) | A Rust Worker in [Releases](https://github.com/cf-contrib/cf-oidc-auth/releases), deployed with the [Terraform module](deployment/terraform) | A Worker in your account that checks the OIDC token against your policy and mints the Cloudflare token. |
 
 The action and the broker, with its Terraform module, are released together from one tag, so deploy the broker from the release whose action you use. The action talks only to the broker, never to the Cloudflare API.
 
-People can get credentials too, for example to run `tofu plan` locally against the shared state bucket. [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare) sends their `gh auth token` to the broker, which checks their role on the repo with GitHub and matches the profiles of the [`https://github.com` provider](packages/cf-oidc-broker#people).
+People can get credentials too, for example to run `tofu plan` locally against the shared state bucket. [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare) sends their `gh auth token` to the broker, which checks their role on the repo with GitHub and matches the profiles of the [`https://github.com` provider](crates/cf-oidc-exchange-api#people).
 
-Other services can trust the broker too. A profile with an `audience` gets the caller a short-lived token the broker signs itself, for that service, which verifies it with the broker's published keys. [cf-nix-cache](https://github.com/cf-contrib/cf-nix-cache) is the first such service. See [Tokens for other services](packages/cf-oidc-broker#tokens-for-other-services).
+Other services can trust the broker too. A profile with an `audience` gets the caller a short-lived token the broker signs itself, for that service, which verifies it with the broker's published keys. [cf-nix-cache](https://github.com/cf-contrib/cf-nix-cache) is the first such service. See [Tokens for other services](crates/cf-oidc-exchange-api#tokens-for-other-services).
 
 ## How it works
 
@@ -59,7 +59,7 @@ sequenceDiagram
     Note over Broker,CF: hourly cron deletes expired cf-oidc:* tokens
 ```
 
-The only long-lived credential is the **broker token**: an account-owned token with **Account API Tokens Write**, plus R2 permissions if profiles hand out [prefix-limited R2 credentials](packages/cf-oidc-broker#buckets) (e.g. one shared Terraform-state bucket, each repo limited to its own prefix). It lives in Cloudflare Secrets Store, bound to the Worker, so it never passes through Terraform or CI and never leaves the Worker.
+The only long-lived credential is the **broker token**: an account-owned token with **Account API Tokens Write**, plus R2 permissions if profiles hand out [prefix-limited R2 credentials](crates/cf-oidc-exchange-api#buckets) (e.g. one shared Terraform-state bucket, each repo limited to its own prefix). It lives in Cloudflare Secrets Store, bound to the Worker, so it never passes through Terraform or CI and never leaves the Worker.
 
 ## Do you need it?
 
@@ -76,9 +76,9 @@ If a stored secret is acceptable to you, it's less to run.
 
 ## Quick start
 
-1. **Create the broker token.** In the Cloudflare dashboard, create an account-owned API token with **Account API Tokens Write** (plus R2 permissions for [buckets](packages/cf-oidc-broker#buckets)), and store it in Secrets Store.
-2. **Write a policy** that says which repos, branches and environments get which permissions. See the [broker's README](packages/cf-oidc-broker#policy).
-3. **Deploy the broker** with the [Terraform module](packages/cf-oidc-broker/terraform), on workers.dev (a custom domain is optional), then check that `<broker-url>/healthz` returns `200`.
+1. **Create the broker token.** In the Cloudflare dashboard, create an account-owned API token with **Account API Tokens Write** (plus R2 permissions for [buckets](crates/cf-oidc-exchange-api#buckets)), and store it in Secrets Store.
+2. **Write a policy** that says which repos, branches and environments get which permissions. See the [broker's README](crates/cf-oidc-exchange-api#policy).
+3. **Deploy the broker** with the [Terraform module](deployment/terraform), on workers.dev (a custom domain is optional), then check that `<broker-url>/healthz` returns `200`.
 4. **Add the action** to a job with `permissions: id-token: write`. See the [action's README](packages/cf-oidc-action).
 
 ## Development
@@ -86,15 +86,20 @@ If a stored secret is acceptable to you, it's less to run.
 Everything runs inside the dev shell: `nix develop`, or the Dev Container.
 
 ```sh
-pnpm install
-pnpm lint
-pnpm typecheck
-pnpm test                                   # both packages; the broker's tests run in workerd
-pnpm build                                  # packages/cf-oidc-broker/dist/broker.js
-pnpm --filter cf-oidc-broker check:bundle   # boot the built broker.js, check its size
+pnpm install && pnpm lint && pnpm typecheck && pnpm test   # the action
+cargo test                                                  # the broker's unit tests
+crates/cf-oidc-exchange-api/tests/run.sh                    # the broker end to end, under wrangler dev
+(cd deployment/terraform && tofu test)                      # the Terraform module
 ```
 
-Releases are cut by release-please from Conventional Commits. Each release is tagged `vX.Y.Z` and attaches `broker.js` and `broker.js.sha256`. Pin the action to a release tag or its commit SHA: before 1.0 there is no floating major tag, because minor releases may break.
+| Directory | |
+|---|---|
+| [`packages/cf-oidc-action`](packages/cf-oidc-action) | The action, in JavaScript with no runtime dependencies. |
+| [`crates/cf-oidc-exchange-api`](crates/cf-oidc-exchange-api) | The broker, a Rust Worker. |
+| [`crates/cf-oidc-exchange-sdk`](crates/cf-oidc-exchange-sdk) | The broker's API, generated from its OpenAPI document. |
+| [`deployment/terraform`](deployment/terraform) | The Terraform module that deploys the broker. |
+
+Releases are cut by release-please from Conventional Commits. Each release is tagged `vX.Y.Z` and attaches the broker's `entry.js`, `index.js`, `index_bg.wasm.base64` and their `SHA256SUMS`. Pin the action to a release tag or its commit SHA: before 1.0 there is no floating major tag, because minor releases may break.
 
 ## License
 

@@ -37,23 +37,34 @@ resource "cloudflare_worker_version" "this" {
   account_id         = var.account_id
   worker_id          = cloudflare_worker.this.id
   compatibility_date = var.worker_compatibility_date
-  main_module        = "broker.js"
+  main_module        = "entry.js"
 
   lifecycle {
     precondition {
-      condition     = var.broker_sha256 == null || sha256(local.broker_js) == var.broker_sha256
-      error_message = "broker.js does not match broker_sha256."
+      condition     = local.release_ok
+      error_message = "The release's files don't match its SHA256SUMS, or SHA256SUMS doesn't match checksums_sha256."
     }
   }
 
   modules = [
     {
-      name           = "broker.js"
+      # Hands the Worker policy.json, then is the Worker.
+      name           = "entry.js"
       content_type   = "application/javascript+module"
-      content_base64 = base64encode(local.broker_js)
+      content_base64 = base64encode(local.entry_js)
     },
     {
-      # Imported by broker.js. Uploaded as text, which the broker parses, since
+      name           = "index.js"
+      content_type   = "application/javascript+module"
+      content_base64 = base64encode(local.index_js)
+    },
+    {
+      name           = "index_bg.wasm"
+      content_type   = "application/wasm"
+      content_base64 = local.wasm_base64
+    },
+    {
+      # Imported by entry.js. Uploaded as text, which the Worker parses, since
       # Workers has no JSON module type.
       name           = "policy.json"
       content_type   = "text/plain"

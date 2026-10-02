@@ -1,6 +1,5 @@
-# Local development of the Rust Worker. Production deploys use the release's
-# entry.js, index.js and index_bg.wasm (see packages/cf-oidc-broker/terraform
-# until it moves).
+# Local development of the Worker. Production deploys use the release's
+# entry.js, index.js and index_bg.wasm, with deployment/terraform.
 #
 # The policy is policy.json, beside this file, copied into the build. It isn't
 # committed:

@@ -12,8 +12,8 @@
       "extra-files": [
         "README.md",
         "packages/cf-oidc-action/README.md",
-        "packages/cf-oidc-broker/terraform/README.md",
-        "packages/cf-oidc-broker/terraform/variables.tf"
+        "deployment/terraform/README.md",
+        "deployment/terraform/variables.tf"
       ]
     }
   }
