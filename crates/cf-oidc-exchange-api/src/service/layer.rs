@@ -57,7 +57,7 @@ use worker::{
 };
 
 use super::{
-    config::{Config, ProviderConfig, check_url},
+    config::{Config, PolicyConfig, ProviderConfig, check_url},
     handler::Audit,
 };
 
@@ -163,8 +163,7 @@ where
             // Verifying fetches the issuer's keys, and fetch futures aren't
             // `Send`, which the router wants; a Worker is single-threaded, so
             // it runs in a `SendFuture`.
-            let providers = &config.policy().providers;
-            match SendFuture::new(verify(&token, providers)).await {
+            match SendFuture::new(verify(&token, config.policy())).await {
                 Ok(_) => inner.call(req).await,
                 Err(err) => Ok(err.into_response()),
             }
@@ -210,7 +209,7 @@ pub fn identity(token: &str) -> Result<Identity, v1::Error> {
 
 /// Verifies `token`, against the provider its `iss` names, and keeps the
 /// outcome for [`identity`] until the token expires.
-async fn verify(token: &str, providers: &[ProviderConfig]) -> Result<Identity, AuthError> {
+async fn verify(token: &str, policy: &PolicyConfig) -> Result<Identity, AuthError> {
     let now_ms = Date::now().as_millis();
     let key = IdentityCache::key(token);
     if let Some(result) = CACHE.with_borrow(|cache| cache.get(&key, now_ms)) {
@@ -218,7 +217,9 @@ async fn verify(token: &str, providers: &[ProviderConfig]) -> Result<Identity, A
     }
 
     let jwt = Jwt::decode(token).inspect_err(AuthError::audit)?;
-    let provider = find_by_claims(providers, &jwt.claims).inspect_err(AuthError::audit)?;
+    let provider = policy
+        .provider_for(&jwt.claims)
+        .inspect_err(AuthError::audit)?;
     let result = provider.verify_token(&jwt, now_ms).await;
     // A verified token's identity can't change, so both outcomes hold until
     // it expires. Expiry and other time-based failures are not cached.
@@ -299,23 +300,22 @@ fn invalid(what: &str) -> AuthError {
     AuthError::Unauthorized(format!("the subject token isn't valid: {what}"))
 }
 
-/// The provider a token's claims say it comes from, by its `iss`, read
-/// unverified only to pick the keys to verify it with.
-fn find_by_claims<'p>(
-    providers: &'p [ProviderConfig],
-    claims: &Map<String, Value>,
-) -> Result<&'p ProviderConfig, AuthError> {
-    let iss = claims
-        .get("iss")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    providers
-        .iter()
-        .find(|provider| provider.issuer == iss)
-        .ok_or_else(|| {
-            let shown: String = iss.chars().take(200).collect();
-            AuthError::Unauthorized(format!("no provider is for issuer {shown}"))
-        })
+impl PolicyConfig {
+    /// The provider a token's claims say it comes from, by its `iss`, read
+    /// unverified only to pick the keys to verify it with.
+    fn provider_for(&self, claims: &Map<String, Value>) -> Result<&ProviderConfig, AuthError> {
+        let iss = claims
+            .get("iss")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        self.providers
+            .iter()
+            .find(|provider| provider.issuer == iss)
+            .ok_or_else(|| {
+                let shown: String = iss.chars().take(200).collect();
+                AuthError::Unauthorized(format!("no provider is for issuer {shown}"))
+            })
+    }
 }
 
 impl ProviderConfig {
@@ -806,16 +806,13 @@ mod tests {
 
     #[test]
     fn picks_the_provider_by_the_tokens_issuer() {
-        let providers = [provider()];
-        assert_eq!(
-            find_by_claims(&providers, &claims()).unwrap().name,
-            "github"
-        );
+        let policy = parse(&policy());
+        assert_eq!(policy.provider_for(&claims()).unwrap().name, "github");
 
         let mut other = claims();
         other.insert("iss".into(), "https://other.example.com".into());
         assert_eq!(
-            find_by_claims(&providers, &other).unwrap_err(),
+            policy.provider_for(&other).unwrap_err(),
             AuthError::Unauthorized("no provider is for issuer https://other.example.com".into())
         );
     }
