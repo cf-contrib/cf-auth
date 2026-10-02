@@ -1,56 +1,53 @@
-// Hand-written companion to the generated `oidc.exchange.v1` code.
-//
-// Same convention as grpc-rust-template: the generated module is machine-written,
-// from the OpenAPI document into OUT_DIR, `oidc.exchange.v1.extra.rs` beside
-// lib.rs is not, and `v1` includes both into the one module. `//` rather than
-// `//!` because an `include!`d file cannot carry inner attributes; the module
-// documentation lives in lib.rs.
-//
-// What's here: the health endpoints a server of the API answers beside it, and
-// a client for them. They're plain HTTP, not operations in the OpenAPI document.
-// The private modules are `health_*` because the generated code already has
-// `client` and `server`.
+//! The health endpoints a server of the API answers beside it, and a client
+//! for them. Hand-written, not generated: they're plain HTTP, not part of the
+//! API's OpenAPI document.
 
 /// The liveness endpoint: the server is up and serving HTTP. Shared by the
-/// server that answers it and the [`HealthClient`] that asks, so the two
-/// cannot drift apart.
+/// server that answers it and the [`HealthClient`] that asks, so the two can't
+/// drift apart.
 pub const HEALTH_LIVE_PATH: &str = "/health/live";
 
-/// The readiness endpoint: the server can serve, with the policy and secrets it
-/// needs. Shared as [`HEALTH_LIVE_PATH`] is.
+/// The readiness endpoint: the server can serve. Shared as
+/// [`HEALTH_LIVE_PATH`] is.
 pub const HEALTH_READY_PATH: &str = "/health/ready";
 
 #[cfg(feature = "client")]
-pub use health_client::HealthClient;
+pub use client::HealthClient;
 #[cfg(feature = "server")]
-pub use health_server::{HealthCheck, HealthCheckError, HealthHandler, READY_TIMEOUT};
-
-// -- Client ----------------------------------------------------------------
+pub use server::{HealthCheck, HealthCheckError, HealthHandler};
 
 #[cfg(feature = "client")]
-mod health_client {
+mod client {
+    use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+
     use super::{HEALTH_LIVE_PATH, HEALTH_READY_PATH};
+    use crate::v1::HttpResult;
 
     /// Checks a server's health endpoints, [`HEALTH_LIVE_PATH`] and
     /// [`HEALTH_READY_PATH`].
     ///
-    /// Hand-written, not generated: the endpoints are plain HTTP beside the API,
-    /// not operations in its document.
+    /// Hand-written, not generated: the endpoints are plain HTTP beside the
+    /// API, not in its OpenAPI document. Built like the generated
+    /// `HttpClient`, over a reqwest-middleware client, so it reaches the
+    /// server exactly as that does.
     #[derive(Clone)]
     pub struct HealthClient {
         base_url: String,
-        http: reqwest::Client,
+        http: ClientWithMiddleware,
     }
 
     impl HealthClient {
         /// A client for the server at `base_url`, e.g.
-        /// `https://cf-oidc-exchange.example.workers.dev`.
+        /// `https://cf-oidc-exchange.example.workers.dev`, over a plain reqwest
+        /// client.
+        #[must_use]
         pub fn new(base_url: impl Into<String>) -> Self {
-            Self::with_client(base_url, reqwest::Client::new())
+            Self::with_client(ClientBuilder::new(reqwest::Client::new()).build(), base_url)
         }
 
-        /// A client for the server at `base_url`, over `http`.
-        pub fn with_client(base_url: impl Into<String>, http: reqwest::Client) -> Self {
+        /// Over any client: one with middleware, retries, a test double.
+        #[must_use]
+        pub fn with_client(http: ClientWithMiddleware, base_url: impl Into<String>) -> Self {
             Self {
                 base_url: base_url.into(),
                 http,
@@ -58,43 +55,46 @@ mod health_client {
         }
 
         /// Whether the server is up: `GET /health/live` answered 2xx.
-        pub async fn is_live(&self) -> Result<bool, reqwest::Error> {
+        ///
+        /// # Errors
+        ///
+        /// `HttpError::Middleware` when the server couldn't be reached at all.
+        pub async fn is_live(&self) -> HttpResult<bool> {
             self.check(HEALTH_LIVE_PATH).await
         }
 
-        /// Whether the server can serve: `GET /health/ready` answered 2xx -- up,
-        /// and every readiness check passing.
-        pub async fn is_ready(&self) -> Result<bool, reqwest::Error> {
+        /// Whether the server can serve: `GET /health/ready` answered 2xx.
+        /// `Ok(false)` for the 503 it answers when a check fails.
+        ///
+        /// # Errors
+        ///
+        /// `HttpError::Middleware` when the server couldn't be reached at all.
+        pub async fn is_ready(&self) -> HttpResult<bool> {
             self.check(HEALTH_READY_PATH).await
         }
 
-        async fn check(&self, path: &str) -> Result<bool, reqwest::Error> {
+        /// `GET path` against the base URL, answered 2xx or not.
+        async fn check(&self, path: &str) -> HttpResult<bool> {
             let url = format!("{}{path}", self.base_url.trim_end_matches('/'));
             Ok(self.http.get(url).send().await?.status().is_success())
         }
     }
 }
 
-// -- Server ----------------------------------------------------------------
-
-// The plain-HTTP endpoints a server of this API answers beside it, behind the
-// `server` feature. What only the server knows reaches them through
-// `HealthCheck`.
 #[cfg(feature = "server")]
-mod health_server {
-    use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+mod server {
+    use std::{future::Future, pin::Pin, sync::Arc};
 
     use axum::{http::StatusCode, routing::get};
-    use futures_util::future::{Either, select};
 
     use super::{HEALTH_LIVE_PATH, HEALTH_READY_PATH};
 
-    /// What a failed [`HealthCheck::check`] carries: why, for the log.
+    /// What a failed [`HealthCheck::check`] carries: why.
     pub type HealthCheckError = Box<dyn std::error::Error + Send + Sync>;
 
-    /// A check of something the server depends on -- for the broker, its policy
-    /// and secrets -- for a health endpoint to ask. `/health/ready` asks every
-    /// one given to [`HealthHandler::readiness`].
+    /// A check of something the server depends on, the policy or a secret, for
+    /// a health endpoint to ask. `/health/ready` asks every one given to
+    /// [`HealthHandler::readiness`].
     pub trait HealthCheck: Send + Sync + 'static {
         /// `Ok` when what it checks is healthy; the error says why not.
         fn check(&self) -> impl Future<Output = Result<(), HealthCheckError>> + Send;
@@ -102,7 +102,7 @@ mod health_server {
 
     /// [`HealthCheck`] with its future boxed, which is what lets a
     /// [`HealthHandler`] hold checks of any type without being generic over
-    /// them -- while an implementor still writes a plain `async fn check`.
+    /// them, while an implementor still writes a plain `async fn check`.
     trait DynHealthCheck: Send + Sync {
         fn check(&self) -> Pin<Box<dyn Future<Output = Result<(), HealthCheckError>> + Send + '_>>;
     }
@@ -113,11 +113,6 @@ mod health_server {
         }
     }
 
-    /// How long readiness waits for the checks. Well inside a probe's own
-    /// timeout, so a check that hangs -- a secret store that doesn't answer --
-    /// answers 503 in time rather than not at all.
-    pub const READY_TIMEOUT: Duration = Duration::from_secs(2);
-
     /// Answers the health endpoints, [`HEALTH_LIVE_PATH`] and
     /// [`HEALTH_READY_PATH`].
     ///
@@ -125,7 +120,7 @@ mod health_server {
     /// anything: an outage behind it should take the server out of rotation,
     /// not have it restarted. Readiness asks every check given with
     /// [`readiness`](Self::readiness), and is ready only while all of them
-    /// pass -- with none, whenever it is live.
+    /// pass: with none, whenever it is live.
     #[derive(Clone, Default)]
     pub struct HealthHandler {
         checks: Vec<Arc<dyn DynHealthCheck>>,
@@ -139,7 +134,7 @@ mod health_server {
         }
 
         /// Ask `check` too before answering ready: one per thing the server
-        /// cannot serve without.
+        /// can't serve without.
         #[must_use]
         pub fn readiness(mut self, check: impl HealthCheck) -> Self {
             self.checks.push(Arc::new(check));
@@ -161,39 +156,23 @@ mod health_server {
             StatusCode::OK
         }
 
-        /// Readiness: 200 when every check passes within [`READY_TIMEOUT`],
-        /// all of them together, and 503 otherwise, with why logged -- the
-        /// probe's caller sees only the code.
-        ///
-        /// The timeout is futures-timer's rather than tokio's, so it also runs
-        /// in a Worker, which has no tokio runtime.
+        /// Readiness: 200 when every check passes, all of them together, and
+        /// 503 otherwise. The probe's caller sees only the code. Unlike a
+        /// server with a runtime to time out on, this waits for the checks
+        /// however long they take: a Worker has no timer of its own here, and
+        /// the platform bounds the request.
         pub async fn ready(&self) -> StatusCode {
-            let checks = async {
-                for check in &self.checks {
-                    check.check().await?;
-                }
-                Ok::<(), HealthCheckError>(())
-            };
-
-            let timeout = futures_timer::Delay::new(READY_TIMEOUT);
-            match select(std::pin::pin!(checks), timeout).await {
-                Either::Left((Ok(()), _)) => StatusCode::OK,
-                Either::Left((Err(error), _)) => {
-                    tracing::warn!(%error, "not ready");
-                    StatusCode::SERVICE_UNAVAILABLE
-                }
-                Either::Right(_) => {
-                    tracing::warn!(timeout = ?READY_TIMEOUT, "not ready: no answer in time");
-                    StatusCode::SERVICE_UNAVAILABLE
+            for check in &self.checks {
+                if check.check().await.is_err() {
+                    return StatusCode::SERVICE_UNAVAILABLE;
                 }
             }
+            StatusCode::OK
         }
     }
 
     #[cfg(test)]
     mod tests {
-        use std::time::Instant;
-
         use super::*;
 
         /// A check that answers at once, as told.
@@ -206,15 +185,6 @@ mod health_server {
                 } else {
                     Err("the broker token can't be read".into())
                 }
-            }
-        }
-
-        /// A check that never answers.
-        struct Hangs;
-
-        impl HealthCheck for Hangs {
-            async fn check(&self) -> Result<(), HealthCheckError> {
-                std::future::pending().await
             }
         }
 
@@ -240,18 +210,6 @@ mod health_server {
 
             assert_eq!(both.ready().await, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(HealthHandler::new().ready().await, StatusCode::OK);
-        }
-
-        /// A check that hangs is cut off at [`READY_TIMEOUT`], not waited on.
-        #[tokio::test]
-        async fn ready_is_unavailable_in_time_when_the_check_hangs() {
-            let started = Instant::now();
-
-            assert_eq!(
-                HealthHandler::new().readiness(Hangs).ready().await,
-                StatusCode::SERVICE_UNAVAILABLE
-            );
-            assert!(started.elapsed() < READY_TIMEOUT + Duration::from_secs(1));
         }
     }
 }

@@ -384,7 +384,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 | `GET` | `/.well-known/openid-configuration` | public | The broker's issuer, key and endpoint URLs, for services that verify [its tokens](#tokens-for-other-services). |
 | `GET` | `/.well-known/jwks` | public | The public key the broker signs its own tokens with. Empty without `CF_OIDC_EXCHANGE_API_SIGNING_KEY`. |
 | `GET` | `/health/live` | public | `200` whenever the Worker serves HTTP. |
-| `GET` | `/health/ready` | public | `200` if the policy loads and the broker token (and the signing key, when a profile needs it) can be read within 2 seconds, else `503` with no body. Why goes to Workers Logs (`not ready: …`). |
+| `GET` | `/health/ready` | public | `200` if the policy loads and the broker token (and the signing key, when a profile needs it) can be read, else `503` with no body. Why goes to Workers Logs (`not ready: …`). |
 
 ### Token exchange
 
