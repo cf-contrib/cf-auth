@@ -21,5 +21,15 @@ binding = "CF_OIDC_BROKER_TOKEN"
 store_id = "00000000000000000000000000000000"
 secret_name = "cf-auth-broker-token"
 
+# Only for profiles with an `audience`: the Ed25519 key the broker signs its own
+# tokens with, as a PKCS#8 PEM. Uncomment after creating it in the local store:
+#   openssl genpkey -algorithm ed25519 -out signing-key.pem
+#   wrangler secrets-store secret create <store-id> --name cf-auth-signing-key --scopes workers
+# and paste the PEM when prompted.
+# [[secrets_store_secrets]]
+# binding = "CF_OIDC_BROKER_SIGNING_KEY"
+# store_id = "00000000000000000000000000000000"
+# secret_name = "cf-auth-signing-key"
+
 [vars]
 CF_OIDC_BROKER_ACCOUNT_ID = "00000000000000000000000000000000"

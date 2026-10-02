@@ -3,6 +3,9 @@ import { HttpError } from "./errors.js";
 
 export const DEFAULT_ISSUER = "https://token.actions.githubusercontent.com";
 
+/** The audience for Cloudflare API tokens and R2 credentials, and every profile's default. */
+export const CLOUDFLARE_AUDIENCE = "https://api.cloudflare.com";
+
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
@@ -131,6 +134,8 @@ const Profile = v.strictObject({
   subject: v.optional(v.picklist(["actions", "users"], "must be actions or users"), "actions"),
   // Off switch for incidents: the profile stays in the policy but never matches.
   enabled: v.optional(v.boolean("must be true or false"), true),
+  // Another service the broker issues its own token for, instead of Cloudflare credentials.
+  audience: v.optional(Origin),
   match: v.optional(v.record(v.pipe(v.string(), v.regex(/^[a-z_]+$/, "must be a claim name")), ClaimValue), {}),
   // For everything the profile hands out: the token and the buckets' credentials.
   ttl: v.optional(Duration),
@@ -180,6 +185,8 @@ export interface Profile {
   subject: Subject;
   /** A disabled profile never matches, even when a request names it. */
   enabled: boolean;
+  /** What the profile issues for: Cloudflare credentials, or the broker's own token for this service. */
+  audience: string;
   /** All keys must match (AND). Always includes `repository_owner_id`. */
   match: Record<string, string>;
   ttl: number;
@@ -287,7 +294,14 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
     }
 
     const { token, buckets } = profile;
-    if (!token && !buckets) issues.push(`${at}: must have a token, buckets or both`);
+    const audience = profile.audience ?? CLOUDFLARE_AUDIENCE;
+    if (audience === CLOUDFLARE_AUDIENCE) {
+      if (!token && !buckets) issues.push(`${at}: must have a token, buckets or both`);
+    } else {
+      // The broker signs its own token for the service; Cloudflare credentials are another profile's job.
+      if (token || buckets) issues.push(`${at}: a profile for ${audience} can't have a token or buckets`);
+      if (audience === github.audience) issues.push(`${at}.audience: must be another service, not the broker itself`);
+    }
 
     token?.policies.forEach((p, j) => {
       // Tokens are minted in one account; another account's ID is a copy-paste mistake.
@@ -337,6 +351,7 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       name: profile.name,
       subject: profile.subject,
       enabled: profile.enabled,
+      audience,
       match: { ...profile.match, repository_owner_id: github.owner_id },
       ttl,
       max_ttl,
@@ -456,22 +471,30 @@ export function matches(profile: Profile, claims: Claims): boolean {
 }
 
 /**
- * Picks the profile to mint with, among those for `subject` only, or throws a `403`
- * whose reason goes to the audit log.
+ * Picks the profile to issue with, among those for `subject` and `audience` only, or throws
+ * a `403` whose reason goes to the audit log.
  */
-export function selectProfile(policy: Policy, subject: Subject, claims: Claims, requested?: string): Profile {
-  const profiles = policy.profiles.filter((p) => p.subject === subject);
+export function selectProfile(
+  policy: Policy,
+  subject: Subject,
+  claims: Claims,
+  requested?: string,
+  audience = CLOUDFLARE_AUDIENCE,
+): Profile {
+  const profiles = policy.profiles.filter((p) => p.subject === subject && p.audience === audience);
   if (requested !== undefined) {
+    const named = policy.profiles.find((p) => p.name === requested);
     const profile = profiles.find((p) => p.name === requested);
     if (!profile?.enabled || !matches(profile, claims)) {
-      const known = policy.profiles.some((p) => p.name === requested);
-      const detail = profile
-        ? profile.enabled
-          ? undefined
-          : `profile ${requested} is disabled`
-        : known
+      const detail = !named
+        ? `unknown profile ${requested}`
+        : named.subject !== subject
           ? `profile ${requested} isn't for ${subject}`
-          : `unknown profile ${requested}`;
+          : named.audience !== audience
+            ? `profile ${requested} isn't for ${audience}`
+            : named.enabled
+              ? undefined
+              : `profile ${requested} is disabled`;
       throw new HttpError("forbidden", "profile_mismatch", detail);
     }
     return profile;

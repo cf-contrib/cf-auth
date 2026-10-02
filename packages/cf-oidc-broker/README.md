@@ -60,6 +60,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 |---|---|---|---|
 | `CF_OIDC_BROKER_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
 | `CF_OIDC_BROKER_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 permissions covering what profiles' `buckets` delegate. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
+| `CF_OIDC_BROKER_SIGNING_KEY` | Secrets Store secret | for profiles with an `audience` | Ed25519 private key, as a PKCS#8 PEM, the broker signs [its own tokens](#tokens-for-other-services) with. Without it the broker issues none, publishes no keys, and those profiles fail closed with `500`. |
 
 The hourly cron (`17 * * * *` in the examples) deletes expired `cf-oidc:*` tokens.
 
@@ -141,7 +142,7 @@ profiles:
         prefixes: ["{repository_owner_id}/{repository_id}/"]
 ```
 
-A profile has a `token`, `buckets`, or both. It's for GitHub Actions jobs unless it says `subject: users`.
+A profile has a `token`, `buckets`, or both. It's for GitHub Actions jobs unless it says `subject: users`. A profile with an `audience` instead issues the broker's own token for that service: see [Tokens for other services](#tokens-for-other-services).
 
 To switch a profile off, for example during an incident, set `enabled: false`. It stays in the policy but never matches, and a request naming it is a `403`.
 
@@ -236,6 +237,37 @@ Each entry in `buckets` gets the job [temporary R2 credentials](https://develope
 
 **What `buckets` doesn't cover:** admin operations such as creating or listing buckets. For those, grant R2 permissions in the profile's `token` and derive S3 credentials from `CLOUDFLARE_API_TOKEN` in a step: the access key ID is the token's ID, and the secret is the SHA-256 of the token value. Buckets in a jurisdiction (`eu`, `fedramp`) need a different endpoint than the one the broker returns.
 
+### Tokens for other services
+
+A profile with `audience: <service URL>` gives the caller a token the broker signs itself, for another service that trusts the broker, such as [cf-nix-cache](https://github.com/cf-contrib/cf-nix-cache). It has no `token` or `buckets`: who may use the service is decided by the profile's `match`, like any other.
+
+```yaml
+  - name: nix-push
+    audience: https://cf-nix-cache.example.com
+    match:
+      repository_id: "200000003"
+      ref: refs/heads/main
+    ttl: 15m
+```
+
+The caller asks for it with [`audience`](#token-exchange) set to the service's URL, and gets an Ed25519-signed JWT (`alg: EdDSA`):
+
+- `iss` is the broker's URL (`github.audience`), `aud` the service, and `sub` GitHub's `sub` for a job or `user:<actor_id>` for a person.
+- The verified claims are copied under GitHub's names, so a service can keep matching on them: `repository`, `repository_id`, `repository_owner`, `repository_owner_id`, `ref`, `ref_type`, `environment`, `event_name`, `workflow_ref`, `job_workflow_ref`, `run_id`, `run_attempt`, `runner_environment`, `actor`, `actor_id` and, for a person, `repository_permission`. Plus `profile` and a unique `jti`.
+- It lasts the profile's `ttl`, but never past the job's OIDC token, which lasts minutes. Exchange again for a fresh one: there are no refresh tokens.
+
+Services find the public key at [`/.well-known/jwks`](#http-api), or through [`/.well-known/openid-configuration`](#http-api), and should check `iss`, `aud`, `exp` and the `EdDSA` algorithm.
+
+The key is an Ed25519 private key in Secrets Store, bound as `CF_OIDC_BROKER_SIGNING_KEY` (`signing_key_secret` in the [Terraform module](terraform)):
+
+```sh
+openssl genpkey -algorithm ed25519 -out signing-key.pem
+wrangler secrets-store secret create <store-id> --name cf-auth-signing-key --scopes workers   # paste the PEM
+rm signing-key.pem
+```
+
+Its `kid` is the public key's thumbprint, so replacing the secret rotates the key. Tokens signed with the old key stop verifying once services refetch the JWKS, and they're short-lived anyway.
+
 ### TTL and names
 
 - Durations look like `90s`, `15m`, `1h`, `1h30m`.
@@ -253,6 +285,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 4. **TTLs are capped.** `max_ttl` is at most 24h, and `ttl` can't exceed it.
 5. **The audience must be custom.** `github.audience` is required and can't be GitHub's default (`https://github.com/<owner>`), so a JWT requested for AWS or GCP can't be replayed here.
 6. **People and jobs are kept apart.** Each only matches profiles for its own subject. A user profile must require a role on the repo, since the person picks the repo, and can't match claims only jobs have.
+7. **Audiences are kept apart.** A request only matches profiles for its `audience`. A profile for another service can't hand out Cloudflare credentials, and its audience must be a bare origin other than the broker's own.
 
 ## HTTP API
 
@@ -260,6 +293,8 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 |---|---|---|---|
 | `POST` | `/oauth/token` | `subject_token` in the body | [Token exchange](#token-exchange) (RFC 8693) for jobs and people alike. What the action uses. |
 | `POST` | `/oauth/revoke` | `token` in the body | [Revoke](#revocation) (RFC 7009) a token the broker minted. What the action's post step uses. |
+| `GET` | `/.well-known/openid-configuration` | public | The broker's issuer, key and endpoint URLs, for services that verify [its tokens](#tokens-for-other-services). |
+| `GET` | `/.well-known/jwks` | public | The public key the broker signs its own tokens with. Empty without `CF_OIDC_BROKER_SIGNING_KEY`. |
 | `GET` | `/healthz` | public | `200` if the policy and bindings are valid, else `500`. Never shows the policy. |
 
 ### Token exchange
@@ -279,13 +314,13 @@ curl -sS https://cf-oidc-broker.example.com/oauth/token \
 | `grant_type` | `urn:ietf:params:oauth:grant-type:token-exchange` |
 | `subject_token` | A GitHub Actions OIDC token, or a person's GitHub user token |
 | `subject_token_type` | `urn:ietf:params:oauth:token-type:id_token` or `…:jwt` for a job, `urn:ietf:params:oauth:token-type:access_token` for a person |
-| `audience` | Optional. `https://api.cloudflare.com`, the default and so far the only one |
-| `requested_token_type` | Optional. `urn:ietf:params:oauth:token-type:access_token` or `urn:cf-oidc-auth:params:oauth:token-type:r2-credentials` |
+| `audience` | Optional. `https://api.cloudflare.com`, the default, for Cloudflare credentials; or a service's URL for [the broker's own token](#tokens-for-other-services) |
+| `requested_token_type` | Optional. For Cloudflare, `urn:ietf:params:oauth:token-type:access_token` or `urn:cf-oidc-auth:params:oauth:token-type:r2-credentials`; for a service, `urn:ietf:params:oauth:token-type:jwt` or `…:access_token` |
 | `profile` | Optional. Profile to use; if omitted, exactly one profile must match |
 | `ttl` | Optional. Requested lifetime such as `10m` or `1h`, clamped to the profile's `max_ttl` |
 | `repository` | Required for a person: `owner/name` or the repo's numeric ID |
 
-Delegation (`actor_token`), other audiences and other token types are refused with `400`, not ignored. A person gets `404` when no enabled profile is for people.
+Delegation (`actor_token`), audiences no profile is for, and other token types are refused with `400`, not ignored. A person gets `404` when no enabled profile is for people.
 
 The response has the standard fields plus the broker's own:
 
@@ -303,7 +338,9 @@ The response has the standard fields plus the broker's own:
 }
 ```
 
-`buckets` is there when the profile has buckets. A profile with only buckets has no single bearer token, so it returns no `access_token` or `token_id`, with `issued_token_type` `urn:cf-oidc-auth:params:oauth:token-type:r2-credentials` and `token_type` `N_A`. Errors are the same as on every route.
+`buckets` is there when the profile has buckets. A profile with only buckets has no single bearer token, so it returns no `access_token` or `token_id`, with `issued_token_type` `urn:cf-oidc-auth:params:oauth:token-type:r2-credentials` and `token_type` `N_A`. For a service's audience, `access_token` is the broker's JWT, `issued_token_type` is `urn:ietf:params:oauth:token-type:jwt`, and there's no `token_id`, `account_id` or `buckets`.
+
+Errors are the same as on every route.
 
 ### Revocation
 
@@ -338,6 +375,8 @@ Bodies are deliberately generic; the reason goes to the audit log.
 | Stolen R2 credentials | Limited to one bucket and the repo's prefixes, and short-lived. They can't be revoked one by one; rolling the broker token revokes all of them |
 | One repo reaches another's R2 keys | Prefixes must end in `/`, placeholders fill whole segments from verified claims with a fixed character set, and both the template and the result are checked. Prefer ID-based prefixes |
 | Stolen JWT replayed | Short JWT lifetime and a custom audience |
+| Stolen broker-issued token | Valid for one service (`aud`), and never longer than the job's OIDC token it came from |
+| Signing key exfiltrated | Kept in Secrets Store like the broker token. Replace the secret to rotate it: the new key gets a new `kid`, and services stop accepting the old one once they refetch the JWKS |
 | Stolen gh token | Only gets what user profiles give its owner, for repos they can access. Keep those profiles read-only, with short TTLs (`1h` cap by default). Revoking the token on GitHub cuts it off at the next mint |
 | A person picks a repo they shouldn't reach | The broker looks up their role on it with GitHub, and user profiles must require one. Prefixes come from GitHub's answer, not the request |
 | Broker token exfiltrated | Kept in Secrets Store, so it isn't in Terraform state or CI. Only code running in the Worker can read it. Restrict who can deploy Workers in the broker's account, rotate the broker token, and consider a dedicated account per trust domain. |
@@ -345,7 +384,7 @@ Bodies are deliberately generic; the reason goes to the audit log.
 
 ### Audit log
 
-Every mint, denial and revoke emits one JSON line to Workers Logs, with `subject` (`actions` or `users`) for mints and denials. Token values, R2 secrets, JWTs and gh tokens are never logged:
+Every mint, issue, denial and revoke emits one JSON line to Workers Logs, with `subject` (`actions` or `users`) for mints and denials. Token values, R2 secrets, JWTs and gh tokens are never logged:
 
 ```json
 {"event":"token.mint","subject":"actions","profile":"workers-deploy","repository":"example-org/api","repository_id":"200000003","ref":"refs/heads/main","environment":"prod","run_id":"1234567890","run_attempt":"1","actor_id":"300000004","token_id":"<token-id>","expires_on":"2026-09-28T12:15:00Z"}
@@ -357,13 +396,19 @@ R2 credentials are `r2.issued`, with the bucket, the filled-in prefixes and the 
 {"event":"r2.issued","subject":"actions","profile":"terraform-state","repository":"example-org/api","repository_id":"200000003","ref":"refs/heads/main","run_id":"1234567890","run_attempt":"1","actor_id":"300000004","bucket":"org-terraform-state","prefixes":["100000001/200000003/"],"permission":"object-read-write","expires_on":"2026-09-28T12:15:00Z"}
 ```
 
+A token for another service is `token.issue`, with the audience and the token's `jti`, never the token:
+
+```json
+{"event":"token.issue","subject":"actions","profile":"nix-push","repository":"example-org/api","repository_id":"200000003","ref":"refs/heads/main","run_id":"1234567890","run_attempt":"1","actor_id":"300000004","audience":"https://cf-nix-cache.example.com","jti":"<uuid>","expires_on":"2026-09-28T12:05:00Z"}
+```
+
 When an isolate first loads the policy, it logs `policy.loaded` with the profile count, e.g. `{"event":"policy.loaded","profiles":3}`. Check this line after deploying.
 
 Denials are `token.deny` with a `reason`:
 
-- **Request problems:** `invalid_jwt`, `invalid_user_token`, `installation_token`, `invalid_body`, `invalid_ttl`, `no_user_profiles`
+- **Request problems:** `invalid_jwt`, `invalid_user_token`, `installation_token`, `invalid_body`, `invalid_ttl`, `no_user_profiles`, `unsupported_grant_type`, `unsupported_subject_token_type`, `unsupported_requested_token_type`, `actor_token_unsupported`, `invalid_target`
 - **Policy or GitHub didn't allow it:** `no_match`, `ambiguous`, `profile_mismatch`, `invalid_r2_prefix`, `repository_forbidden`, `teams_forbidden`, `sso_required`
-- **Configuration or upstream errors:** `broker_token_unavailable`, `unknown_permission`, `ambiguous_permission`, `jwks_unavailable`, `github_unavailable`, `cloudflare_error`
+- **Configuration or upstream errors:** `broker_token_unavailable`, `signing_key_unavailable`, `unknown_permission`, `ambiguous_permission`, `jwks_unavailable`, `github_unavailable`, `cloudflare_error`
 
 ## Limitations
 
@@ -371,6 +416,7 @@ Denials are `token.deny` with a `reason`:
 - **GitHub only.** Other OIDC issuers (GitLab CI, Buildkite, …) aren't supported yet, and people need a github.com account: GitHub Enterprise Server's API isn't supported for user profiles.
 - **People use their gh token.** It's sent to the broker as is. A GitHub App, whose short-lived tokens only it accepts, may come later.
 - **A person's role and teams are checked on every mint.** Each mint makes two or three GitHub API calls with their token, which counts against their rate limit. Teams past the first 1000 aren't seen.
+- **One signing key at a time.** Rotating it can't publish the old and new keys side by side, so a token signed just before the rotation fails at a service that has already refetched the JWKS. They're short-lived, and the caller can exchange again.
 - **No JWT replay cache.** A stolen JWT can be exchanged again until it expires. The custom audience and its short lifetime limit this.
 - **Resource IDs aren't checked up front.** Apart from the account check, a wrong zone ID is only caught when Cloudflare rejects the mint (`502`).
 - **Permission names can change.** Cloudflare can rename a permission group. Profiles using the old name fail closed (`500`) until the policy is updated, and the one-hour cache can delay a fix by up to an hour per isolate.

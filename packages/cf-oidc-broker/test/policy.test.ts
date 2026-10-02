@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { HttpError } from "../src/errors.js";
 import {
+  CLOUDFLARE_AUDIENCE,
   clampTTL,
   DEFAULT_ISSUER,
   glob,
@@ -12,7 +13,16 @@ import {
   r2Prefixes,
   selectProfile,
 } from "../src/policy.js";
-import { ACCOUNT_ID, githubClaims, OWNER_ID, TEAM_ID, type TestPolicy, testPolicy, USER_ID } from "./helpers.js";
+import {
+  ACCOUNT_ID,
+  AUDIENCE,
+  githubClaims,
+  OWNER_ID,
+  TEAM_ID,
+  type TestPolicy,
+  testPolicy,
+  USER_ID,
+} from "./helpers.js";
 
 const policy = () => testPolicy(DEFAULT_ISSUER);
 
@@ -326,6 +336,54 @@ describe("matching", () => {
     expect(clampTTL("10h", r)).toBe(60 * 60_000);
     expect(denial(() => clampTTL("forever", r))).toBe("invalid_ttl");
     expect(denial(() => clampTTL("30s", r))).toBe("invalid_ttl");
+  });
+});
+
+describe("service audiences", () => {
+  const CACHE = "https://cf-nix-cache.example.com";
+
+  /** The test policy plus a profile issuing the broker's own token for the cache. */
+  function withService(extra: Record<string, unknown> = {}) {
+    const p = policy();
+    p.profiles.push({ name: "nix-push", audience: CACHE, match: { ref: "refs/heads/main" }, ...extra } as never);
+    return p;
+  }
+
+  it("gives every other profile the Cloudflare audience", () => {
+    const loaded = loadPolicy(withService());
+    expect(loaded.profiles.find((p) => p.name === "nix-push")?.audience).toBe(CACHE);
+    expect(loaded.profiles.filter((p) => p.audience === CLOUDFLARE_AUDIENCE).length).toBe(loaded.profiles.length - 1);
+  });
+
+  it("refuses a token or buckets on a service profile", () => {
+    expect(issues(withService({ buckets: [{ name: "org-artifacts", permission: "object-read-only" }] }))).toEqual([
+      `profiles.3 (nix-push): a profile for ${CACHE} can't have a token or buckets`,
+    ]);
+  });
+
+  it("refuses the broker itself as an audience", () => {
+    const p = withService();
+    (p.profiles[3] as Record<string, unknown>).audience = AUDIENCE;
+    expect(issues(p)).toEqual(["profiles.3 (nix-push).audience: must be another service, not the broker itself"]);
+  });
+
+  it("refuses an audience that isn't a bare origin", () => {
+    const p = withService();
+    (p.profiles[3] as Record<string, unknown>).audience = `${CACHE}/upload`;
+    expect(issues(p).join()).toMatch(/profiles\.3\.audience: must be a bare origin/);
+  });
+
+  it("only selects profiles for the requested audience", () => {
+    const loaded = loadPolicy(withService());
+    expect(selectProfile(loaded, "actions", githubClaims()).name).toBe("workers-deploy");
+    expect(selectProfile(loaded, "actions", githubClaims(), undefined, CACHE).name).toBe("nix-push");
+    let detail: string | undefined;
+    try {
+      selectProfile(loaded, "actions", githubClaims(), "workers-deploy", CACHE);
+    } catch (err) {
+      detail = (err as HttpError).detail;
+    }
+    expect(detail).toBe(`profile workers-deploy isn't for ${CACHE}`);
   });
 });
 

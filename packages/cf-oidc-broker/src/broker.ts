@@ -3,20 +3,31 @@ import type { BucketCredentials, ErrorResponse, TokenExchangeResponse } from "./
 import { audit } from "./audit.js";
 import { HttpError } from "./errors.js";
 import { verifyGitHubUser } from "./github.js";
+import { ALGORITHM, issueJwt, signingKey } from "./issuer.js";
 import { verifyGitHubJWT } from "./jwt.js";
 import {
+  CLOUDFLARE_AUDIENCE,
   type Claims,
   clampTTL,
   loadPolicy,
   type Policy,
   PolicyError,
+  type Profile,
   r2Prefixes,
   type Subject,
   selectProfile,
 } from "./policy.js";
 import { issueR2 } from "./r2.js";
-import { ACCESS_TOKEN, R2_CREDENTIALS, readExchangeRequest, readRevokeRequest, type TokenFields } from "./requests.js";
-import { cleanup, discard, type MintedToken, mint, revoke, tokenName } from "./tokens.js";
+import {
+  ACCESS_TOKEN,
+  JWT,
+  R2_CREDENTIALS,
+  readExchangeRequest,
+  readRevokeRequest,
+  TOKEN_EXCHANGE,
+  type TokenFields,
+} from "./requests.js";
+import { cleanup, discard, type MintedToken, mint, revoke, rfc3339, tokenName } from "./tokens.js";
 
 export interface Env {
   /** Account the broker token belongs to and tokens are minted in. */
@@ -27,6 +38,12 @@ export interface Env {
    * not used.
    */
   CF_OIDC_BROKER_TOKEN: SecretsStoreSecret;
+  /**
+   * Ed25519 private key (PKCS#8 PEM) the broker signs its own tokens with, for profiles with
+   * an `audience`. Optional: without it, the broker issues none and publishes no keys. Must be
+   * a Secrets Store binding.
+   */
+  CF_OIDC_BROKER_SIGNING_KEY?: SecretsStoreSecret;
 }
 
 // Parsed once per isolate. The policy and env are fixed for the lifetime of a deployment.
@@ -76,6 +93,30 @@ async function brokerClient(env: Env): Promise<Cloudflare> {
   return new Cloudflare({ apiToken });
 }
 
+/** Public, cacheable metadata: the discovery document and the JWKS. */
+function published(body: unknown): Response {
+  return Response.json(body, { headers: { "cache-control": "public, max-age=300" } });
+}
+
+/**
+ * The broker's discovery document, so services can find its keys and endpoints. It issues
+ * tokens by exchange only, so there's no authorization endpoint: it isn't a login provider.
+ */
+function discovery(policy: Policy) {
+  const issuer = policy.github.audience;
+  return {
+    issuer,
+    jwks_uri: `${issuer}/.well-known/jwks`,
+    token_endpoint: `${issuer}/oauth/token`,
+    revocation_endpoint: `${issuer}/oauth/revoke`,
+    grant_types_supported: [TOKEN_EXCHANGE],
+    token_endpoint_auth_methods_supported: ["none"],
+    revocation_endpoint_auth_methods_supported: ["none"],
+    subject_types_supported: ["public"],
+    id_token_signing_alg_values_supported: [ALGORITHM],
+  };
+}
+
 function json(status: number, body: unknown): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store" } });
 }
@@ -111,15 +152,55 @@ async function verifyUser(policy: Policy, token: string, fields: TokenFields): P
 interface Caller {
   subject: Subject;
   claims: Claims;
+  audience: string;
   fields: TokenFields;
 }
 
-/** Authenticates the caller, whose token is in the body. Nothing is verified before the body parses. */
+/**
+ * Authenticates the caller, whose token is in the body. Nothing is verified before the body
+ * parses and the audience is one the policy knows.
+ */
 async function authenticate(request: Request, policy: Policy): Promise<Caller> {
-  const { subject, token, fields } = await readExchangeRequest(request);
+  const { subject, token, audience, fields } = await readExchangeRequest(request);
+  if (audience !== CLOUDFLARE_AUDIENCE && !policy.profiles.some((p) => p.audience === audience)) {
+    throw new HttpError("bad_request", "invalid_target", audience);
+  }
   const claims =
     subject === "actions" ? await verifyGitHubJWT(token, policy.github) : await verifyUser(policy, token, fields);
-  return { subject, claims, fields };
+  return { subject, claims, audience, fields };
+}
+
+/** Issues the broker's own token for a profile with another service's `audience`. */
+async function serviceToken(env: Env, policy: Policy, caller: Caller, profile: Profile, ttl: number) {
+  const key = await signingKey(env.CF_OIDC_BROKER_SIGNING_KEY);
+  const { claims } = caller;
+  const sub = caller.subject === "users" ? `user:${claims.actor_id}` : claims.sub;
+  const issued = await issueJwt(key, {
+    issuer: policy.github.audience,
+    audience: profile.audience,
+    subject: typeof sub === "string" ? sub : `repo:${claims.repository}`,
+    profile: profile.name,
+    claims,
+    ttl,
+    // A job's OIDC token has an expiry; a person's GitHub token doesn't.
+    notAfter: typeof claims.exp === "number" ? claims.exp : undefined,
+  });
+  audit("token.issue", {
+    subject: caller.subject,
+    profile: profile.name,
+    claims,
+    audience: profile.audience,
+    jti: issued.jti,
+    expires_on: rfc3339(issued.expiresAt * 1000),
+  });
+  return {
+    access_token: issued.jwt,
+    issued_token_type: JWT,
+    token_type: "Bearer",
+    expires_in: issued.expiresAt - Math.floor(Date.now() / 1000),
+    expires_at: issued.expiresAt,
+    profile: profile.name,
+  } satisfies TokenExchangeResponse;
 }
 
 /** What a token exchange hands out. */
@@ -158,9 +239,12 @@ async function handleToken(request: Request, env: Env, raw: unknown): Promise<Re
     ({ subject, claims } = caller);
     const { fields } = caller;
     profile = fields.profile;
-    const selected = selectProfile(policy, caller.subject, caller.claims, fields.profile);
+    const selected = selectProfile(policy, caller.subject, caller.claims, fields.profile, caller.audience);
     profile = selected.name;
     const ttl = clampTTL(fields.ttl, selected);
+    if (selected.audience !== CLOUDFLARE_AUDIENCE)
+      return json(200, await serviceToken(env, policy, caller, selected, ttl));
+
     // Filled in before anything is minted, so an unusable claim leaves nothing behind.
     const verified = caller.claims;
     const buckets = (selected.buckets ?? []).map((bucket) => ({ bucket, prefixes: r2Prefixes(bucket, verified) }));
@@ -239,10 +323,28 @@ export function createBroker(policy: unknown) {
           return handleToken(request, env, policy);
         case "POST /oauth/revoke":
           return handleRevoke(request, env, policy);
-        case "GET /healthz":
+        case "GET /.well-known/openid-configuration":
+          try {
+            return published(discovery(config(policy, env)));
+          } catch (err) {
+            return failure(err);
+          }
+        case "GET /.well-known/jwks":
           try {
             config(policy, env);
+            // Without the binding the broker issues no tokens of its own, so there's nothing to publish.
+            const secret = env.CF_OIDC_BROKER_SIGNING_KEY;
+            return published({ keys: secret === undefined ? [] : [(await signingKey(secret)).publicJwk] });
+          } catch (err) {
+            return failure(err);
+          }
+        case "GET /healthz":
+          try {
+            const loaded = config(policy, env);
             await brokerClient(env); // a missing Secrets Store secret shows up here, not on the first mint
+            if (loaded.profiles.some((p) => p.audience !== CLOUDFLARE_AUDIENCE)) {
+              await signingKey(env.CF_OIDC_BROKER_SIGNING_KEY);
+            }
             return json(200, { status: "ok" });
           } catch (err) {
             return failure(err);

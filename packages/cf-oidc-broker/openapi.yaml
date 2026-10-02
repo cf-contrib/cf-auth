@@ -5,8 +5,10 @@ info:
   title: cf-oidc-broker
   version: "1"
   description: >-
-    Exchanges a GitHub identity for short-lived Cloudflare credentials (RFC 8693 token
-    exchange at `POST /oauth/token`), and revokes them (RFC 7009 at `POST /oauth/revoke`).
+    Exchanges a GitHub identity for short-lived Cloudflare credentials, or for a token the
+    broker signs for another service (RFC 8693 token exchange at `POST /oauth/token`), and
+    revokes Cloudflare tokens (RFC 7009 at `POST /oauth/revoke`). Services verify the
+    broker's tokens with the keys at `/.well-known/jwks`.
 servers:
   - url: https://cf-oidc-broker.example.com
 paths:
@@ -80,6 +82,35 @@ paths:
           $ref: "#/components/responses/Error"
         "502":
           $ref: "#/components/responses/Error"
+  /.well-known/openid-configuration:
+    get:
+      operationId: discovery
+      summary: Where to find the broker's keys and endpoints.
+      description: >-
+        Tokens come from exchange only, so there's no authorization endpoint: the broker
+        isn't a login provider.
+      responses:
+        "200":
+          description: The discovery document. Cacheable for 5 minutes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Discovery"
+        "500":
+          $ref: "#/components/responses/Error"
+  /.well-known/jwks:
+    get:
+      operationId: jwks
+      summary: The public key the broker signs its own tokens with.
+      responses:
+        "200":
+          description: A JWK Set. Empty when no signing key is bound. Cacheable for 5 minutes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Jwks"
+        "500":
+          $ref: "#/components/responses/Error"
 components:
   responses:
     Error:
@@ -126,8 +157,11 @@ components:
           description: "`id_token` or `jwt` for a GitHub Actions OIDC token, `access_token` for a GitHub user token."
         audience:
           type: string
-          const: https://api.cloudflare.com
-          description: The default, and so far the only audience.
+          maxLength: 200
+          default: https://api.cloudflare.com
+          description: >-
+            `https://api.cloudflare.com` for Cloudflare credentials, or the URL of a service
+            the policy issues the broker's own tokens for.
         requested_token_type:
           $ref: "#/components/schemas/IssuedTokenType"
         profile:
@@ -148,13 +182,16 @@ components:
       enum:
         - urn:ietf:params:oauth:token-type:access_token
         - urn:cf-oidc-auth:params:oauth:token-type:r2-credentials
+        - urn:ietf:params:oauth:token-type:jwt
     TokenExchangeResponse:
       type: object
-      required: [issued_token_type, token_type, expires_in, expires_at, account_id, profile]
+      required: [issued_token_type, token_type, expires_in, expires_at, profile]
       properties:
         access_token:
           type: string
-          description: The Cloudflare API token. Absent for a profile with only buckets.
+          description: >-
+            The Cloudflare API token, absent for a profile with only buckets; or, for a
+            service's audience, the JWT the broker signed.
         issued_token_type:
           $ref: "#/components/schemas/IssuedTokenType"
         token_type:
@@ -172,6 +209,7 @@ components:
           description: The Cloudflare API token's ID, present with `access_token`.
         account_id:
           type: string
+          description: The Cloudflare account, for the Cloudflare audience.
         profile:
           type: string
         buckets:
@@ -202,6 +240,68 @@ components:
         expires_on:
           type: string
           format: date-time
+    Discovery:
+      type: object
+      required: [issuer, jwks_uri, token_endpoint, revocation_endpoint, grant_types_supported]
+      properties:
+        issuer:
+          type: string
+          format: uri
+        jwks_uri:
+          type: string
+          format: uri
+        token_endpoint:
+          type: string
+          format: uri
+        revocation_endpoint:
+          type: string
+          format: uri
+        grant_types_supported:
+          type: array
+          items:
+            type: string
+        token_endpoint_auth_methods_supported:
+          type: array
+          items:
+            type: string
+        revocation_endpoint_auth_methods_supported:
+          type: array
+          items:
+            type: string
+        subject_types_supported:
+          type: array
+          items:
+            type: string
+        id_token_signing_alg_values_supported:
+          type: array
+          items:
+            type: string
+    Jwks:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            type: object
+            required: [kty, crv, x, kid, alg, use]
+            properties:
+              kty:
+                type: string
+                const: OKP
+              crv:
+                type: string
+                const: Ed25519
+              x:
+                type: string
+              kid:
+                type: string
+              alg:
+                type: string
+                const: EdDSA
+              use:
+                type: string
+                const: sig
     ErrorResponse:
       type: object
       required: [error]

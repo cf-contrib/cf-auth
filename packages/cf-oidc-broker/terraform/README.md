@@ -137,6 +137,7 @@ Nothing is downloaded then.
 | `hostname` | yes | | `<worker_name>.<subdomain>.workers.dev`, or a custom domain. |
 | `zone_id` | for a custom domain | `null` | Zone ID of the zone holding a custom-domain `hostname`. |
 | `broker_token_secret` | yes | | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the broker token. With `buckets`, the token also needs R2 permissions covering what they delegate. |
+| `signing_key_secret` | for profiles with an `audience` | `null` | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the Ed25519 key the broker signs its own tokens with. See [Tokens for other services](../README.md#tokens-for-other-services). |
 | `policy_file` | yes | | Policy YAML path, rendered as a template. |
 | `policy_vars` | no | `{}` | Extra template variables for the policy. |
 | `broker_file` | no | `null` | Local `broker.js` to deploy instead of a release. |

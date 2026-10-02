@@ -61,7 +61,7 @@ resource "cloudflare_worker_version" "this" {
     },
   ]
 
-  bindings = [
+  bindings = concat([
     {
       name = "CF_OIDC_BROKER_ACCOUNT_ID"
       type = "plain_text"
@@ -74,7 +74,15 @@ resource "cloudflare_worker_version" "this" {
       store_id    = var.broker_token_secret.secret_store_id
       secret_name = var.broker_token_secret.secret_name
     },
-  ]
+    ], var.signing_key_secret == null ? [] : [
+    {
+      # The key the broker signs its own tokens with, for profiles with an audience.
+      name        = "CF_OIDC_BROKER_SIGNING_KEY"
+      type        = "secrets_store_secret"
+      store_id    = var.signing_key_secret.secret_store_id
+      secret_name = var.signing_key_secret.secret_name
+    },
+  ])
 }
 
 # Promote the new version to 100% of traffic.

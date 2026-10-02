@@ -35,6 +35,8 @@ The action and the broker, with its Terraform module, are released together from
 
 People can get credentials too, for example to run `tofu plan` locally against the shared state bucket. [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare) sends their `gh auth token` to the broker, which checks their role on the repo with GitHub and matches [`subject: users` profiles](packages/cf-oidc-broker#people).
 
+Other services can trust the broker too. A profile with an `audience` gets the caller a short-lived token the broker signs itself, for that service, which verifies it with the broker's published keys. [cf-nix-cache](https://github.com/cf-contrib/cf-nix-cache) is the first such service. See [Tokens for other services](packages/cf-oidc-broker#tokens-for-other-services).
+
 ## How it works
 
 ```mermaid
