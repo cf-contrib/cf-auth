@@ -115,6 +115,24 @@ paths:
                 $ref: "#/components/schemas/Jwks"
         "500":
           $ref: "#/components/responses/Error"
+  /healthz:
+    get:
+      operationId: health
+      tags: [ExchangeService]
+      summary: Whether the broker can serve.
+      description: >-
+        Loads the policy and reads the broker token, and the signing key when a profile
+        issues the broker's own tokens, so a missing secret shows up here rather than on
+        the first exchange.
+      responses:
+        "200":
+          description: Healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "500":
+          $ref: "#/components/responses/Error"
 components:
   responses:
     Error:
@@ -240,7 +258,7 @@ components:
           description: Filled in from the caller's claims. Empty means the whole bucket.
         endpoint:
           type: string
-          format: uri
+          description: "`https://<account_id>.r2.cloudflarestorage.com`"
         expires_on:
           type: string
           format: date-time
@@ -250,7 +268,7 @@ components:
       properties:
         issuer:
           type: string
-          format: uri
+          description: Exactly the `iss` of the broker's tokens, so no trailing slash.
         jwks_uri:
           type: string
           format: uri
@@ -305,6 +323,13 @@ components:
               use:
                 type: string
                 const: sig
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ok
     ErrorResponse:
       type: object
       required: [error]

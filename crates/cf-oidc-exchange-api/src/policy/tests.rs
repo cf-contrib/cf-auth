@@ -244,7 +244,7 @@ mod load_policy {
 
     #[test]
     fn accepts_the_example_policy_file() {
-        let example = include_str!("../../../../packages/cf-oidc-broker/src/policy.example.json");
+        let example = include_str!("../../policy.example.json");
         load(&Value::String(example.into()));
     }
 
@@ -764,6 +764,19 @@ mod load_policy {
                 (format!("com.cloudflare.api.account.{ACCOUNT_ID}")): { "com.cloudflare.api.account.zone.*": "*" },
             });
             assert!(issues(&with_resources(nested)).is_empty());
+        }
+
+        #[test]
+        fn rejects_mixing_flat_and_nested_resources() {
+            let mixed = json!({
+                (format!("com.cloudflare.api.account.{ACCOUNT_ID}")): { "com.cloudflare.api.account.zone.*": "*" },
+                (format!("com.cloudflare.api.account.zone.{ZONE_ID}")): "*",
+            });
+            let found = issues(&with_resources(mixed)).join(",");
+            assert!(
+                found.contains("profiles.1.token.policies.0.resources: must be all"),
+                "{found}"
+            );
         }
 
         #[test]
