@@ -25,6 +25,8 @@ export const STUB_BUCKET_2 = {
   session_token: "stub-r2-session-token-2",
   prefixes: [],
 };
+const ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token";
+const R2_CREDENTIALS = "urn:cf-oidc-auth:params:oauth:token-type:r2-credentials";
 /** A profile the stub answers as one with only buckets: no token, just STUB_BUCKET. */
 export const STUB_R2_PROFILE = "smoke-r2";
 /** A profile the stub answers as one with two buckets and no token. */
@@ -67,25 +69,28 @@ export function startStub({
         value: `stub-jwt.${Buffer.from(url.searchParams.get("audience") ?? "").toString("base64url")}`,
       });
     }
-    if (req.method === "POST" && url.pathname === "/v1/actions/token") {
-      if (!req.headers.authorization?.startsWith("Bearer stub-jwt.")) return send(401, { error: "unauthorized" });
+    if (req.method === "POST" && url.pathname === "/oauth/token") {
+      const exchange = body?.grant_type === "urn:ietf:params:oauth:grant-type:token-exchange";
+      const idToken = body?.subject_token_type === "urn:ietf:params:oauth:token-type:id_token";
+      if (!exchange || !idToken) return send(400, { error: "bad_request" });
+      if (!String(body?.subject_token).startsWith("stub-jwt.")) return send(401, { error: "unauthorized" });
       if (tokenStatus !== 200) return send(tokenStatus, { error: tokenStatus === 404 ? "not_found" : "forbidden" });
-      const common = { account_id: STUB_ACCOUNT_ID, expires_on: "2026-09-28T12:15:00Z" };
+      // 2026-09-28T12:15:00Z, like the stub buckets' expires_on.
+      const expires = { expires_in: 900, expires_at: 1790597700 };
+      const r2 = { ...expires, issued_token_type: R2_CREDENTIALS, token_type: "N_A", account_id: STUB_ACCOUNT_ID };
       if (body?.profile === STUB_R2_PROFILE) {
-        return send(200, { ...common, profile: STUB_R2_PROFILE, buckets: [STUB_BUCKET], ...tokenFields });
+        return send(200, { ...r2, profile: STUB_R2_PROFILE, buckets: [STUB_BUCKET], ...tokenFields });
       }
       if (body?.profile === STUB_R2_PROFILE_2) {
-        return send(200, {
-          ...common,
-          profile: STUB_R2_PROFILE_2,
-          buckets: [STUB_BUCKET, STUB_BUCKET_2],
-          ...tokenFields,
-        });
+        return send(200, { ...r2, profile: STUB_R2_PROFILE_2, buckets: [STUB_BUCKET, STUB_BUCKET_2], ...tokenFields });
       }
       return send(200, {
-        token: STUB_TOKEN,
+        access_token: STUB_TOKEN,
+        issued_token_type: ACCESS_TOKEN,
+        token_type: "Bearer",
+        ...expires,
         token_id: STUB_TOKEN_ID,
-        ...common,
+        account_id: STUB_ACCOUNT_ID,
         profile: body?.profile ?? "default",
         ...tokenFields,
       });

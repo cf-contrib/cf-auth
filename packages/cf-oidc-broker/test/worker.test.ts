@@ -2,7 +2,7 @@
 // Cloudflare API replaced by in-memory fakes.
 import { createExecutionContext, createScheduledController, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TokenResponse } from "../src/api.js";
+import type { TokenExchangeResponse, TokenResponse } from "../src/api.js";
 import { createBroker, type Env } from "../src/broker.js";
 import { clearParent } from "../src/r2.js";
 import { clearCache } from "../src/resolve.js";
@@ -832,6 +832,177 @@ describe("GET /healthz", () => {
   it("accepts an already-parsed policy (policy.json inlined by a bundler)", async () => {
     policyFile = testPolicy(ISSUER);
     expect((await call("GET", "/healthz")).status).toBe(200);
+  });
+});
+
+describe("POST /oauth/token", () => {
+  const GRANT = "urn:ietf:params:oauth:grant-type:token-exchange";
+  const ID_TOKEN = "urn:ietf:params:oauth:token-type:id_token";
+  const ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token";
+
+  /** Posts a token exchange, form-encoded as RFC 8693 has it, or as JSON. */
+  async function exchange(params: Record<string, string>, contentType = "application/x-www-form-urlencoded") {
+    const json = contentType === "application/json";
+    const request = new Request("https://cf-auth.example.com/oauth/token", {
+      method: "POST",
+      headers: { "content-type": contentType },
+      body: json ? JSON.stringify(params) : new URLSearchParams(params).toString(),
+    });
+    const worker = createBroker(policyFile);
+    return worker.fetch(request as Parameters<typeof worker.fetch>[0], env);
+  }
+
+  const forJob = async (extra: Record<string, string> = {}) => ({
+    grant_type: GRANT,
+    subject_token: await issuer.sign(),
+    subject_token_type: ID_TOKEN,
+    ...extra,
+  });
+  const deny = () => auditLines().find((l) => l.event === "token.deny");
+
+  /** Adds `profiles` to the test policy. */
+  function withProfiles(...profiles: Record<string, unknown>[]) {
+    const policy = testPolicy(ISSUER);
+    policy.profiles.push(...(profiles as TestProfile[]));
+    policyFile = JSON.stringify(policy);
+  }
+
+  it("exchanges a job's OIDC token for a Cloudflare API token", async () => {
+    const before = Math.floor(Date.now() / 1000);
+    const res = await exchange(await forJob({ profile: "workers-deploy" }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+
+    const body = (await res.json()) as TokenExchangeResponse;
+    expect(body).toEqual({
+      access_token: expect.stringMatching(/^value-/),
+      issued_token_type: ACCESS_TOKEN,
+      token_type: "Bearer",
+      expires_in: expect.any(Number),
+      expires_at: expect.any(Number),
+      token_id: expect.any(String),
+      account_id: ACCOUNT_ID,
+      profile: "workers-deploy",
+    });
+    expect(cf.tokens.get(body.token_id as string)?.name).toBe("cf-oidc:example-org/api:1234567890:1");
+    // Default ttl is 15m.
+    expect(body.expires_at - before).toBeGreaterThan(14 * 60);
+    expect(body.expires_at - before).toBeLessThanOrEqual(15 * 60 + 1);
+    expect(body.expires_in).toBeGreaterThan(14 * 60);
+    expect(body.expires_in).toBeLessThanOrEqual(15 * 60);
+    expect(auditLines().find((l) => l.event === "token.mint")).toMatchObject({
+      subject: "actions",
+      profile: "workers-deploy",
+      token_id: body.token_id,
+    });
+  });
+
+  it("accepts JSON, the jwt token type and the Cloudflare audience", async () => {
+    const res = await exchange(
+      await forJob({
+        subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
+        audience: "https://api.cloudflare.com",
+      }),
+      "application/json",
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as TokenExchangeResponse).profile).toBe("workers-deploy");
+  });
+
+  it("returns only R2 credentials for a profile without a token", async () => {
+    withProfiles({
+      name: "terraform-state",
+      match: { environment: "state" },
+      buckets: [{ name: "org-terraform-state", permission: "object-read-write", prefixes: ["{repository_id}/"] }],
+    });
+    const res = await exchange({
+      grant_type: GRANT,
+      subject_token: await issuer.sign(githubClaims({ environment: "state" })),
+      subject_token_type: ID_TOKEN,
+      profile: "terraform-state",
+    });
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as TokenExchangeResponse;
+    expect(body.access_token).toBeUndefined();
+    expect(body.token_id).toBeUndefined();
+    expect(body).toMatchObject({
+      issued_token_type: "urn:cf-oidc-auth:params:oauth:token-type:r2-credentials",
+      token_type: "N_A",
+      account_id: ACCOUNT_ID,
+      profile: "terraform-state",
+    });
+    expect(body.buckets?.map((b) => [b.name, b.prefixes])).toEqual([["org-terraform-state", ["200000003/"]]]);
+    expect(body.expires_at).toBe(Math.floor(Date.parse(body.buckets?.[0]?.expires_on as string) / 1000));
+  });
+
+  it("exchanges a person's GitHub token for the requested repo", async () => {
+    withProfiles({
+      name: "tofu-plan",
+      subject: "users",
+      match: { team_id: TEAM_ID, repository_permission: "read" },
+      buckets: [{ name: "org-terraform-state", permission: "object-read-only", prefixes: ["{repository_id}/"] }],
+    });
+    const res = await exchange({
+      grant_type: GRANT,
+      subject_token: USER_TOKEN,
+      subject_token_type: ACCESS_TOKEN,
+      repository: "example-org/api",
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TokenExchangeResponse;
+    expect(body.profile).toBe("tofu-plan");
+    expect(body.buckets?.[0]?.prefixes).toEqual(["200000003/"]);
+    expect(auditLines().find((l) => l.event === "r2.issued")).toMatchObject({ subject: "users", actor_id: USER_ID });
+  });
+
+  it.each([
+    ["another grant type", { grant_type: "client_credentials" }, "unsupported_grant_type"],
+    ["no subject token", { subject_token: "" }, "invalid_body"],
+    [
+      "an unsupported subject token type",
+      { subject_token_type: "urn:ietf:params:oauth:token-type:saml2" },
+      "unsupported_subject_token_type",
+    ],
+    ["another audience", { audience: "https://cache.example.com" }, "invalid_target"],
+    ["an actor token", { actor_token: "x", actor_token_type: ID_TOKEN }, "actor_token_unsupported"],
+    [
+      "an unsupported requested token type",
+      { requested_token_type: "urn:ietf:params:oauth:token-type:refresh_token" },
+      "unsupported_requested_token_type",
+    ],
+    ["a person without a repository", { subject_token_type: ACCESS_TOKEN }, "invalid_body"],
+  ])("400s on %s, without calling anyone", async (_, override, reason) => {
+    const res = await exchange({
+      grant_type: GRANT,
+      subject_token: "not-checked",
+      subject_token_type: ID_TOKEN,
+      ...override,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "bad_request" });
+    expect(deny()?.reason).toBe(reason);
+    expect(github.requests).toEqual([]);
+    expect(cf.requests).toEqual([]);
+  });
+
+  it("400s on a body that's neither form-encoded nor JSON", async () => {
+    const res = await exchange(await forJob(), "text/plain");
+    expect(res.status).toBe(400);
+    expect(deny()?.detail).toMatch(/content-type/);
+  });
+
+  it("401s on a token that isn't a valid OIDC token", async () => {
+    const res = await exchange({ grant_type: GRANT, subject_token: "not-a-jwt", subject_token_type: ID_TOKEN });
+    expect(res.status).toBe(401);
+    expect(deny()?.reason).toBe("invalid_jwt");
+    expect(cf.requests).toEqual([]);
+  });
+
+  it("403s on a profile that doesn't match the job", async () => {
+    const res = await exchange(await forJob({ profile: "infra-cloudflare" }));
+    expect(res.status).toBe(403);
+    expect(deny()).toMatchObject({ subject: "actions", reason: "profile_mismatch" });
   });
 });
 

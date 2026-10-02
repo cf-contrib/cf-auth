@@ -1,6 +1,6 @@
 // @ts-check
-/** @typedef {import("../../cf-oidc-broker/src/api.js").TokenRequest} TokenRequest */
-/** @typedef {import("../../cf-oidc-broker/src/api.js").TokenResponse} TokenResponse */
+/** @typedef {import("../../cf-oidc-broker/src/api.js").TokenExchangeRequest} TokenExchangeRequest */
+/** @typedef {import("../../cf-oidc-broker/src/api.js").TokenExchangeResponse} TokenExchangeResponse */
 /** @typedef {import("../../cf-oidc-broker/src/api.js").ErrorResponse} ErrorResponse */
 /** @typedef {import("../../cf-oidc-broker/src/api.js").BucketCredentials} BucketCredentials */
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
@@ -11,9 +11,12 @@ import { brokerURL, fail, idToken, input, mask, write } from "./runner.js";
 const HINTS = /** @type {Record<number, string>} */ ({
   401: "the broker rejected the OIDC token; check that broker-url matches github.audience in the policy",
   403: "no profile allows this workflow; the broker's audit log has the reason",
-  404: "the broker doesn't serve /v1/actions/token; deploy the broker from the same release as the action",
+  404: "the broker doesn't serve /oauth/token; deploy the broker from the same release as the action",
   500: "the broker is misconfigured; check its /healthz and logs",
 });
+
+/** Formats a Unix time in seconds like the broker's RFC 3339 timestamps, e.g. `2026-09-28T12:15:00Z`. */
+const rfc3339 = (/** @type {number} */ seconds) => new Date(seconds * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
 
 /** R2's bucket name rules. The name becomes a section header in the credentials file. */
 const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
@@ -36,13 +39,19 @@ try {
   const jwt = await idToken(broker.origin);
   mask(jwt);
 
-  /** @type {TokenRequest} */
-  const body = { profile: input("profile") || undefined, ttl: input("ttl") || undefined };
+  /** @type {TokenExchangeRequest} */
+  const body = {
+    grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+    subject_token: jwt,
+    subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+    profile: input("profile") || undefined,
+    ttl: input("ttl") || undefined,
+  };
 
   // No retry: minting isn't idempotent. A token orphaned by a failed request is removed by the broker's cron cleanup.
-  const response = await fetch(new URL("/v1/actions/token", broker), {
+  const response = await fetch(new URL("/oauth/token", broker), {
     method: "POST",
-    headers: { authorization: `Bearer ${jwt}`, "content-type": "application/json" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(30_000),
   });
@@ -54,10 +63,14 @@ try {
     );
   }
 
-  const t = /** @type {TokenResponse} */ (await response.json());
+  const t = /** @type {TokenExchangeResponse} */ (await response.json());
   requireStrings(t, ["account_id"]);
   // A profile with only buckets has no token.
-  if (t.token !== undefined || t.token_id !== undefined) requireStrings(t, ["token", "token_id"]);
+  if (t.access_token !== undefined || t.token_id !== undefined) {
+    requireStrings(t, ["access_token", "token_id"]);
+    if (!Number.isFinite(t.expires_at))
+      throw new Error("cf-oidc broker returned an invalid response: missing expires_at");
+  }
   const buckets = t.buckets ?? [];
   if (!Array.isArray(buckets)) throw new Error("cf-oidc broker returned an invalid response: buckets is not a list");
   buckets.forEach((b, i) => {
@@ -75,17 +88,17 @@ try {
       throw new Error(`cf-oidc broker returned an invalid response: malformed buckets.${i}`);
     }
   });
-  if (t.token === undefined && buckets.length === 0) {
+  if (t.access_token === undefined && buckets.length === 0) {
     throw new Error("cf-oidc broker returned an invalid response: missing token and buckets");
   }
 
   write("GITHUB_ENV", "CLOUDFLARE_ACCOUNT_ID", t.account_id);
-  if (t.token !== undefined && t.token_id !== undefined) {
-    mask(t.token);
-    write("GITHUB_ENV", "CLOUDFLARE_API_TOKEN", t.token);
-    write("GITHUB_STATE", "token", t.token); // read by post.js as STATE_token
+  if (t.access_token !== undefined && t.token_id !== undefined) {
+    mask(t.access_token);
+    write("GITHUB_ENV", "CLOUDFLARE_API_TOKEN", t.access_token);
+    write("GITHUB_STATE", "token", t.access_token); // read by post.js as STATE_token
     write("GITHUB_STATE", "token_id", t.token_id);
-    console.log(`cf-oidc: minted token ${t.token_id} (profile ${t.profile}, expires ${t.expires_on})`);
+    console.log(`cf-oidc: minted token ${t.token_id} (profile ${t.profile}, expires ${rfc3339(t.expires_at)})`);
   }
 
   if (buckets.length > 0) {

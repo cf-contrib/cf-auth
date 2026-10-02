@@ -155,11 +155,11 @@ The broker validates the policy on the first request. If it's invalid, the broke
 - A pattern can end in one `*` after a prefix, such as `example-org/*` or `refs/heads/release/*`, and then matches any value starting with that prefix, including across `/`. A `*` anywhere else, or on its own, is refused when the policy loads. ID claims (`*_id`) must be exact.
 - If the request names a `profile`, that profile must match. Otherwise exactly one profile must match. Both failures are a `403`.
 - Unquoted YAML numbers are accepted for IDs and compared as strings.
-- A job is only matched against profiles for `actions` (the default), and a person only against `subject: users` profiles. Naming a profile for the other subject is a `403`. The subject is also the route: jobs call `/v1/actions/token` and people `/v1/users/token`.
+- A job is only matched against profiles for `actions` (the default), and a person only against `subject: users` profiles. Naming a profile for the other subject is a `403`. On `/oauth/token`, `subject_token_type` says which: a job sends its OIDC token and a person their GitHub token. The older routes are per subject: jobs call `/v1/actions/token` and people `/v1/users/token`.
 
 ### People
 
-A `subject: users` profile gives people credentials for a repo, from their GitHub user token. The client is [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare), which sends `gh auth token` to [`POST /v1/users/token`](#http-api) with the repo to act for:
+A `subject: users` profile gives people credentials for a repo, from their GitHub user token. The client is [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare), which sends `gh auth token` to [`POST /v1/users/token`](#http-api) with the repo to act for (or, as a token exchange, to [`POST /oauth/token`](#token-exchange)):
 
 ```sh
 gh cloudflare exec --profile tofu-plan -- tofu plan
@@ -178,7 +178,7 @@ The broker asks GitHub, with the person's token, who they are, what the repo's I
 - Claims only jobs have (`ref`, `environment`, `workflow_ref`, …) can't be used in a user profile, and `team_id` and `repository_permission` can't be used in an Actions profile.
 - Bucket prefixes are filled in from the repo GitHub returned, so `{repository_owner_id}/{repository_id}/` gives a person the same prefix the repo's jobs get.
 - `max_ttl` defaults to `1h` for user profiles, even if `defaults.max_ttl` is higher. A profile can set its own.
-- GitHub App installation tokens (`ghs_…`, including `GITHUB_TOKEN`) are refused: they identify a repo, not a person. Jobs use `/v1/actions/token`.
+- GitHub App installation tokens (`ghs_…`, including `GITHUB_TOKEN`) are refused: they identify a repo, not a person. Jobs send their OIDC token instead.
 - A token that isn't authorized for an org's SAML SSO is refused with `sso_required` in the audit log.
 
 > [!WARNING]
@@ -258,10 +258,55 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
+| `POST` | `/oauth/token` | `subject_token` in the body | [Token exchange](#token-exchange) (RFC 8693) for jobs and people alike. What the action uses. |
 | `POST` | `/v1/actions/token` | `Bearer <github-oidc-jwt>` | For a GitHub Actions job: mint a token, R2 credentials, or both. Body: `{ "profile"?, "ttl"? }`. Returns `{ token?, token_id?, account_id, expires_on, profile, buckets? }`: `token` and `token_id` when the profile has a `token`, and `buckets: [{ name, access_key_id, secret_access_key, session_token, prefixes, endpoint, expires_on }]`, one entry per bucket, when it has `buckets`. |
 | `POST` | `/v1/users/token` | `Bearer <github-user-token>` | For a [person](#people): the same, for the repo in the body. Body: `{ "repository", "profile"?, "ttl"? }`, where `repository` is `owner/name` or its numeric ID. Same response. `404` if no enabled profile is for people. |
 | `POST` | `/v1/revoke` | `Bearer <minted-token>` | Revoke a token. Holding it is the proof. Returns `204`, also when it's already gone, and `403` for tokens not named `cf-oidc:*`. |
 | `GET` | `/healthz` | public | `200` if the policy and bindings are valid, else `500`. Never shows the policy. |
+
+`/v1/actions/token` and `/v1/users/token` predate `/oauth/token`, and stay until the next breaking release.
+
+### Token exchange
+
+`POST /oauth/token` is an [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693) token exchange, form-encoded or JSON. The token goes in the body, and `subject_token_type` says whose it is. [`openapi.yaml`](openapi.yaml) is the contract.
+
+```sh
+curl -sS https://cf-oidc-broker.example.com/oauth/token \
+  -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+  -d subject_token="$GITHUB_OIDC_TOKEN" \
+  -d subject_token_type=urn:ietf:params:oauth:token-type:id_token \
+  -d profile=workers-deploy
+```
+
+| Parameter | |
+|---|---|
+| `grant_type` | `urn:ietf:params:oauth:grant-type:token-exchange` |
+| `subject_token` | A GitHub Actions OIDC token, or a person's GitHub user token |
+| `subject_token_type` | `urn:ietf:params:oauth:token-type:id_token` or `…:jwt` for a job, `urn:ietf:params:oauth:token-type:access_token` for a person |
+| `audience` | Optional. `https://api.cloudflare.com`, the default and so far the only one |
+| `requested_token_type` | Optional. `urn:ietf:params:oauth:token-type:access_token` or `urn:cf-oidc-auth:params:oauth:token-type:r2-credentials` |
+| `profile`, `ttl` | As on the `/v1` routes |
+| `repository` | Required for a person: `owner/name` or the repo's numeric ID |
+
+Delegation (`actor_token`), other audiences and other token types are refused with `400`, not ignored.
+
+The response has the standard fields plus the broker's own:
+
+```json
+{
+  "access_token": "…",
+  "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+  "token_type": "Bearer",
+  "expires_in": 900,
+  "expires_at": 1790597700,
+  "token_id": "…",
+  "account_id": "0123456789abcdef0123456789abcdef",
+  "profile": "workers-deploy",
+  "buckets": [{ "name": "…", "access_key_id": "…", "secret_access_key": "…", "session_token": "…", "prefixes": ["…"], "endpoint": "…", "expires_on": "…" }]
+}
+```
+
+`buckets` is there when the profile has buckets. A profile with only buckets has no single bearer token, so it returns no `access_token` or `token_id`, with `issued_token_type` `urn:cf-oidc-auth:params:oauth:token-type:r2-credentials` and `token_type` `N_A`. Errors are the same as on every route.
 
 **Errors:** `{ "error": "<code>" }` with one of these statuses:
 

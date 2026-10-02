@@ -108,10 +108,17 @@ describe("main", () => {
 
     const oidc = stub.calls.find((c) => c.path === "/oidc");
     expect(oidc).toBeDefined();
-    const token = stub.calls.find((c) => c.path === "/v1/actions/token");
-    // The audience is the broker's origin, without the trailing slash.
-    expect(token?.authorization).toBe(`Bearer stub-jwt.${Buffer.from(stub.url).toString("base64url")}`);
-    expect(token?.body).toEqual({ profile: "workers-deploy", ttl: "10m" });
+    const token = stub.calls.find((c) => c.path === "/oauth/token");
+    // The OIDC token goes in the body, as an RFC 8693 subject token, not in a header.
+    expect(token?.authorization).toBeUndefined();
+    expect(token?.body).toEqual({
+      grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+      // The audience is the broker's origin, without the trailing slash.
+      subject_token: `stub-jwt.${Buffer.from(stub.url).toString("base64url")}`,
+      subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+      profile: "workers-deploy",
+      ttl: "10m",
+    });
   });
 
   it("omits profile and ttl when not given", async () => {
@@ -123,7 +130,11 @@ describe("main", () => {
       INPUT_TTL: "",
     });
     expect(r.code).toBe(0);
-    expect(stub.calls.find((c) => c.path === "/v1/actions/token")?.body).toEqual({});
+    expect(stub.calls.find((c) => c.path === "/oauth/token")?.body).toEqual({
+      grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+      subject_token: expect.stringMatching(/^stub-jwt\./),
+      subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+    });
   });
 
   /** @param {typeof STUB_BUCKET} b */
@@ -256,10 +267,11 @@ describe("main", () => {
   });
 
   it.each([
-    ["token", { token: undefined }],
+    ["access_token", { access_token: undefined }],
     ["token_id", { token_id: undefined }],
+    ["expires_at", { expires_at: undefined }],
     ["account_id", { account_id: undefined }],
-    ["token and buckets", { token: undefined, token_id: undefined }],
+    ["token and buckets", { access_token: undefined, token_id: undefined }],
     ["buckets.0.name", { buckets: [{ ...STUB_BUCKET, name: undefined }] }],
     ["buckets.0.session_token", { buckets: [{ ...STUB_BUCKET, session_token: undefined }] }],
     ["buckets.0.secret_access_key", { buckets: [{ ...STUB_BUCKET, secret_access_key: "" }] }],
@@ -305,7 +317,7 @@ describe("main", () => {
     const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
     expect(r.code).toBe(1);
     expect(r.stdout).toContain(
-      "::error::cf-oidc broker returned 404 (not_found): the broker doesn't serve /v1/actions/token",
+      "::error::cf-oidc broker returned 404 (not_found): the broker doesn't serve /oauth/token",
     );
   });
 
