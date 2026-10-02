@@ -288,6 +288,13 @@ pub(super) fn check(policy: &Policy) -> Vec<String> {
                 if policy.resources.is_empty() {
                     issue(format!("{at}.resources"), "must name at least one resource");
                 }
+                let nested = |value: &ResourceValue| matches!(value, ResourceValue::Nested(_));
+                if policy.resources.values().any(nested) && !policy.resources.values().all(nested) {
+                    issue(
+                        format!("{at}.resources"),
+                        "must be all \"*\" values or all nested maps, as Cloudflare takes them",
+                    );
+                }
                 for key in policy.resources.keys() {
                     if !key.starts_with("com.cloudflare.") {
                         issue(
