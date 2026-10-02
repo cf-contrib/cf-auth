@@ -207,9 +207,12 @@ dependencies = [
  "async-trait",
  "axum",
  "cf-oidc-exchange-sdk",
+ "regex",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "tower-service",
+ "url",
  "worker",
 ]
 

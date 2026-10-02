@@ -3,6 +3,8 @@
 //!
 //! It replaces `packages/cf-oidc-broker` once it passes the same tests.
 
+pub mod error;
+pub mod policy;
 mod service;
 
 use axum::response::Response as HttpResponse;
