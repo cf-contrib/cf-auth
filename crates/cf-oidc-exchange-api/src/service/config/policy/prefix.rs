@@ -1,13 +1,14 @@
 //! R2 prefixes: bucket prefix templates filled in from the caller's claims.
 //!
-//! The prefix is the only thing keeping one repo out of another's keys, so these
-//! checks run on the template when the policy loads and again on every
+//! The prefix is the only thing keeping one caller out of another's keys, so
+//! these checks run on the template when the policy loads and again on every
 //! filled-in prefix.
 
 use std::sync::LazyLock;
 
 use cf_oidc_exchange_sdk::v1::{Error, ErrorCode};
 use regex::Regex;
+use serde_json::Value;
 
 use super::{Bucket, Claims};
 
@@ -16,26 +17,13 @@ static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{([^{}]*)\}
 
 static WHOLE_PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\{[^{}]*\}$").unwrap());
 
-/// Claims a bucket prefix can be built from, and what a value must look like to be
-/// used: the characters GitHub allows in owner and repo names, or a numeric ID.
-static PREFIX_CLAIMS: LazyLock<[(&str, Regex); 4]> = LazyLock::new(|| {
-    [
-        (
-            "repository",
-            Regex::new("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$").unwrap(),
-        ),
-        ("repository_owner", Regex::new("^[A-Za-z0-9._-]+$").unwrap()),
-        ("repository_id", Regex::new("^[0-9]+$").unwrap()),
-        ("repository_owner_id", Regex::new("^[0-9]+$").unwrap()),
-    ]
-});
+/// What a placeholder can name: a claim, as issuers name them.
+static CLAIM_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new("^[A-Za-z0-9_]{1,64}$").unwrap());
 
-fn prefix_claim(name: &str) -> Option<&'static Regex> {
-    PREFIX_CLAIMS
-        .iter()
-        .find(|(claim, _)| *claim == name)
-        .map(|(_, re)| re)
-}
+/// A value that can fill a placeholder: segments of letters, digits, `.`, `_`
+/// and `-`, joined by `/`.
+static SEGMENTS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$").unwrap());
 
 /// Checks a filled-in prefix. Returns what's wrong with it, if anything.
 fn prefix_problem(prefix: &str) -> Option<&'static str> {
@@ -70,20 +58,18 @@ pub(super) fn template_problem(template: &str) -> Option<String> {
         return Some("use {claim} placeholders, not ${claim}".into());
     }
     for caps in PLACEHOLDER.captures_iter(template) {
-        if prefix_claim(&caps[1]).is_none() {
-            let names: Vec<&str> = PREFIX_CLAIMS.iter().map(|(claim, _)| *claim).collect();
+        if !CLAIM_NAME.is_match(&caps[1]) {
             return Some(format!(
-                "unknown placeholder {}; use one of {}",
-                &caps[0],
-                names.join(", ")
+                "placeholder {} must name a claim: 1-64 of [A-Za-z0-9_]",
+                &caps[0]
             ));
         }
     }
     if PLACEHOLDER.replace_all(template, "").contains(['{', '}']) {
         return Some("has an unmatched { or }".into());
     }
-    // A placeholder must fill whole path segments. Otherwise two repos could get the
-    // same prefix: {repository_owner}{repository_id} is "a1"+"23" and "a"+"123" alike.
+    // A placeholder must fill whole path segments. Otherwise two callers could get
+    // the same prefix: {owner}{id} is "a1"+"23" and "a"+"123" alike.
     if template
         .split('/')
         .any(|segment| segment.contains('{') && !WHOLE_PLACEHOLDER.is_match(segment))
@@ -95,8 +81,21 @@ pub(super) fn template_problem(template: &str) -> Option<String> {
     prefix_problem(&PLACEHOLDER.replace_all(template, "x")).map(String::from)
 }
 
+/// A claim's value as it fills a placeholder: a string, or a number as written.
+fn value(claims: &Claims, name: &str) -> Option<String> {
+    match claims.get(name)? {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
 /// Fills in a bucket's prefix templates from the verified token's claims, or
 /// refuses with a `403` if a claim is missing or can't safely be used in a key.
+///
+/// A value can span several path segments, `owner/repo`, only when it's the
+/// template's one placeholder. With several, each fills exactly one, so two
+/// callers can never fill a template to the same prefix.
 pub fn r2_prefixes(bucket: &Bucket, claims: &Claims) -> Result<Vec<String>, Error> {
     let refuse = |why: String| {
         Error::new(
@@ -108,21 +107,21 @@ pub fn r2_prefixes(bucket: &Bucket, claims: &Claims) -> Result<Vec<String>, Erro
         .prefixes
         .iter()
         .map(|template| {
+            let placeholders = PLACEHOLDER.captures_iter(template).count();
             let mut prefix = String::with_capacity(template.len());
             let mut rest = 0;
             for caps in PLACEHOLDER.captures_iter(template) {
                 let (placeholder, name) = (caps.get(0).unwrap(), &caps[1]);
-                let value = claims.get(name).and_then(|value| value.as_str());
-                let value = match (value, prefix_claim(name)) {
-                    (Some(value), Some(allowed)) if allowed.is_match(value) => value,
-                    _ => {
-                        return Err(refuse(format!(
-                            "the {name} claim is missing or not usable in a prefix"
-                        )));
-                    }
+                let usable = |value: &String| {
+                    SEGMENTS.is_match(value) && (placeholders == 1 || !value.contains('/'))
+                };
+                let Some(value) = value(claims, name).filter(usable) else {
+                    return Err(refuse(format!(
+                        "the {name} claim is missing or not usable in a prefix"
+                    )));
                 };
                 prefix.push_str(&template[rest..placeholder.start()]);
-                prefix.push_str(value);
+                prefix.push_str(&value);
                 rest = placeholder.end();
             }
             prefix.push_str(&template[rest..]);

@@ -13,7 +13,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Path, Query, Request},
-    http::{HeaderMap, Method, StatusCode},
+    http::{Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get},
 };
@@ -41,8 +41,6 @@ pub const ACCOUNT_ID: &str = "0123456789abcdef0123456789abcdef";
 pub const ZONE_ID: &str = "fedcba9876543210fedcba9876543210";
 pub const OWNER_ID: &str = "100000001";
 pub const USER_ID: &str = "300000004";
-pub const TEAM_ID: &str = "400000005";
-pub const USER_TOKEN: &str = "gho_exampleUserToken0000000000000000000";
 pub const CACHE: &str = "https://cf-nix-cache.example.com";
 
 /// The broker tokens `tests/run.sh` puts in the local Secrets Store.
@@ -95,7 +93,6 @@ pub struct World {
     /// Discovery documents that differ from the issuer's own, by issuer name.
     pub discovery: HashMap<String, Value>,
     pub cloudflare: FakeCloudflare,
-    pub github: FakeGitHub,
 }
 
 impl World {
@@ -109,7 +106,6 @@ impl World {
             }),
             discovery: HashMap::new(),
             cloudflare: FakeCloudflare::new(),
-            github: FakeGitHub::new(),
         }
     }
 
@@ -244,6 +240,7 @@ pub fn assert_matches(actual: &Value, expected: Value) {
 /// A GitHub Actions job's claims.
 pub fn github_claims(overrides: Value) -> Value {
     let mut claims = json!({
+        "sub": "repo:example-org/api:environment:prod",
         "repository": "example-org/api",
         "repository_id": "200000003",
         "repository_owner": "example-org",
@@ -359,17 +356,6 @@ pub async fn job_token(jwt: &str, fields: &[(&str, &str)]) -> Reply {
     post_form("/oauth/token", &form).await
 }
 
-/// Exchanges a person's GitHub token, with the broker's own fields.
-pub async fn user_token(token: &str, fields: &[(&str, &str)]) -> Reply {
-    let mut form = vec![
-        ("grant_type", GRANT),
-        ("subject_token", token),
-        ("subject_token_type", ACCESS_TOKEN),
-    ];
-    form.extend_from_slice(fields);
-    post_form("/oauth/token", &form).await
-}
-
 /// Revokes `token` at `POST /oauth/revoke`, form-encoded as RFC 7009 has it.
 pub async fn revoke(token: Option<&str>) -> Reply {
     match token {
@@ -416,19 +402,19 @@ pub async fn verify_broker_token(jwt: &str) -> (Value, Value) {
 // The test policy
 // ---------------------------------------------------------------------------
 
-/// A version 2 policy: one GitHub Actions provider, `github`, for the `actions`
-/// stand-in issuer, and three profiles for it.
+/// A version 3 policy: one GitHub Actions provider, `github`, for the `actions`
+/// stand-in issuer, pinned to the test org, and three profiles for it.
 pub fn test_policy() -> Value {
     json!({
-        "version": 2,
+        "version": 3,
         "issuer": AUDIENCE,
-        "providers": [{ "name": "github", "issuer": issuer("actions"), "audience": AUDIENCE, "claims": { "repository_owner_id": OWNER_ID } }],
+        "providers": [{ "name": "github", "issuer": issuer("actions"), "audience": AUDIENCE, "claims": [{ "repository_owner_id": OWNER_ID }] }],
         "defaults": { "ttl": "15m", "max_ttl": "1h" },
         "profiles": [
             {
                 "name": "infra-cloudflare",
                 "provider": "github",
-                "claims": { "repository_id": "200000002", "ref": "refs/heads/main", "environment": "prod" },
+                "claims": [{ "repository_id": "200000002", "ref": "refs/heads/main", "environment": "prod" }],
                 "ttl": "15m",
                 "token": { "policies": [{
                     "effect": "allow",
@@ -439,7 +425,7 @@ pub fn test_policy() -> Value {
             {
                 "name": "workers-deploy",
                 "provider": "github",
-                "claims": { "repository": "example-org/*", "ref": "refs/heads/main", "environment": "prod" },
+                "claims": [{ "repository": "example-org/*", "ref": "refs/heads/main", "environment": "prod" }],
                 "token": { "policies": [{
                     "effect": "allow",
                     "permissions": ["Workers Scripts Write"],
@@ -449,7 +435,7 @@ pub fn test_policy() -> Value {
             {
                 "name": "service-dns",
                 "provider": "github",
-                "claims": { "job_workflow_ref": "example-org/workflows/.github/workflows/deploy.yml@refs/heads/main" },
+                "claims": [{ "job_workflow_ref": "example-org/workflows/.github/workflows/deploy.yml@refs/heads/main" }],
                 "ttl": "5m",
                 "token": { "policies": [{
                     "effect": "allow",
@@ -459,11 +445,6 @@ pub fn test_policy() -> Value {
             },
         ],
     })
-}
-
-/// The provider for people's GitHub tokens, pinned to the test org.
-pub fn people() -> Value {
-    json!({ "name": "people", "issuer": "https://github.com", "claims": { "repository_owner_id": OWNER_ID } })
 }
 
 /// workers-deploy's token, for profiles that need one.
@@ -489,7 +470,6 @@ static SERVER: LazyLock<()> = LazyLock::new(|| {
             get(discovery),
         )
         .route("/issuers/{name}/.well-known/jwks", get(jwks))
-        .route("/github/{*path}", any(github))
         .route("/cloudflare/client/v4/{*path}", any(cloudflare));
     // Each test has its own runtime, so the server gets a thread of its own.
     std::thread::spawn(move || {
@@ -519,22 +499,6 @@ async fn jwks() -> Json<Value> {
         "n": URL_SAFE_NO_PAD.encode(KEY.n().to_bytes_be()),
         "e": URL_SAFE_NO_PAD.encode(KEY.e().to_bytes_be()),
     }]}))
-}
-
-async fn github(
-    method: Method,
-    Path(path): Path<String>,
-    Query(query): Query<BTreeMap<String, String>>,
-    headers: HeaderMap,
-) -> Response {
-    let auth = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    world()
-        .github
-        .handle(method, &format!("/{path}"), &query, &auth)
 }
 
 async fn cloudflare(
@@ -770,135 +734,6 @@ impl FakeCloudflare {
             }
         }
         api_error(404, &format!("unhandled {method} {path}"))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// GitHub
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug)]
-pub struct FakeRepo {
-    pub id: u64,
-    pub full_name: &'static str,
-    pub owner_id: u64,
-    /// The test user's role; `None` means the repo is visible without access.
-    pub role: Option<&'static str>,
-}
-
-pub struct GitHubFailure {
-    pub path: &'static str,
-    pub status: u16,
-    pub headers: Vec<(&'static str, &'static str)>,
-}
-
-/// GitHub's REST API for one user: `/user`, repos and `/user/teams`.
-pub struct FakeGitHub {
-    pub requests: Vec<String>,
-    pub repos: Vec<FakeRepo>,
-    pub teams: Vec<(u64, u64)>,
-    /// Replies with this to every request whose path starts with its `path`.
-    pub fail: Option<GitHubFailure>,
-}
-
-impl FakeGitHub {
-    fn new() -> Self {
-        let owner: u64 = OWNER_ID.parse().unwrap();
-        Self {
-            requests: Vec::new(),
-            repos: vec![
-                FakeRepo {
-                    id: 200000002,
-                    full_name: "example-org/infra",
-                    owner_id: owner,
-                    role: Some("write"),
-                },
-                FakeRepo {
-                    id: 200000003,
-                    full_name: "example-org/api",
-                    owner_id: owner,
-                    role: Some("read"),
-                },
-                FakeRepo {
-                    id: 200000009,
-                    full_name: "other-org/infra",
-                    owner_id: 999999,
-                    role: Some("admin"),
-                },
-            ],
-            teams: vec![(TEAM_ID.parse().unwrap(), owner), (400000099, 999999)],
-            fail: None,
-        }
-    }
-
-    fn handle(
-        &mut self,
-        _method: Method,
-        path: &str,
-        query: &BTreeMap<String, String>,
-        auth: &str,
-    ) -> Response {
-        let search: Vec<String> = query.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        let shown = if search.is_empty() {
-            path.to_string()
-        } else {
-            format!("{path}?{}", search.join("&"))
-        };
-        self.requests.push(shown);
-        if let Some(fail) = self.fail.as_ref().filter(|f| path.starts_with(f.path)) {
-            let mut response = json_reply(fail.status, json!({ "message": "fail" }));
-            for (name, value) in &fail.headers {
-                response.headers_mut().insert(*name, value.parse().unwrap());
-            }
-            return response;
-        }
-        if auth != format!("Bearer {USER_TOKEN}") {
-            return json_reply(401, json!({ "message": "Bad credentials" }));
-        }
-        if path == "/user" {
-            return json_reply(
-                200,
-                json!({ "id": USER_ID.parse::<u64>().unwrap(), "login": "octocat" }),
-            );
-        }
-        if path == "/user/teams" {
-            let teams: Vec<Value> = self
-                .teams
-                .iter()
-                .map(|(id, org)| json!({ "id": id, "organization": { "id": org } }))
-                .collect();
-            return json_reply(
-                200,
-                if query.get("page").map(String::as_str) == Some("1") {
-                    json!(teams)
-                } else {
-                    json!([])
-                },
-            );
-        }
-        let by_name = path.strip_prefix("/repos/");
-        let by_id = path.strip_prefix("/repositories/");
-        let repo = self
-            .repos
-            .iter()
-            .find(|r| Some(r.full_name) == by_name || Some(r.id.to_string().as_str()) == by_id);
-        let Some(repo) = repo else {
-            return json_reply(404, json!({ "message": "Not Found" }));
-        };
-        let order = ["read", "triage", "write", "maintain", "admin"];
-        let at = repo
-            .role
-            .and_then(|role| order.iter().position(|r| *r == role));
-        let has = |level: usize| at.is_some_and(|at| at >= level);
-        json_reply(
-            200,
-            json!({
-                "id": repo.id,
-                "full_name": repo.full_name,
-                "owner": { "id": repo.owner_id, "login": repo.full_name.split('/').next().unwrap() },
-                "permissions": { "pull": has(0), "triage": has(1), "push": has(2), "maintain": has(3), "admin": has(4) },
-            }),
-        )
     }
 }
 

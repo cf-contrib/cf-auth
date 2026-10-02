@@ -18,8 +18,7 @@ use serde_json::Value;
 use crate::{
     audit::Audit,
     service::config::{
-        Bucket, BucketPermission, Claims, Effect, ProviderConfig, ProviderType, ResourceValue,
-        TokenPolicy,
+        Bucket, BucketPermission, Claims, Effect, ProviderConfig, ResourceValue, TokenPolicy,
     },
 };
 
@@ -72,32 +71,14 @@ fn timestamp(ms: u64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms as i64).unwrap_or_default()
 }
 
-/// `cf-oidc:<repo>:<run_id>:<attempt>` for a GitHub Actions job,
-/// `cf-oidc:user:<login>:<repo>` for a person, and `cf-oidc:<provider>:<sub>` for
-/// any other issuer's caller, cut to fit 120 characters. A repo name can't
-/// contain `:`, so the GitHub forms never collide.
+/// `cf-oidc:<provider>:<sub>`, whatever the issuer, cut to fit 120 characters.
 pub fn token_name(claims: &Claims, provider: &ProviderConfig) -> String {
-    let text = |key: &str, default: &'static str| match claims.get(key).and_then(Value::as_str) {
-        Some(value) if !value.is_empty() => value,
-        _ => default,
+    let sub = match claims.get("sub").and_then(Value::as_str) {
+        Some(sub) if !sub.is_empty() => sub,
+        _ => "unknown",
     };
-    let named = |head: &str, tail: &str, body: &str| {
-        let room = NAME_MAX - TOKEN_PREFIX.len() - head.chars().count() - tail.chars().count();
-        let body: String = body.chars().take(room).collect();
-        format!("{TOKEN_PREFIX}{head}{body}{tail}")
-    };
-    let repo = text("repository", "");
-    if provider.kind == ProviderType::GithubUser {
-        let actor = text("actor", "unknown");
-        return named(&format!("user:{actor}:"), "", text("repository", "unknown"));
-    }
-    // A GitHub Actions token names its repo and run; other issuers don't.
-    let run_id = text("run_id", "");
-    if !repo.is_empty() && !run_id.is_empty() {
-        let tail = format!(":{run_id}:{}", text("run_attempt", "0"));
-        return named("", &tail, repo);
-    }
-    named(&format!("{}:", provider.name), "", text("sub", "unknown"))
+    let name = format!("{TOKEN_PREFIX}{}:{sub}", provider.name);
+    name.chars().take(NAME_MAX).collect()
 }
 
 /// The Cloudflare API, as the broker token or another token.
@@ -580,14 +561,13 @@ mod tests {
 
     use super::*;
 
-    fn provider(name: &str, kind: ProviderType) -> ProviderConfig {
+    fn provider(name: &str) -> ProviderConfig {
         ProviderConfig {
             name: name.into(),
-            kind,
             issuer: "https://issuer.example.com".into(),
-            audience: None,
+            audience: "https://cf-oidc-exchange.example.com".into(),
             jwks_uri: None,
-            claims: Default::default(),
+            claims: vec![],
         }
     }
 
@@ -596,52 +576,24 @@ mod tests {
     }
 
     #[test]
-    fn names_tokens_after_the_job_the_person_or_the_subject() {
-        let github = provider("github", ProviderType::Oidc);
-        let job = claims(
-            json!({ "repository": "example-org/api", "run_id": "1234567890", "run_attempt": "2" }),
+    fn names_tokens_after_the_provider_and_the_subject() {
+        let job = claims(json!({ "sub": "repo:example-org/api:ref:refs/heads/main" }));
+        assert_eq!(
+            token_name(&job, &provider("github")),
+            "cf-oidc:github:repo:example-org/api:ref:refs/heads/main"
         );
         assert_eq!(
-            token_name(&job, &github),
-            "cf-oidc:example-org/api:1234567890:2"
-        );
-        let person = claims(json!({ "actor": "octocat", "repository": "example-org/infra" }));
-        let people = provider("people", ProviderType::GithubUser);
-        assert_eq!(
-            token_name(&person, &people),
-            "cf-oidc:user:octocat:example-org/infra"
-        );
-        assert_eq!(
-            token_name(&claims(json!({ "actor": "octocat" })), &people),
-            "cf-oidc:user:octocat:unknown"
-        );
-        let gitlab = provider("gitlab", ProviderType::Oidc);
-        let other =
-            claims(json!({ "sub": "project_path:example-group/app:ref_type:branch:ref:main" }));
-        assert_eq!(
-            token_name(&other, &gitlab),
-            "cf-oidc:gitlab:project_path:example-group/app:ref_type:branch:ref:main"
-        );
-        assert_eq!(
-            token_name(&Claims::new(), &gitlab),
+            token_name(&Claims::new(), &provider("gitlab")),
             "cf-oidc:gitlab:unknown"
         );
     }
 
     #[test]
     fn fits_token_names_in_120_characters() {
-        let long = "x".repeat(200);
-        let job = claims(
-            json!({ "repository": format!("example-org/{long}"), "run_id": "1234567890", "run_attempt": "1" }),
-        );
-        let name = token_name(&job, &provider("github", ProviderType::Oidc));
-        assert_eq!(name.len(), 120);
-        assert!(name.ends_with(":1234567890:1"));
-        let person =
-            claims(json!({ "actor": "octocat", "repository": format!("example-org/{long}") }));
-        let name = token_name(&person, &provider("people", ProviderType::GithubUser));
-        assert_eq!(name.len(), 120);
-        assert!(name.starts_with("cf-oidc:user:octocat:example-org/"));
+        let long = claims(json!({ "sub": "x".repeat(200) }));
+        let name = token_name(&long, &provider("github"));
+        assert_eq!(name.chars().count(), 120);
+        assert!(name.starts_with("cf-oidc:github:xxx"));
     }
 
     #[test]

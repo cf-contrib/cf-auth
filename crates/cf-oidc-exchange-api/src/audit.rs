@@ -1,26 +1,12 @@
 //! The audit log: one JSON line per event, in Workers Logs. Never token values,
 //! R2 secrets or raw JWTs.
 
+use std::collections::BTreeSet;
+
 use serde::ser::{Serialize, SerializeMap, Serializer};
 use serde_json::Value;
 
 use crate::service::config::Claims;
-
-/// Claims copied into audit lines. None of them are secret.
-const CLAIMS: [&str; 12] = [
-    "sub",
-    "repository",
-    "repository_id",
-    "ref",
-    "environment",
-    "event_name",
-    "workflow_ref",
-    "job_workflow_ref",
-    "run_id",
-    "run_attempt",
-    "actor",
-    "actor_id",
-];
 
 /// An audit line under construction: the event, then who it's about, then the rest.
 #[must_use]
@@ -36,6 +22,15 @@ impl Serialize for Audit {
             map.serialize_entry(key, value)?;
         }
         map.end()
+    }
+}
+
+/// Whether a claim's value is one to write down: a string, number or boolean.
+fn scalar(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.is_empty(),
+        Value::Number(_) | Value::Bool(_) => true,
+        _ => false,
     }
 }
 
@@ -55,20 +50,22 @@ impl Audit {
         self
     }
 
-    /// Adds the provider and profile, and the caller's claims that aren't secret.
-    pub fn caller(
+    /// Adds the provider and profile, and who the caller is: their token's
+    /// `sub`, and the claims in `names`, the ones the policy matches on, which
+    /// are never secret.
+    pub fn caller<'n>(
         mut self,
         provider: Option<&str>,
         profile: Option<&str>,
         claims: Option<&Claims>,
+        names: impl IntoIterator<Item = &'n str>,
     ) -> Self {
         self = self.with("provider", provider).with("profile", profile);
-        for key in CLAIMS {
-            let value = claims
-                .and_then(|claims| claims.get(key))
-                .and_then(Value::as_str);
-            if let Some(value) = value.filter(|value| !value.is_empty()) {
-                self = self.with(key, value);
+        let names: BTreeSet<&str> = names.into_iter().collect();
+        for key in std::iter::once("sub").chain(names) {
+            let value = claims.and_then(|claims| claims.get(key));
+            if let Some(value) = value.filter(|value| scalar(value)) {
+                self = self.with(key, value.clone());
             }
         }
         self
@@ -101,14 +98,25 @@ mod tests {
 
     #[test]
     fn writes_the_event_who_and_then_the_rest() {
-        let claims = json!({ "repository": "example-org/api", "run_id": "1234567890", "secret": "x", "actor": "" });
+        let claims = json!({
+            "sub": "repo:example-org/api:ref:refs/heads/main",
+            "repository": "example-org/api",
+            "repository_id": 200000003,
+            "email": "someone@example.com",
+            "ref": "",
+        });
         let audit = Audit::new("token.mint")
-            .caller(Some("github"), Some("workers-deploy"), claims.as_object())
+            .caller(
+                Some("github"),
+                Some("workers-deploy"),
+                claims.as_object(),
+                ["repository_id", "repository", "ref", "repository"],
+            )
             .with("token_id", "tok-1")
             .with("detail", None::<String>);
         assert_eq!(
             audit.line(),
-            r#"{"event":"token.mint","provider":"github","profile":"workers-deploy","repository":"example-org/api","run_id":"1234567890","token_id":"tok-1"}"#
+            r#"{"event":"token.mint","provider":"github","profile":"workers-deploy","sub":"repo:example-org/api:ref:refs/heads/main","repository":"example-org/api","repository_id":200000003,"token_id":"tok-1"}"#
         );
     }
 

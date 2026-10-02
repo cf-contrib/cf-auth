@@ -84,7 +84,7 @@ Either way the broker is reachable on exactly one URL, the `url` output, which i
 Bucket prefixes use the broker's own `{claim}` placeholders, which `templatefile` leaves alone. Don't write `${repository}`: Terraform would try to fill it in and fail the plan.
 
 ```yaml
-version: 2
+version: 3
 issuer: ${broker_url}
 
 providers:
@@ -92,12 +92,12 @@ providers:
     issuer: https://token.actions.githubusercontent.com
     audience: ${broker_url}
     claims:
-      repository_owner_id: "${owner_id}"  # policy_vars = { owner_id = data.github_organization.org.id }
+      - repository_owner_id: "${owner_id}"  # policy_vars = { owner_id = data.github_organization.org.id }
 
 profiles:
   - name: deploy
     claims:
-      repository_id: "${repo_id}"  # policy_vars = { repo_id = data.github_repository.app.repo_id }
+      - repository_id: "${repo_id}"  # policy_vars = { repo_id = data.github_repository.app.repo_id }
     token:
       policies:
         - permissions: ["Workers Scripts Write"]
@@ -105,7 +105,7 @@ profiles:
             "com.cloudflare.api.account.${account_id}": "*"
   - name: terraform-state          # every repo gets its own prefix in one shared bucket
     claims:
-      ref: refs/heads/main
+      - ref: refs/heads/main
     buckets:
       - name: org-terraform-state
         permission: object-read-write

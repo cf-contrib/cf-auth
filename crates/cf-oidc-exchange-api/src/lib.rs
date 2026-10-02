@@ -3,7 +3,6 @@
 
 mod audit;
 mod cloudflare;
-mod github;
 mod issuer;
 mod oidc;
 mod service;

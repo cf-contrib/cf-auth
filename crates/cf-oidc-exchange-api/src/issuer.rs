@@ -21,29 +21,6 @@ pub const ALGORITHM: &str = "RS256";
 /// The smallest RSA key accepted, as NIST requires.
 const MIN_MODULUS_BITS: usize = 2048;
 
-/// Verified claims always copied into the broker's tokens when the caller's token
-/// has them, under the issuer's own names, so a service's rules keep working:
-/// GitHub's. Other issuers' claims are copied when the policy matches on them.
-/// None are secret; `team_ids` is left out, as it can be long.
-const COPIED: [&str; 16] = [
-    "repository",
-    "repository_id",
-    "repository_owner",
-    "repository_owner_id",
-    "ref",
-    "ref_type",
-    "environment",
-    "event_name",
-    "workflow_ref",
-    "job_workflow_ref",
-    "run_id",
-    "run_attempt",
-    "runner_environment",
-    "actor",
-    "actor_id",
-    "repository_permission",
-];
-
 pub struct SigningKey {
     key: PrivateKey,
     /// The public key's RFC 7638 thumbprint, so a new key gets a new `kid`
@@ -119,7 +96,9 @@ pub struct IssueRequest<'a> {
     /// The provider the caller's token came from.
     pub provider: &'a str,
     pub profile: &'a str,
-    /// Claims the policy matched on, also copied, so a service can match on the same ones.
+    /// The claims the policy matches on: copied under the issuer's names, so a
+    /// service can match on the same ones. Nothing else, so an issuer's other
+    /// claims, such as an email, stay behind.
     pub matched: Vec<&'a str>,
     pub claims: &'a Claims,
     /// The profile's TTL, in milliseconds.
@@ -150,20 +129,11 @@ pub fn payload(
         ));
     }
 
-    let names: BTreeSet<&str> = COPIED
-        .iter()
-        .copied()
-        .chain(req.matched.iter().copied())
-        .collect();
+    let names: BTreeSet<&str> = req.matched.iter().copied().collect();
     let mut claims = Map::new();
     for name in names {
-        if let Some(value) = req
-            .claims
-            .get(name)
-            .and_then(Value::as_str)
-            .filter(|v| !v.is_empty())
-        {
-            claims.insert(name.into(), value.into());
+        if let Some(value) = req.claims.get(name).filter(|value| copyable(value)) {
+            claims.insert(name.into(), value.clone());
         }
     }
     for (name, value) in [
@@ -180,6 +150,17 @@ pub fn payload(
         claims.insert(name.into(), value);
     }
     Ok((claims, expires_at))
+}
+
+/// Whether a claim's value is one to copy: a string, number or boolean, or a
+/// list of them, as claim sets match on.
+fn copyable(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.is_empty(),
+        Value::Number(_) | Value::Bool(_) => true,
+        Value::Array(values) => values.iter().all(|v| !v.is_array() && copyable(v)),
+        _ => false,
+    }
 }
 
 /// Signs a token for another service.
@@ -224,13 +205,11 @@ mod tests {
     }
 
     #[test]
-    fn copies_githubs_claims_and_the_matched_ones() {
+    fn copies_only_the_claims_the_policy_matches_on() {
         let claims = json!({
             "repository": "example-org/api",
             "ref": "refs/heads/main",
-            "actor": "",
-            "team_ids": ["400000005"],
-            "groups": "deployers",
+            "groups": ["deployers", "admins"],
             "email": "someone@example.com",
         });
         let (payload, expires_at) =
@@ -239,9 +218,8 @@ mod tests {
         assert_eq!(
             Value::Object(payload),
             json!({
-                "repository": "example-org/api",
                 "ref": "refs/heads/main",
-                "groups": "deployers",
+                "groups": ["deployers", "admins"],
                 "provider": "github",
                 "profile": "nix-push",
                 "iss": "https://cf-oidc-exchange.example.com",

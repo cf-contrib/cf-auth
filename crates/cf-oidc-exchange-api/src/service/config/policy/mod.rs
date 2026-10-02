@@ -1,7 +1,12 @@
-//! The policy: who the broker trusts (providers), and what each caller may get
-//! (profiles). Loaded once per isolate, and refused with every problem listed if
-//! any guardrail fails, so an unsafe policy never serves a request.
+//! The policy: which OIDC issuers the broker trusts (providers), and what each
+//! caller may get (profiles). Loaded once per isolate, and refused with every
+//! problem listed if any guardrail fails, so an unsafe policy never serves a
+//! request.
+//!
+//! It knows no issuer by name: who may do what is in the claim sets, as in
+//! cf-nix-cache.
 
+mod claims;
 mod matching;
 mod prefix;
 mod schema;
@@ -15,16 +20,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use self::{
-    matching::{Claims, clamp_ttl, select_profile},
+    claims::{ClaimSet, Claims},
+    matching::{clamp_ttl, select_profile},
     prefix::r2_prefixes,
 };
-
-/// People's GitHub tokens: opaque, so the broker checks them with GitHub's API
-/// instead of a signature.
-pub const GITHUB_USERS_ISSUER: &str = "https://github.com";
-
-/// GitHub Actions' OIDC issuer. GitHub Enterprise Cloud adds `/<enterprise>`.
-pub const GITHUB_ACTIONS_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 /// The audience for Cloudflare API tokens and R2 credentials, and every profile's default.
 pub const CLOUDFLARE_AUDIENCE: &str = "https://api.cloudflare.com";
@@ -43,46 +42,9 @@ const DEFAULT_MAX_TTL: u64 = HOUR;
 const R2_MIN_TTL: u64 = MIN_TTL;
 const R2_MAX_TTL: u64 = 7 * 24 * HOUR;
 
-/// Default `max_ttl` for profiles for people, unless the profile sets its own.
-const USER_DEFAULT_MAX_TTL: u64 = HOUR;
-
-/// GitHub's repo roles, least to most. `write` is GitHub's `push` and `read` its
-/// `pull`. A profile's `repository_permission` is the least it accepts.
-pub const REPOSITORY_PERMISSIONS: [&str; 5] = ["read", "triage", "write", "maintain", "admin"];
-
-/// What a profile for people can match: what the broker looks up for a person,
-/// nothing a job's token has.
-const USER_MATCH: [&str; 6] = [
-    "repository",
-    "repository_id",
-    "repository_owner_id",
-    "actor_id",
-    "team_id",
-    "repository_permission",
-];
-
-/// Claims the broker checks against GitHub for a person, rather than compares with a value.
-const USER_ONLY_MATCH: [&str; 2] = ["team_id", "repository_permission"];
-
-/// Claims that only exist once a person names a repository, so they need a role on it.
-const REPO_MATCH: [&str; 4] = [
-    "repository",
-    "repository_id",
-    "repository_owner_id",
-    "team_id",
-];
-
-/// What a provider for people can pin for every profile: the repo owner, and who.
-const USER_PROVIDER_PINS: [&str; 2] = ["repository_owner_id", "actor_id"];
-
 /// An account-level resource key; zone keys (`...account.zone.<id>`) don't match.
 static ACCOUNT_RESOURCE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^com\.cloudflare\.api\.account\.([0-9a-f]{32})$").unwrap());
-
-/// GitHub's default OIDC audience, `https://github.com/<owner>`, which tokens
-/// requested for other clouds carry.
-static GITHUB_DEFAULT_AUDIENCE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new("^https://github\\.com(/|$)").unwrap());
 
 /// Parses `90s`, `15m`, `1h`, `1h30m` into milliseconds.
 pub fn parse_duration(value: &str) -> Option<u64> {
@@ -103,29 +65,26 @@ pub fn parse_duration(value: &str) -> Option<u64> {
         .checked_add(part(3, SECOND)?)
 }
 
-/// Claim name to the values it may have: any of them.
-pub type ClaimPatterns = BTreeMap<String, Vec<String>>;
-
-/// How a provider's tokens are checked, which follows from its issuer: a person's
-/// GitHub token with GitHub's API, any other issuer's as an OIDC token.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProviderType {
-    Oidc,
-    GithubUser,
-}
-
+/// An OIDC issuer the broker trusts, and which of its tokens.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderConfig {
     pub name: String,
-    pub kind: ProviderType,
-    /// The token's `iss`, exactly; `https://github.com` for people's GitHub tokens.
+    /// The tokens' `iss`, exactly.
     pub issuer: String,
-    /// OIDC only: a value the token's `aud` must contain.
-    pub audience: Option<String>,
-    /// OIDC only: where the keys are, if not in the issuer's discovery document.
+    /// A value the tokens' `aud` must contain.
+    pub audience: String,
+    /// Where the keys are, if not in the issuer's discovery document.
     pub jwks_uri: Option<String>,
-    /// Every token from this provider must have these.
-    pub claims: ClaimPatterns,
+    /// Every token from this provider must match one of these, whichever profile
+    /// it gets.
+    pub claims: Vec<ClaimSet>,
+}
+
+impl ProviderConfig {
+    /// Whether a token's claims are ones this provider takes.
+    pub fn takes(&self, claims: &Claims) -> bool {
+        self.claims.iter().any(|set| set.matches(claims))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -167,27 +126,33 @@ pub struct TokenPolicy {
     pub resources: BTreeMap<String, ResourceValue>,
 }
 
+/// What a caller may get, and who may get it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProfileConfig {
     pub name: String,
     /// The provider whose tokens the profile is for.
     pub provider: String,
-    /// That provider's type, kept here for the checks that depend on it.
-    pub kind: ProviderType,
     /// A disabled profile never matches, even when a request names it.
     pub enabled: bool,
     /// What the profile issues for: Cloudflare credentials, or the broker's own
     /// token for this service.
     pub audience: String,
-    /// All must match (AND), each any of its values: the profile's own claims and
-    /// its provider's.
-    pub claims: ClaimPatterns,
+    /// A token must match one of these, as well as one of its provider's.
+    pub claims: Vec<ClaimSet>,
     /// Milliseconds.
     pub ttl: u64,
     pub max_ttl: u64,
     /// The token's policies. `None` for a profile with only `buckets`.
     pub policies: Option<Vec<TokenPolicy>>,
     pub buckets: Option<Vec<Bucket>>,
+}
+
+impl ProfileConfig {
+    /// Whether a token's claims match one of the profile's claim sets. Its
+    /// provider's are checked apart, by [`ProviderConfig::takes`].
+    pub fn matches(&self, claims: &Claims) -> bool {
+        self.claims.iter().any(|set| set.matches(claims))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -224,22 +189,6 @@ pub fn is_issuer_url(value: &str) -> bool {
     }
 }
 
-/// Issuers that give a token to anyone's projects, and the claims that pin the
-/// tenant: a provider for one of them must pin at least one, exactly.
-fn tenant_claims(issuer: &str) -> Option<&'static [&'static str]> {
-    let enterprise = issuer
-        .strip_prefix(GITHUB_ACTIONS_ISSUER)
-        .is_some_and(|rest| rest.starts_with('/'));
-    if issuer == GITHUB_ACTIONS_ISSUER || enterprise {
-        return Some(&["repository_owner_id"]);
-    }
-    match issuer {
-        "https://gitlab.com" => Some(&["namespace_id", "project_id"]),
-        "https://app.terraform.io" => Some(&["terraform_organization_id"]),
-        _ => None,
-    }
-}
-
 /// Parses and validates a policy, from its JSON text or an already parsed value.
 /// With `account_id`, account resources must name that account.
 pub fn load_policy(input: &Value, account_id: Option<&str>) -> Result<PolicyConfig, PolicyError> {
@@ -255,10 +204,10 @@ pub fn load_policy(input: &Value, account_id: Option<&str>) -> Result<PolicyConf
         },
         other => other,
     };
-    if raw.get("version") == Some(&Value::from(1)) {
-        return fail(vec![
-            "version 1 is no longer supported: move github: to providers: and match: to claims: (see the broker README's migration table)".into(),
-        ]);
+    if let Some(version @ (1 | 2)) = raw.get("version").and_then(Value::as_u64) {
+        return fail(vec![format!(
+            "version {version} is no longer supported: claims are lists of claim sets, and providers are OIDC issuers only (see the README's policy section)"
+        )]);
     }
 
     let policy: schema::Policy = match serde_path_to_error::deserialize(raw) {
@@ -304,8 +253,13 @@ impl Loader<'_> {
             if providers.iter().any(|p| p.issuer == provider.issuer) {
                 self.issue(format!("{at}.issuer: another provider has the same issuer"));
             }
-            let provider = self.provider(&at, provider);
-            providers.push(provider);
+            providers.push(ProviderConfig {
+                name: provider.name,
+                issuer: provider.issuer,
+                audience: provider.audience,
+                jwks_uri: provider.jwks_uri,
+                claims: provider.claims,
+            });
         }
 
         let default_max = raw.defaults.max_ttl.as_deref().and_then(parse_duration);
@@ -332,78 +286,6 @@ impl Loader<'_> {
         }
     }
 
-    fn provider(&mut self, at: &str, raw: schema::Provider) -> ProviderConfig {
-        let claims = self.claims(&format!("{at}.claims"), raw.claims);
-
-        if raw.issuer == GITHUB_USERS_ISSUER {
-            // A person's GitHub token is checked with GitHub's API: it has no audience or keys.
-            for (field, value) in [("audience", &raw.audience), ("jwks_uri", &raw.jwks_uri)] {
-                if value.is_some() {
-                    self.issue(format!(
-                        "{at}.{field}: not for {GITHUB_USERS_ISSUER}, whose tokens aren't OIDC tokens"
-                    ));
-                }
-            }
-            for claim in claims.keys() {
-                if !USER_PROVIDER_PINS.contains(&claim.as_str()) {
-                    self.issue(format!(
-                        "{at}.claims.{claim}: a provider for people pins {}; the rest go on profiles",
-                        USER_PROVIDER_PINS.join(" or ")
-                    ));
-                }
-            }
-            return ProviderConfig {
-                name: raw.name,
-                kind: ProviderType::GithubUser,
-                issuer: raw.issuer,
-                audience: None,
-                jwks_uri: None,
-                claims,
-            };
-        }
-
-        if raw.audience.is_none() {
-            self.issue(format!("{at}.audience: required for an OIDC issuer"));
-        }
-        for claim in USER_ONLY_MATCH {
-            if claims.contains_key(claim) {
-                self.issue(format!(
-                    "{at}.claims.{claim}: only for people ({GITHUB_USERS_ISSUER})"
-                ));
-            }
-        }
-
-        // Guardrail 1: an issuer that gives anyone's projects a token needs the tenant pinned.
-        let tenant = tenant_claims(&raw.issuer);
-        if let Some(tenant) = tenant
-            && !tenant.iter().any(|claim| claims.contains_key(*claim))
-        {
-            self.issue(format!(
-                "{at}.claims: must pin {}: {} issues tokens to anyone's projects",
-                tenant.join(" or "),
-                raw.issuer
-            ));
-        }
-        // Guardrail 5: a custom audience, so a GitHub token requested for AWS or GCP
-        // can't be replayed here.
-        let audience = raw.audience.unwrap_or_default();
-        if tenant.is_some_and(|tenant| tenant.contains(&"repository_owner_id"))
-            && GITHUB_DEFAULT_AUDIENCE.is_match(&audience)
-        {
-            self.issue(format!(
-                "{at}.audience: must not be GitHub's default audience; use the broker's URL"
-            ));
-        }
-        ProviderConfig {
-            name: raw.name,
-            kind: ProviderType::Oidc,
-            issuer: raw.issuer,
-            audience: Some(audience),
-            jwks_uri: raw.jwks_uri,
-            claims,
-        }
-    }
-
     fn profile(
         &mut self,
         at: &str,
@@ -419,7 +301,6 @@ impl Loader<'_> {
             (None, _) => None,
         };
         let provider = providers.iter().find(|p| Some(p.name.as_str()) == named);
-        let provider_name = provider.map_or("", |p| p.name.as_str());
         if raw.provider.is_none() && providers.len() > 1 {
             self.issue(format!(
                 "{at}.provider: required when the policy has several providers"
@@ -428,61 +309,9 @@ impl Loader<'_> {
             let name = raw.provider.as_deref().unwrap_or_default();
             self.issue(format!("{at}.provider: no provider named {name}"));
         }
-        let kind = provider.map_or(ProviderType::Oidc, |p| p.kind);
-        let pinned = |claim: &str| provider.is_some_and(|p| p.claims.contains_key(claim));
 
-        let claims = self.claims(&format!("{at}.claims"), raw.claims);
-        // The provider's claims every token for this profile must also have.
-        let mut inherited = provider.map(|p| p.claims.clone()).unwrap_or_default();
-        // Guardrail 6: a person has no ref, environment or workflow, and picks the
-        // repo, so a profile for people matches only what the broker looks up. It's
-        // pinned either to a role on the repo they ask for, which must belong to the
-        // provider's owner, or to who they are.
-        if kind == ProviderType::GithubUser {
-            self.check_user_claims(&format!("{at}.claims"), &claims);
-            let repo_scoped = claims.contains_key("repository_permission");
-            if repo_scoped && !pinned("repository_owner_id") {
-                self.issue(format!(
-                    "{at}.claims.repository_permission: needs provider {provider_name} to pin repository_owner_id, the owner the repo must belong to"
-                ));
-            }
-            if !repo_scoped {
-                if !claims.contains_key("actor_id") && !pinned("actor_id") {
-                    self.issue(format!(
-                        "{at}.claims: a profile for people needs repository_permission (a role on the repo they ask for) or actor_id (who may use it)"
-                    ));
-                }
-                for claim in REPO_MATCH {
-                    if claims.contains_key(claim) {
-                        self.issue(format!("{at}.claims.{claim}: needs repository_permission"));
-                    }
-                }
-                // Without a repo, the owner pin has nothing to bound: it applies to
-                // repo-scoped profiles.
-                inherited.remove("repository_owner_id");
-            }
-        } else {
-            for claim in USER_ONLY_MATCH {
-                if claims.contains_key(claim) {
-                    self.issue(format!(
-                        "{at}.claims.{claim}: only for people ({GITHUB_USERS_ISSUER})"
-                    ));
-                }
-            }
-        }
-
-        // Guardrail 1: a provider's claims apply to every profile for it. A profile
-        // can narrow them to some of their values, but not widen or change them.
-        for (claim, values) in &inherited {
-            if let Some(own) = claims.get(claim)
-                && !own.iter().all(|value| values.contains(value))
-            {
-                self.issue(format!(
-                    "{at}.claims.{claim}: conflicts with provider {provider_name}"
-                ));
-            }
-        }
-
+        // Guardrail 5: audiences are kept apart. The broker signs its own token
+        // for another service; Cloudflare credentials are another profile's job.
         let has_credentials = raw.token.is_some() || raw.buckets.is_some();
         let audience = raw.audience.unwrap_or_else(|| CLOUDFLARE_AUDIENCE.into());
         if audience == CLOUDFLARE_AUDIENCE {
@@ -490,8 +319,6 @@ impl Loader<'_> {
                 self.issue(format!("{at}: must have a token, buckets or both"));
             }
         } else {
-            // The broker signs its own token for the service; Cloudflare credentials
-            // are another profile's job.
             if has_credentials {
                 self.issue(format!(
                     "{at}: a profile for {audience} can't have a token or buckets"
@@ -507,14 +334,9 @@ impl Loader<'_> {
         let policies = raw.token.map(|token| self.token(at, token));
         let buckets = raw.buckets.map(|buckets| self.buckets(at, buckets));
 
-        // Guardrail 4: TTL caps. A stolen gh token never expires, so what it can mint
-        // for a person should.
-        let fallback_max = match kind {
-            ProviderType::GithubUser => default_max.min(USER_DEFAULT_MAX_TTL),
-            ProviderType::Oidc => default_max,
-        };
+        // Guardrail 4: TTLs are capped.
         let max_ttl = raw.max_ttl.as_deref().and_then(parse_duration);
-        let max_ttl = max_ttl.unwrap_or(fallback_max);
+        let max_ttl = max_ttl.unwrap_or(default_max);
         let ttl = raw.ttl.as_deref().and_then(parse_duration);
         let ttl = ttl.unwrap_or(default_ttl.min(max_ttl));
         self.check_ttls(at, ttl, max_ttl);
@@ -524,15 +346,12 @@ impl Loader<'_> {
             ));
         }
 
-        let mut effective = inherited;
-        effective.extend(claims);
         ProfileConfig {
             name: raw.name,
-            provider: provider_name.into(),
-            kind,
+            provider: provider.map_or_else(String::new, |p| p.name.clone()),
             enabled: raw.enabled,
             audience,
-            claims: effective,
+            claims: raw.claims,
             ttl,
             max_ttl,
             policies,
@@ -606,59 +425,6 @@ impl Loader<'_> {
             });
         }
         buckets
-    }
-
-    /// Turns each claim's value into a list, and checks guardrail 2: patterns stay
-    /// narrow, and IDs are exact.
-    fn claims(&mut self, at: &str, raw: schema::ClaimSet) -> ClaimPatterns {
-        let mut claims = ClaimPatterns::new();
-        for (claim, values) in raw {
-            let values = values.into_list();
-            for value in &values {
-                if claim.ends_with("_id") && value.contains('*') {
-                    self.issue(format!(
-                        "{at}.{claim}: ID claims must be exact, globs are not allowed"
-                    ));
-                } else if value.contains('*') && !matching::is_prefix_pattern(value) {
-                    // A bare or leading `*` would match far more than intended; one in
-                    // the middle needs a backtracking matcher.
-                    self.issue(format!(
-                        "{at}.{claim}: * is only allowed once, at the end, after a prefix (e.g. example-org/*)"
-                    ));
-                }
-            }
-            claims.insert(claim, values);
-        }
-        claims
-    }
-
-    /// Checks a claim set for people: only what the broker looks up for a person,
-    /// with one valid role.
-    fn check_user_claims(&mut self, at: &str, claims: &ClaimPatterns) {
-        for claim in claims.keys() {
-            if !USER_MATCH.contains(&claim.as_str()) {
-                self.issue(format!(
-                    "{at}.{claim}: not available for people; use {}",
-                    USER_MATCH.join(", ")
-                ));
-            }
-        }
-        let Some(roles) = claims.get("repository_permission") else {
-            return;
-        };
-        if roles.len() > 1 {
-            self.issue(format!(
-                "{at}.repository_permission: one role, the least the person must have"
-            ));
-        }
-        if let Some(role) = roles.first()
-            && !REPOSITORY_PERMISSIONS.contains(&role.as_str())
-        {
-            self.issue(format!(
-                "{at}.repository_permission: must be one of {}",
-                REPOSITORY_PERMISSIONS.join(", ")
-            ));
-        }
     }
 
     fn check_ttls(&mut self, at: &str, ttl: u64, max: u64) {

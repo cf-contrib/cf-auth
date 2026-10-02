@@ -91,9 +91,9 @@ override_data {
 
 variables {
   cloudflare_token_secret = { secret_store_id = "00000000000000000000000000000000", secret_name = "cf-oidc-exchange-cloudflare-token" }
-  account_id          = "0123456789abcdef0123456789abcdef"
-  hostname            = "cf-oidc-exchange.example.workers.dev"
-  policy_file         = "tests/fixtures/policy.yaml"
+  account_id              = "0123456789abcdef0123456789abcdef"
+  hostname                = "cf-oidc-exchange.example.workers.dev"
+  policy_file             = "tests/fixtures/policy.yaml"
 }
 
 run "secrets_store_binding" {
@@ -349,7 +349,7 @@ run "policy_vars" {
   }
 
   assert {
-    condition     = jsondecode(local.policy_json).profiles[0].claims.repository_id == "200000002" && jsondecode(local.policy_json).providers[0].claims.repository_owner_id == "100000001"
+    condition     = jsondecode(local.policy_json).profiles[0].claims[0].repository_id == "200000002" && jsondecode(local.policy_json).providers[0].claims[0].repository_owner_id == "100000001"
     error_message = "policy_vars should be filled into the policy"
   }
 }
