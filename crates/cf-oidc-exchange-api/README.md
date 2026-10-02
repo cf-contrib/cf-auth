@@ -404,7 +404,7 @@ For the caller's own mistakes (400 to 403) the message says what was wrong, for 
 
 | Threat | Mitigation |
 |---|---|
-| Forged or tampered JWT | Signature checked against the issuer's JWKS (RS256 only), plus `iss`, `aud`, `exp` and `nbf` with 30s tolerance |
+| Forged or tampered JWT | Signature checked against the issuer's JWKS (RS256 only), plus `iss`, `aud`, `exp` and `nbf` with 60s tolerance |
 | A repo outside your org asks for a token | Every provider must list claim sets; pin your tenant's ID there |
 | A token from an issuer you don't trust | Only issuers listed as providers are accepted, by exact `iss`, with keys from that issuer's own discovery document or `jwks_uri` |
 | Deleted repo or org re-registered by an attacker | Pin numeric IDs, not names |
@@ -473,7 +473,7 @@ The crate is laid out as cf-nix-cache's Worker is:
 |---|---|
 | `src/lib.rs` | The start, fetch and scheduled events: the JSON logger, the configuration, then the SDK's router over it, with the auth layer and the health endpoints. |
 | `src/service/config.rs` | The bindings, read in `Config::from_env` only, and the policy's format: providers, profiles, claim sets, bucket prefixes, and the guardrails parsing checks. |
-| `src/service/layer.rs` | Exchange auth, as a tower layer: the subject token's provider by `iss`, RS256 against the issuer's keys with WebCrypto, the standard claims and the provider's claim sets. And the `Error` body and `Cache-Control` of every response. |
+| `src/service/layer.rs` | Exchange auth, as a tower layer over [`cf-oidc-jwt`](../cf-oidc-jwt): the subject token's provider by `iss`, RS256 against the issuer's keys with WebCrypto, the standard claims and the provider's claim sets. And the `Error` body and `Cache-Control` of every response. |
 | `src/service/handler.rs` | The generated API's implementation: the exchange (profiles, Cloudflare tokens and R2 credentials through [cloudflare-rs](https://github.com/cf-contrib/cloudflare-rs), the broker's own tokens), revocation, discovery, the keys, and the cleanup the cron runs. |
 
 ## Development

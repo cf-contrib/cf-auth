@@ -13,6 +13,8 @@ worker = { version = "0.8", features = ["http", "axum"] }
 
 # The API: its types, and the traits and router the Worker implements.
 cf-oidc-exchange-sdk = { path = "../cf-oidc-exchange-sdk", features = ["server"] }
+# Verifies the OIDC tokens exchanges present.
+cf-oidc-jwt = { path = "../cf-oidc-jwt" }
 # Named by the generated traits and router; the versions the SDK builds with.
 async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["json"] }
@@ -26,19 +28,16 @@ serde_urlencoded = "0.7"
 # Pinned to cf-contrib/cloudflare-rs#3 (token policy id, open scopes) until it merges.
 cloudflare = { git = "https://github.com/cf-contrib/cloudflare-rs", rev = "bf8bd31bf2b456b6bc99d9e2171debf591d992e0", features = ["accounts", "r2", "client"] }
 
-# The policy, token claims, discovery documents and key sets.
+# The policy, and the claims of the broker's own tokens.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Fetches issuers' discovery documents and keys. Already in the tree via
-# `cloudflare`.
-reqwest = { version = "0.13", default-features = false, features = ["json"] }
-# JWT segments, PEMs, and the timestamps of the tokens API.
+# The broker's own tokens: JWT segments, the signing key's PEM, and their
+# timestamps and the tokens API's.
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
-# Keys the auth cache by the SHA-256 of the token.
-sha2 = { version = "0.11", default-features = false }
-# WebCrypto bindings for RS256, so no RSA crate ends up in the wasm bundle.
+# WebCrypto bindings for signing the broker's own tokens with RS256, so no RSA
+# crate ends up in the wasm bundle.
 web-sys = { version = "0.3", features = ["Crypto", "CryptoKey", "SubtleCrypto", "WorkerGlobalScope"] }
 
 # Logs, as JSON lines to the console, which Workers Logs indexes.
@@ -49,7 +48,7 @@ tracing-web = "0.1"
 [dev-dependencies]
 # The integration tests ask the health endpoints with the SDK's client.
 cf-oidc-exchange-sdk = { path = "../cf-oidc-exchange-sdk", features = ["client"] }
-# The integration tests' stand-ins for the OIDC issuers, GitHub and Cloudflare,
+# The integration tests' stand-ins for the OIDC issuers and Cloudflare,
 # served over axum on tokio, and their calls to the Worker over reqwest.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "form"] }
