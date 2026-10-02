@@ -1,8 +1,8 @@
 // @ts-check
-/** @typedef {import("../../cf-oidc-broker/src/api.js").TokenExchangeRequest} TokenExchangeRequest */
-/** @typedef {import("../../cf-oidc-broker/src/api.js").TokenExchangeResponse} TokenExchangeResponse */
-/** @typedef {import("../../cf-oidc-broker/src/api.js").ErrorResponse} ErrorResponse */
-/** @typedef {import("../../cf-oidc-broker/src/api.js").BucketCredentials} BucketCredentials */
+/** @typedef {import("./api.js").TokenExchangeRequest} TokenExchangeRequest */
+/** @typedef {import("./api.js").TokenExchangeResponse} TokenExchangeResponse */
+/** @typedef {import("./api.js").ErrorResponse} ErrorResponse */
+/** @typedef {import("./api.js").BucketCredentials} BucketCredentials */
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { brokerURL, fail, idToken, input, mask, write } from "./runner.js";

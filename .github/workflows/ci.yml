@@ -26,11 +26,6 @@ jobs:
         run: nix develop --command pnpm typecheck
       - name: Test
         run: nix develop --command pnpm test
-      - name: Build
-        run: nix develop --command pnpm build
-      - name: Check Bundle
-        run: nix develop --command pnpm --filter cf-oidc-broker check:bundle
-      # The Rust Worker, which replaces the TypeScript broker once it passes the same tests.
       - name: Check Rust Formatting
         run: nix develop --command cargo fmt --all --check
       - name: Test Rust
@@ -43,7 +38,7 @@ jobs:
       - name: Integration Test Rust Worker
         run: nix develop --command crates/cf-oidc-exchange-api/tests/run.sh
       - name: Validate Terraform Module
-        working-directory: packages/cf-oidc-broker/terraform
+        working-directory: deployment/terraform
         run: |
           nix develop --command tofu fmt -check -recursive
           nix develop --command tofu init -backend=false
@@ -170,15 +165,22 @@ jobs:
           ref: ${{ needs.release.outputs.tag_name }}
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v23
+      # The Worker as deployment/terraform uploads it: the entry module, worker-build's
+      # index.js, and the wasm as base64 text, so Terraform can check its checksum.
       - name: Build
+        working-directory: crates/cf-oidc-exchange-api
         run: |
-          nix develop --command pnpm install --frozen-lockfile
-          nix develop --command pnpm build
-          cd packages/cf-oidc-broker/dist && sha256sum broker.js > broker.js.sha256
+          nix develop --command worker-build --release
+          mkdir -p "$RUNNER_TEMP/release"
+          cp worker/entry.js build/index.js "$RUNNER_TEMP/release/"
+          base64 -w0 build/index_bg.wasm > "$RUNNER_TEMP/release/index_bg.wasm.base64"
+          cd "$RUNNER_TEMP/release" && sha256sum entry.js index.js index_bg.wasm.base64 > SHA256SUMS
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release.outputs.tag_name }}
           files: |
-            packages/cf-oidc-broker/dist/broker.js
-            packages/cf-oidc-broker/dist/broker.js.sha256
+            ${{ runner.temp }}/release/entry.js
+            ${{ runner.temp }}/release/index.js
+            ${{ runner.temp }}/release/index_bg.wasm.base64
+            ${{ runner.temp }}/release/SHA256SUMS

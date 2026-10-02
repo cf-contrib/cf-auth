@@ -1,4 +1,4 @@
-# cf-oidc-auth policy. See packages/cf-oidc-broker/README.md for the full reference.
+# cf-oidc-auth policy. See crates/cf-oidc-exchange-api/README.md for the full reference.
 # This file is a Terraform template: ${account_id} and ${broker_url} are filled
 # in by the module, plus anything in var.policy_vars.
 # All IDs below are placeholders: find yours with

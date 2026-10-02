@@ -1,5 +1,6 @@
-// The broker's HTTP contract. The action type-checks against this file, so it
-// must stay free of runtime code and Workers-specific types.
+// The broker's HTTP contract, as the action uses it: types only, which the action
+// type-checks against. The contract is crates/cf-oidc-exchange-sdk's OpenAPI
+// document (openapi/oidc/exchange/v1/exchangev1.yaml); keep this file in step.
 
 /** What the presented `subject_token` is: a GitHub Actions OIDC token (`id_token` or `jwt`), or a GitHub user token (`access_token`). */
 export type SubjectTokenType =
@@ -17,7 +18,7 @@ export type IssuedTokenType =
   | "urn:ietf:params:oauth:token-type:jwt";
 
 /**
- * Body of `POST /oauth/token`, an RFC 8693 token exchange, form-encoded or JSON. `profile`,
+ * Body of `POST /oauth/token`, an RFC 8693 token exchange, form-encoded. `profile`,
  * `ttl` and `repository` are the broker's own extension parameters.
  */
 export interface TokenExchangeRequest {
@@ -59,7 +60,7 @@ export interface TokenExchangeResponse {
 }
 
 /**
- * Body of `POST /oauth/revoke`, an RFC 7009 revocation, form-encoded or JSON. Answers `200`
+ * Body of `POST /oauth/revoke`, an RFC 7009 revocation, form-encoded. Answers `200`
  * whether the token was revoked, already gone or never valid; `403` for tokens the broker didn't mint.
  */
 export interface TokenRevocationRequest {

@@ -9,6 +9,6 @@ output "worker_name" {
 }
 
 output "release_tag" {
-  value       = var.broker_file != null ? "local" : data.github_release.this[0].release_tag
-  description = "cf-oidc-auth release that was deployed, or \"local\" for broker_file."
+  value       = var.worker_dir != null ? "local" : data.github_release.this[0].release_tag
+  description = "cf-oidc-auth release that was deployed, or \"local\" for worker_dir."
 }

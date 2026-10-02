@@ -63,15 +63,15 @@ variable "release_tag" {
   default     = "v0.8.0" # x-release-please-version
 }
 
-variable "broker_file" {
+variable "worker_dir" {
   type        = string
-  description = "Path to a locally built broker.js (pnpm build). Deploys it instead of downloading a release."
+  description = "Path to a locally built Worker: a directory with entry.js, index.js and index_bg.wasm (worker-build --release, then copy worker/entry.js in). Deploys it instead of downloading a release."
   default     = null
 }
 
-variable "broker_sha256" {
+variable "checksums_sha256" {
   type        = string
-  description = "Expected SHA-256 of broker.js (from the release's broker.js.sha256). Set it to pin the artifact."
+  description = "Expected SHA-256 of the release's SHA256SUMS, which every downloaded file is checked against. Set it to pin the artifacts."
   default     = null
 }
 

@@ -1,5 +1,5 @@
 // @ts-check
-/** @typedef {import("../../cf-oidc-broker/src/api.js").TokenRevocationRequest} TokenRevocationRequest */
+/** @typedef {import("./api.js").TokenRevocationRequest} TokenRevocationRequest */
 // Revokes the token and deletes the R2 credentials file at job end. Never fails the
 // job: the token expires on its own anyway.
 import { rmSync } from "node:fs";

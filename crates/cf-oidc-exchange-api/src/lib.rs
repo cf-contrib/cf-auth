@@ -1,7 +1,5 @@
 //! The broker as a Rust Worker: the `oidc.exchange.v1` API, generated from the
 //! spec in `cf-oidc-exchange-sdk`, served over the Workers runtime.
-//!
-//! It replaces `packages/cf-oidc-broker` once it passes the same tests.
 
 pub mod audit;
 pub mod cloudflare;

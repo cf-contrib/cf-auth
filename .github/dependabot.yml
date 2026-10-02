@@ -25,9 +25,6 @@ updates:
     cooldown:
       default-days: 3
     ignore:
-      # @cloudflare/vitest-pool-workers supports vitest 4 only; bump it together with the pool.
-      - dependency-name: "vitest"
-        update-types: ["version-update:semver-major"]
       # The action runs on node24; keep the types on the same major.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
@@ -42,11 +39,25 @@ updates:
       prefix: "chore"
       include: "scope"
   - package-ecosystem: "terraform"
-    directory: "/packages/cf-oidc-broker/terraform"
+    directory: "/deployment/terraform"
     schedule:
       interval: "weekly"
     groups:
       all-terraform:
+        patterns: ["*"]
+    labels:
+      - "dependencies"
+      - "auto-merge"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      all-cargo:
         patterns: ["*"]
     labels:
       - "dependencies"

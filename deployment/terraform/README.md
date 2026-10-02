@@ -1,13 +1,13 @@
 # cf-oidc-auth Terraform module
 
-> The Terraform / OpenTofu half of [cf-oidc-auth](../../..): deploys the released
-> `broker.js` as a Cloudflare Worker, with its bindings, hourly cleanup cron, and
+> The Terraform / OpenTofu half of [cf-oidc-auth](../..): deploys the released
+> broker, a Rust Worker, to Cloudflare, with its bindings, hourly cleanup cron, and
 > a workers.dev URL (or, optionally, a custom domain). No `wrangler` or local
 > build is needed.
 
 ```hcl
 module "cf_oidc_broker" {
-  source = "git::https://github.com/cf-contrib/cf-oidc-auth.git//packages/cf-oidc-broker/terraform?ref=v0.8.0" # x-release-please-version
+  source = "git::https://github.com/cf-contrib/cf-oidc-auth.git//deployment/terraform?ref=v0.8.0" # x-release-please-version
 
   account_id          = var.account_id
   hostname            = "cf-auth.example.workers.dev"
@@ -21,17 +21,17 @@ output "broker_url" {
 ```
 
 The module is released with the action and the broker from the same tag, and
-by default deploys the `broker.js` of the release its `ref` points to.
+by default deploys the broker of the release its `ref` points to.
 
 ## Prerequisites
 
 - Terraform or OpenTofu >= 1.9.
 - The **broker token**, an account-owned API token with
-  **Account API Tokens Write** (see the [broker's README](..#deploy)),
+  **Account API Tokens Write** (see the [broker's README](../../crates/cf-oidc-exchange-api#deploy)),
   stored in [Secrets Store](https://developers.cloudflare.com/secrets-store/) (open beta).
   If any profile has `buckets`, the token also needs R2 permissions
   covering what they delegate: it creates their credentials and is
-  their parent (see [Buckets](..#buckets)).
+  their parent (see [Buckets](../../crates/cf-oidc-exchange-api#buckets)).
 - A separate API token for *deploying*, exported as `CLOUDFLARE_API_TOKEN`, with:
   - **Account → Workers Scripts: Edit**
   - **Account → Secrets Store: Edit**, to bind the broker token's secret
@@ -112,27 +112,38 @@ profiles:
         prefixes: ["{repository_owner_id}/{repository_id}/"]  # filled in by the broker, per job
 ```
 
-The format is documented in the [broker's README](..#policy). A
+The format is documented in the [broker's README](../../crates/cf-oidc-exchange-api#policy). A
 fuller sample is in [`tests/fixtures/policy.yaml`](tests/fixtures/policy.yaml).
 
-The rendered policy is uploaded as `policy.json`, a second file in the Worker
-version next to `broker.js`, so it isn't subject to the 5 KB limit on Worker
+The rendered policy is uploaded as `policy.json`, a text module in the Worker
+version next to the broker's, so it isn't subject to the 5 KB limit on Worker
 variables. Every policy change creates a new Worker version.
 
 ## Upgrading and pinning
 
 The module's `ref` pins the broker too: `?ref=vX.Y.Z` deploys that release's
-`broker.js`. To upgrade, bump the `ref`, run `tofu init -upgrade`, then `apply` to
+Worker. To upgrade, bump the `ref`, run `tofu init -upgrade`, then `apply` to
 upload a new Worker version and shift all traffic to it. Keep the action's
 version in your workflows on the same release.
 
-To pin the artifact itself, also set `broker_sha256` to the value in the
-release's `broker.js.sha256`. The plan fails if the download doesn't match. Set
-`release_tag = "latest"` to track the newest release instead.
+A release has the Worker's three modules, `entry.js`, `index.js` and the wasm
+(as base64 text, `index_bg.wasm.base64`), and a `SHA256SUMS` of them. The plan
+fails if a download doesn't match `SHA256SUMS`. To pin the artifacts too, set
+`checksums_sha256` to the SHA-256 of the release's `SHA256SUMS`:
 
-To deploy a build of your own (an unreleased branch, a fork), run `pnpm build`
-and set `broker_file` to the resulting `packages/cf-oidc-broker/dist/broker.js`.
-Nothing is downloaded then.
+```sh
+curl -fsSL https://github.com/cf-contrib/cf-oidc-auth/releases/download/v0.8.0/SHA256SUMS | sha256sum # x-release-please-version
+```
+
+Set `release_tag = "latest"` to track the newest release instead.
+
+To deploy a build of your own (an unreleased branch, a fork), build the Worker
+and set `worker_dir` to the result. Nothing is downloaded then:
+
+```sh
+cd crates/cf-oidc-exchange-api
+worker-build --release && cp worker/entry.js build/   # worker_dir = ".../crates/cf-oidc-exchange-api/build"
+```
 
 ## Inputs
 
@@ -142,12 +153,12 @@ Nothing is downloaded then.
 | `hostname` | yes | | `<worker_name>.<subdomain>.workers.dev`, or a custom domain. |
 | `zone_id` | for a custom domain | `null` | Zone ID of the zone holding a custom-domain `hostname`. |
 | `broker_token_secret` | yes | | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the broker token. With `buckets`, the token also needs R2 permissions covering what they delegate. |
-| `signing_key_secret` | for profiles with an `audience` | `null` | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the RSA key the broker signs its own tokens with. See [Tokens for other services](../README.md#tokens-for-other-services). |
+| `signing_key_secret` | for profiles with an `audience` | `null` | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the RSA key the broker signs its own tokens with. See [Tokens for other services](../../crates/cf-oidc-exchange-api#tokens-for-other-services). |
 | `policy_file` | yes | | Policy YAML path, rendered as a template. |
 | `policy_vars` | no | `{}` | Extra template variables for the policy. |
-| `broker_file` | no | `null` | Local `broker.js` to deploy instead of a release. |
+| `worker_dir` | no | `null` | A local build (`entry.js`, `index.js`, `index_bg.wasm`) to deploy instead of a release. |
 | `release_tag` | no | the module's release | Release to deploy, or `latest`. |
-| `broker_sha256` | no | `null` | Expected SHA-256 of `broker.js`. |
+| `checksums_sha256` | no | `null` | Expected SHA-256 of the release's `SHA256SUMS`. |
 | `worker_name` | no | `cf-auth` | Worker script name. |
 | `worker_compatibility_date` | no | `2026-08-15` | Workers compatibility date. |
 

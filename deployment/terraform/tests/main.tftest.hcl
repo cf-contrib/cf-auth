@@ -1,5 +1,6 @@
 # Plans the module with mocked providers: no credentials or network needed.
-# Covers the broker token binding, URL modes, local artifacts, the policy template,
+# Covers the broker token binding, URL modes, the release and local artifacts, their
+# checksums, the policy template,
 # bucket prefix placeholders and the policy module.
 mock_provider "cloudflare" {}
 mock_provider "github" {}
@@ -8,24 +9,84 @@ mock_provider "http" {}
 override_data {
   target = data.github_release.this
   values = {
-    assets = [{
-      name                 = "broker.js"
-      browser_download_url = "https://example.com/broker.js"
-      content_type         = "application/javascript"
-      created_at           = "2026-09-29T00:00:00Z"
-      id                   = 1
-      label                = ""
-      node_id              = "RA_test"
-      size                 = 18
-      updated_at           = "2026-09-29T00:00:00Z"
-      url                  = "https://api.github.com/repos/cf-contrib/cf-oidc-auth/releases/assets/1"
-    }]
+    assets = [
+      {
+        name                 = "entry.js"
+        browser_download_url = "https://example.com/entry.js"
+        content_type         = "application/octet-stream"
+        created_at           = "2026-10-02T00:00:00Z"
+        id                   = 1
+        label                = ""
+        node_id              = "RA_test1"
+        size                 = 1
+        updated_at           = "2026-10-02T00:00:00Z"
+        url                  = "https://api.github.com/repos/cf-contrib/cf-oidc-auth/releases/assets/1"
+      },
+      {
+        name                 = "index.js"
+        browser_download_url = "https://example.com/index.js"
+        content_type         = "application/octet-stream"
+        created_at           = "2026-10-02T00:00:00Z"
+        id                   = 2
+        label                = ""
+        node_id              = "RA_test2"
+        size                 = 1
+        updated_at           = "2026-10-02T00:00:00Z"
+        url                  = "https://api.github.com/repos/cf-contrib/cf-oidc-auth/releases/assets/2"
+      },
+      {
+        name                 = "index_bg.wasm.base64"
+        browser_download_url = "https://example.com/index_bg.wasm.base64"
+        content_type         = "application/octet-stream"
+        created_at           = "2026-10-02T00:00:00Z"
+        id                   = 3
+        label                = ""
+        node_id              = "RA_test3"
+        size                 = 1
+        updated_at           = "2026-10-02T00:00:00Z"
+        url                  = "https://api.github.com/repos/cf-contrib/cf-oidc-auth/releases/assets/3"
+      },
+      {
+        name                 = "SHA256SUMS"
+        browser_download_url = "https://example.com/SHA256SUMS"
+        content_type         = "application/octet-stream"
+        created_at           = "2026-10-02T00:00:00Z"
+        id                   = 4
+        label                = ""
+        node_id              = "RA_test4"
+        size                 = 1
+        updated_at           = "2026-10-02T00:00:00Z"
+        url                  = "https://api.github.com/repos/cf-contrib/cf-oidc-auth/releases/assets/4"
+      },
+    ]
   }
 }
 
+# A release whose files match its SHA256SUMS.
 override_data {
-  target = data.http.broker_js
+  target = data.http.entry_js
+  values = { response_body = "export { default } from \"./index.js\";" }
+}
+
+override_data {
+  target = data.http.index_js
   values = { response_body = "export default {};" }
+}
+
+override_data {
+  target = data.http.index_bg_wasm
+  values = { response_body = "AGFzbQEAAAA=" }
+}
+
+override_data {
+  target = data.http.sha256sums
+  values = {
+    response_body = <<-EOT
+      6e7039cd217402fb94990d0ce98aabf5d6f7452777d3f00ba115658fa0e0aa42  entry.js
+      9f085b1079ab38f776bbb3930dfd067a838ca3e0483aff8625f88837e8ed964c  index.js
+      037e64cdc23d28f2d300b10174f8398968910e7520c8e68ad5eaa581f05a0137  index_bg.wasm.base64
+    EOT
+  }
 }
 
 variables {
@@ -201,26 +262,37 @@ run "rejects_zone_id_on_workers_dev" {
   expect_failures = [var.zone_id]
 }
 
-run "local_broker_file" {
+run "uploads_the_release" {
+  command = plan
+
+  assert {
+    condition     = cloudflare_worker_version.this.main_module == "entry.js"
+    error_message = "entry.js should be the main module"
+  }
+
+  assert {
+    condition = alltrue([
+      for name, type in {
+        "entry.js"      = "application/javascript+module"
+        "index.js"      = "application/javascript+module"
+        "index_bg.wasm" = "application/wasm"
+        "policy.json"   = "text/plain"
+      } : anytrue([for m in cloudflare_worker_version.this.modules : m.name == name && m.content_type == type])
+    ])
+    error_message = "entry.js, index.js, index_bg.wasm and policy.json should be uploaded"
+  }
+
+  assert {
+    condition     = anytrue([for m in cloudflare_worker_version.this.modules : m.name == "index_bg.wasm" && m.content_base64 == "AGFzbQEAAAA="])
+    error_message = "the release's base64 wasm should be uploaded as the wasm module"
+  }
+}
+
+run "pins_the_release" {
   command = plan
 
   variables {
-    broker_file = "tests/fixtures/broker.js"
-  }
-
-  assert {
-    condition     = length(data.github_release.this) == 0 && length(data.http.broker_js) == 0
-    error_message = "a local broker_file should skip the release download"
-  }
-
-  assert {
-    condition     = anytrue([for m in cloudflare_worker_version.this.modules : m.content_base64 == filebase64("tests/fixtures/broker.js")])
-    error_message = "the local broker_file should be uploaded"
-  }
-
-  assert {
-    condition     = output.release_tag == "local"
-    error_message = "release_tag should say local"
+    checksums_sha256 = "8cc9e69af40b7d72ad3b9993031e1b710697b1c727d3347c593043c975b31af2"
   }
 }
 
@@ -228,11 +300,44 @@ run "rejects_a_checksum_mismatch" {
   command = plan
 
   variables {
-    broker_file   = "tests/fixtures/broker.js"
-    broker_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+    checksums_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
   }
 
   expect_failures = [cloudflare_worker_version.this]
+}
+
+run "rejects_a_file_that_doesnt_match_sha256sums" {
+  command = plan
+
+  override_data {
+    target = data.http.index_js
+    values = { response_body = "export default { tampered: true };" }
+  }
+
+  expect_failures = [cloudflare_worker_version.this]
+}
+
+run "local_worker_dir" {
+  command = plan
+
+  variables {
+    worker_dir = "tests/fixtures/worker"
+  }
+
+  assert {
+    condition     = length(data.github_release.this) == 0 && length(data.http.index_js) == 0
+    error_message = "a local worker_dir should skip the release download"
+  }
+
+  assert {
+    condition     = anytrue([for m in cloudflare_worker_version.this.modules : m.name == "index_bg.wasm" && m.content_base64 == filebase64("tests/fixtures/worker/index_bg.wasm")])
+    error_message = "the local wasm should be uploaded"
+  }
+
+  assert {
+    condition     = output.release_tag == "local"
+    error_message = "release_tag should say local"
+  }
 }
 
 run "policy_vars" {

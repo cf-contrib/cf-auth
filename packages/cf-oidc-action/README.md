@@ -27,7 +27,7 @@ jobs:
       - run: npx wrangler deploy
 ```
 
-It needs a deployed [broker](../cf-oidc-broker) whose policy allows this workflow.
+It needs a deployed [broker](../../crates/cf-oidc-exchange-api) whose policy allows this workflow.
 
 ## Versions
 
@@ -100,7 +100,7 @@ None of this can be switched off: what's exported is decided by the profile. Exp
 
 ### R2 over the S3 API
 
-When the matched profile has [`buckets`](../cf-oidc-broker#buckets), the broker returns temporary R2 credentials for each bucket, limited to its key prefixes. The action writes them to a credentials file, `$RUNNER_TEMP/cf-oidc/credentials` (mode `0600`), with one AWS profile per bucket, named after it. It exports:
+When the matched profile has [`buckets`](../../crates/cf-oidc-exchange-api#buckets), the broker returns temporary R2 credentials for each bucket, limited to its key prefixes. The action writes them to a credentials file, `$RUNNER_TEMP/cf-oidc/credentials` (mode `0600`), with one AWS profile per bucket, named after it. It exports:
 
 | Variable | One bucket | Several buckets |
 |---|---|---|

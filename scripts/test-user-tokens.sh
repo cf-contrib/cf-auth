@@ -20,8 +20,8 @@
 # Needs:
 #   - CLOUDFLARE_ACCOUNT_ID: the account the broker mints in.
 #   - The broker token in the local Secrets Store, under the store_id and
-#     secret_name in packages/cf-oidc-broker/wrangler.toml:
-#       cd packages/cf-oidc-broker
+#     secret_name in crates/cf-oidc-exchange-api/wrangler.toml:
+#       cd crates/cf-oidc-exchange-api
 #       wrangler secrets-store secret create 00000000000000000000000000000000 --name cf-auth-broker-token --scopes workers
 #   - gh, logged in. The script uses gh's own login, ignoring GITHUB_TOKEN and
 #     GH_TOKEN, as `env -u GITHUB_TOKEN -u GH_TOKEN gh auth token` would.
@@ -33,7 +33,7 @@
 #   - Optional TEST_READ_ONLY_REPO: an owner/repo in the same org where you're
 #     only a reader or triager, to check that a profile needing write refuses it.
 #
-# It replaces src/policy.json while it runs and puts yours back afterwards.
+# It replaces the Worker's policy.json while it runs and puts yours back afterwards.
 # Every token it mints is revoked before it exits.
 #
 # Prints no secrets: the output is safe to share.
@@ -62,13 +62,13 @@ die() {
   exit 1
 }
 
-for tool in gh jq curl pnpm; do command -v "$tool" >/dev/null || die "$tool is required"; done
+for tool in gh jq curl wrangler; do command -v "$tool" >/dev/null || die "$tool is required"; done
 [[ ${CLOUDFLARE_ACCOUNT_ID:-} =~ ^[0-9a-f]{32}$ ]] || die "set CLOUDFLARE_ACCOUNT_ID to the account's 32-character ID"
 [[ $REPO =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "the repo must be owner/name"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BROKER_DIR="$ROOT/packages/cf-oidc-broker"
-POLICY="$BROKER_DIR/src/policy.json"
+BROKER_DIR="$ROOT/crates/cf-oidc-exchange-api"
+POLICY="$BROKER_DIR/policy.json"
 WORK=$(mktemp -d)
 LOG="$WORK/wrangler.log"
 WRANGLER_PID=""
@@ -145,16 +145,17 @@ STORE_ID=$(sed -n 's/^store_id *= *"\([^"]*\)".*/\1/p' "$BROKER_DIR/wrangler.tom
 SECRET_NAME=$(sed -n 's/^secret_name *= *"\([^"]*\)".*/\1/p' "$BROKER_DIR/wrangler.toml")
 LIST_ARGS=(secrets-store secret list "$STORE_ID")
 [[ -n ${TEST_PERSIST_TO:-} ]] && LIST_ARGS+=(--persist-to "$TEST_PERSIST_TO")
-(cd "$BROKER_DIR" && pnpm exec wrangler "${LIST_ARGS[@]}" 2>&1) | grep -q "$SECRET_NAME" ||
-  die "no $SECRET_NAME secret in the local store $STORE_ID; create it from packages/cf-oidc-broker (see --help)"
+(cd "$BROKER_DIR" && wrangler "${LIST_ARGS[@]}" 2>&1) | grep -q "$SECRET_NAME" ||
+  die "no $SECRET_NAME secret in the local store $STORE_ID; create it from crates/cf-oidc-exchange-api (see --help)"
 
 echo "starting wrangler dev on $BROKER"
 DEV_ARGS=(--port "$PORT" --show-interactive-dev-session=false --var "CF_OIDC_BROKER_ACCOUNT_ID:$CLOUDFLARE_ACCOUNT_ID")
 [[ -n ${TEST_PERSIST_TO:-} ]] && DEV_ARGS+=(--persist-to "$TEST_PERSIST_TO")
-(cd "$BROKER_DIR" && exec pnpm exec wrangler dev "${DEV_ARGS[@]}") >"$LOG" 2>&1 &
+(cd "$BROKER_DIR" && exec wrangler dev "${DEV_ARGS[@]}") >"$LOG" 2>&1 &
 WRANGLER_PID=$!
 
-for _ in $(seq 60); do
+# The first run builds the Worker, which takes a while.
+for _ in $(seq 300); do
   status=$(curl -s -o /dev/null -w '%{http_code}' "$BROKER/healthz" || true)
   [[ $status == 200 ]] && break
   if [[ $status == 500 ]]; then
@@ -178,18 +179,17 @@ ACCESS=urn:ietf:params:oauth:token-type:access_token
 ID_TOKEN=urn:ietf:params:oauth:token-type:id_token
 
 # request <subject_token|-> <subject_token_type> <fields|-> sets STATUS, REASON and,
-# on a 200, TOKEN_ID. <fields> is a JSON object of the broker's own parameters. The
-# token goes to curl on stdin, never on argv (printf is a builtin); the response
-# stays in $WORK.
+# on a 200, TOKEN_ID. <fields> is a JSON object of the broker's own parameters,
+# sent form-encoded with the rest. The token goes to curl on stdin, never on argv
+# (printf is a builtin); the response stays in $WORK.
 request() {
   local token=$1 type=$2 fields=$3 before extra=""
   before=$(wc -l <"$LOG")
-  [[ $fields != - ]] && { extra=${fields#\{}; extra=${extra%\}}; }
-  [[ -n $extra ]] && extra=",$extra"
+  [[ $fields != - ]] && extra=$(jq -r 'to_entries | map("&\(.key)=\(.value | tostring | @uri)") | join("")' <<<"$fields")
   local subject=""
-  [[ $token != - ]] && subject=$(printf ',"subject_token":"%s"' "$token")
-  STATUS=$(printf '{"grant_type":"%s","subject_token_type":"%s"%s%s}' "$GRANT" "$type" "$subject" "$extra" |
-    curl -s -o "$WORK/body" -w '%{http_code}' -X POST -H 'content-type: application/json' --data-binary @- "$BROKER/oauth/token")
+  [[ $token != - ]] && subject=$(printf '&subject_token=%s' "$token")
+  STATUS=$(printf 'grant_type=%s&subject_token_type=%s%s%s' "$GRANT" "$type" "$subject" "$extra" |
+    curl -s -o "$WORK/body" -w '%{http_code}' -X POST -H 'content-type: application/x-www-form-urlencoded' --data-binary @- "$BROKER/oauth/token")
   sleep 0.5 # let wrangler flush the audit line
   REASON=$(tail -n +"$((before + 1))" "$LOG" | sed -n 's/.*"event":"token.deny".*"reason":"\([^"]*\)".*/\1/p' | tail -1)
   TOKEN_ID=""
@@ -256,9 +256,10 @@ check "installation token (ghs_)" ghs_notARealInstallationToken000000000000 "$AC
   "{\"repository\":\"$REPO\"}" 401 installation_token
 check "token GitHub rejects" gho_notARealToken000000000000000000000000 "$ACCESS" \
   "{\"repository\":\"$REPO\"}" 401 invalid_user_token
-check "no token" - "$ACCESS" "{\"repository\":\"$REPO\"}" 400 invalid_body
-user "no repository" '{"profile":"me"}' 400 invalid_body
-user "malformed repository" '{"profile":"me","repository":"a/b/c"}' 400 invalid_body
+check "no token" - "$ACCESS" "{\"repository\":\"$REPO\"}" 400 invalid_request
+# Without a repository, only who the person is counts: "me" needs a role on one.
+user "no repository" '{"profile":"me"}' 403 profile_mismatch
+user "malformed repository" '{"profile":"me","repository":"a/b/c"}' 400 invalid_request
 check "gh token passed off as a job's OIDC token" "$GH_USER_TOKEN" "$ID_TOKEN" '{"profile":"ci"}' 401 invalid_jwt
 for path in /v1/token /v1/actions/token /v1/users/token /v1/revoke; do gone "$path"; done
 
