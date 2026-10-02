@@ -35,6 +35,7 @@ use cf_oidc_exchange_sdk::v1::{
     Jwks, TokenExchangeRequest, TokenExchangeRequestSubjectTokenType as SubjectTokenType,
     TokenExchangeResponse, TokenExchangeResponseTokenType as TokenType, TokenRevocationRequest,
 };
+use cf_oidc_jwt::Identity;
 use chrono::{DateTime, Utc};
 use cloudflare::v4::{
     ApiOpError, HttpClient, IamCreatePayload, IamEffect, IamPermissionGroup,
@@ -52,12 +53,9 @@ use worker::{
     wasm_bindgen_futures::JsFuture,
 };
 
-use super::{
-    config::{
-        BucketConfig, BucketPermission, CLOUDFLARE_AUDIENCE, Config, Effect, PolicyConfig,
-        ProfileConfig, ProviderConfig, TokenPolicyConfig,
-    },
-    layer::{self, Identity},
+use super::config::{
+    BucketConfig, BucketPermission, CLOUDFLARE_AUDIENCE, Config, Effect, PolicyConfig,
+    ProfileConfig, ProviderConfig, TokenPolicyConfig,
 };
 
 /// The token exchange grant, RFC 8693's.
@@ -151,7 +149,7 @@ impl ExchangeServiceHandler {
             event = "token.issue",
             provider = %caller.provider.name,
             profile = %profile.name,
-            sub = caller.subject(),
+            sub = caller.identity.subject(),
             claims = %serde_json::Value::Object(caller.matched(Some(profile))),
             audience = %profile.audience,
             jti = %issued.jti,
@@ -210,7 +208,7 @@ impl ExchangeServiceHandler {
                 event = "token.mint",
                 provider = %caller.provider.name,
                 profile = %profile.name,
-                sub = caller.subject(),
+                sub = caller.identity.subject(),
                 claims = %serde_json::Value::Object(caller.matched(Some(profile))),
                 token_id = %minted.token_id,
                 expires_at = minted.expires_on.timestamp(),
@@ -226,7 +224,7 @@ impl ExchangeServiceHandler {
                         event = "r2.issued",
                         provider = %caller.provider.name,
                         profile = %profile.name,
-                        sub = caller.subject(),
+                        sub = caller.identity.subject(),
                         claims = %serde_json::Value::Object(caller.matched(Some(profile))),
                         bucket = %bucket.name,
                         prefixes = ?prefixes,
@@ -368,7 +366,7 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                         event = "token.deny",
                         provider = caller.as_ref().map(|c| c.provider.name.as_str()),
                         profile,
-                        sub = caller.as_ref().and_then(Caller::subject),
+                        sub = caller.as_ref().and_then(|c| c.identity.subject()),
                         claims = caller.as_ref().map(|c| display(serde_json::Value::Object(c.matched(named)))),
                         error = err.error.as_str(),
                         message = %err.message,
@@ -518,17 +516,12 @@ struct Caller<'p> {
 impl<'p> Caller<'p> {
     /// The caller presenting `token`, as the auth layer verified it.
     fn of(token: &str, policy: &'p PolicyConfig) -> Result<Self, Error> {
-        let identity = layer::identity(token)?;
+        let unauthorized = |why: &str| Error::new(ErrorCode::Unauthorized, why);
+        let identity = cf_oidc_jwt::verified(token)
+            .ok_or_else(|| unauthorized("the subject token wasn't verified"))?;
         let provider = policy
-            .providers
-            .iter()
-            .find(|provider| provider.name == identity.provider)
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorCode::Unauthorized,
-                    "the subject token's provider is gone",
-                )
-            })?;
+            .provider_for(&identity.claims)
+            .map_err(|why| unauthorized(&why))?;
         Ok(Self { identity, provider })
     }
 
@@ -549,15 +542,9 @@ impl<'p> Caller<'p> {
             .collect()
     }
 
-    /// The token's `sub`, if it has one.
-    fn subject(&self) -> Option<&str> {
-        let sub = self.identity.claims.get("sub").and_then(Value::as_str);
-        sub.filter(|sub| !sub.is_empty())
-    }
-
     /// `cf-oidc:<provider>:<sub>`, whatever the issuer, cut to fit.
     fn token_name(&self) -> String {
-        let sub = self.subject().unwrap_or("unknown");
+        let sub = self.identity.subject().unwrap_or("unknown");
         let name = format!("{TOKEN_PREFIX}{}:{sub}", self.provider.name);
         name.chars().take(NAME_MAX).collect()
     }
@@ -1085,7 +1072,7 @@ fn payload(
     }
 
     let mut payload = caller.matched(Some(profile));
-    let subject = match caller.subject() {
+    let subject = match caller.identity.subject() {
         Some(sub) => sub.to_string(),
         None => format!("{}:unknown", caller.provider.name),
     };
@@ -1121,14 +1108,15 @@ mod tests {
     use super::*;
     use crate::service::config::{
         ACCOUNT_SCOPE, R2_SCOPE, ZONE_SCOPE,
-        tests::{CACHE, NOW, claims, parse, policy},
+        tests::{CACHE, ISSUER, NOW, claims, parse, policy},
     };
 
     fn caller<'p>(policy: &'p PolicyConfig, claims: Map<String, Value>) -> Caller<'p> {
         Caller {
             identity: Identity {
-                provider: "github".into(),
+                issuer: ISSUER.into(),
                 claims,
+                claim_set: 0,
             },
             provider: &policy.providers[0],
         }

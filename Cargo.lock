@@ -246,6 +246,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "cf-oidc-exchange-sdk",
+ "cf-oidc-jwt",
  "chrono",
  "cloudflare",
  "rand_chacha",
@@ -254,7 +255,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "sha2 0.11.0",
  "tokio",
  "tower-layer",
  "tower-service",
@@ -285,6 +285,18 @@ dependencies = [
  "thiserror",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "cf-oidc-jwt"
+version = "0.8.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "web-sys",
+ "worker",
 ]
 
 [[package]]

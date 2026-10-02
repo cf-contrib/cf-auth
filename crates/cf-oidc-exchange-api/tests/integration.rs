@@ -754,11 +754,7 @@ mod exchange_requests {
         let t = start().await;
         let res = job_token("not-a-jwt", &[]).await;
         assert_eq!(res.status, 401);
-        assert_refused(
-            &t.deny().await,
-            "unauthorized",
-            "the subject token isn't valid: not a JWT",
-        );
+        assert_refused(&t.deny().await, "unauthorized", "invalid token: not a JWT");
         assert!(world().cloudflare.calls().is_empty());
     }
 }

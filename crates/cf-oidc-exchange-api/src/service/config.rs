@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 
+use cf_oidc_jwt::{ClaimSet, Provider, check_url};
 use cloudflare::v4::{
     IamResources, IamResourcesTypeObjectNested, IamResourcesTypeObjectNestedAdditionalProperty,
     IamResourcesTypeObjectString,
@@ -372,6 +373,25 @@ pub struct ProviderConfig {
     pub jwks_uri: Option<String>,
     /// Every token from it must match one of these, whichever profile it gets.
     pub claims: Vec<ClaimSet>,
+}
+
+/// What the auth layer verifies a token from it against.
+impl Provider for ProviderConfig {
+    fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
+    fn audience(&self) -> &str {
+        &self.audience
+    }
+
+    fn jwks_uri(&self) -> Option<&str> {
+        self.jwks_uri.as_deref()
+    }
+
+    fn claims(&self) -> &[ClaimSet] {
+        &self.claims
+    }
 }
 
 impl ProviderConfig {
@@ -854,111 +874,6 @@ fn is_segment(segment: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// Claim name to pattern. Matches when every claim matches.
-#[derive(Debug, Deserialize)]
-#[serde(try_from = "Map<String, Value>")]
-pub struct ClaimSet(BTreeMap<String, Pattern>);
-
-impl TryFrom<Map<String, Value>> for ClaimSet {
-    type Error = String;
-
-    fn try_from(raw: Map<String, Value>) -> Result<Self, String> {
-        if raw.is_empty() {
-            return Err("a claim set must match at least one claim".to_string());
-        }
-
-        let mut claims = BTreeMap::new();
-        for (claim, value) in raw {
-            // IDs may be written as JSON numbers; most issuers send strings.
-            let pattern = match value {
-                Value::String(s) if !s.is_empty() => s,
-                Value::Number(n) if n.is_u64() => n.to_string(),
-                Value::Bool(b) => b.to_string(),
-                _ => {
-                    return Err(format!(
-                        "claim {claim} must be a non-empty string, a number or a boolean"
-                    ));
-                }
-            };
-            // Guardrail 2: patterns stay narrow.
-            let pattern = Pattern::parse(&pattern)
-                .filter(|pattern| !is_id_claim(&claim) || matches!(pattern, Pattern::Exact(_)))
-                .ok_or_else(|| {
-                    if is_id_claim(&claim) {
-                        format!("claim {claim}: ID claims must match exactly")
-                    } else {
-                        format!("claim {claim}: * may only end a pattern, after a prefix")
-                    }
-                })?;
-            claims.insert(claim, pattern);
-        }
-        Ok(Self(claims))
-    }
-}
-
-impl ClaimSet {
-    pub fn matches(&self, claims: &Map<String, Value>) -> bool {
-        self.0
-            .iter()
-            .all(|(claim, pattern)| match claims.get(claim) {
-                // A list claim (`groups`, `amr`) matches if any entry does.
-                Some(Value::Array(values)) => {
-                    values.iter().any(|value| pattern.matches_value(value))
-                }
-                Some(value) => pattern.matches_value(value),
-                None => false,
-            })
-    }
-
-    /// The claims it matches on.
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.0.keys().map(String::as_str)
-    }
-}
-
-/// A claim's expected value: exact, or a prefix written with one trailing
-/// `*` (`example-org/*`). `*_id` claims must be exact.
-#[derive(Debug, PartialEq)]
-enum Pattern {
-    Exact(String),
-    Prefix(String),
-}
-
-impl Pattern {
-    /// `None` for a `*` anywhere but at the end of a non-empty prefix.
-    fn parse(pattern: &str) -> Option<Self> {
-        match pattern.strip_suffix('*') {
-            Some(prefix) if !prefix.is_empty() && !prefix.contains('*') => {
-                Some(Self::Prefix(prefix.to_string()))
-            }
-            Some(_) => None,
-            None if pattern.contains('*') => None,
-            None => Some(Self::Exact(pattern.to_string())),
-        }
-    }
-
-    fn matches(&self, value: &str) -> bool {
-        match self {
-            Self::Exact(expected) => value == expected,
-            Self::Prefix(prefix) => value.starts_with(prefix.as_str()),
-        }
-    }
-
-    /// Numbers and booleans compare as they're written in JSON.
-    fn matches_value(&self, value: &Value) -> bool {
-        match value {
-            Value::String(s) => self.matches(s),
-            Value::Number(n) => self.matches(&n.to_string()),
-            Value::Bool(b) => self.matches(if *b { "true" } else { "false" }),
-            _ => false,
-        }
-    }
-}
-
-fn is_id_claim(claim: &str) -> bool {
-    claim.ends_with("_id")
-}
-
 /// A Cloudflare ID: 32 lowercase hex digits.
 fn is_id(value: &str) -> bool {
     value.len() == 32 && value.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
@@ -991,24 +906,6 @@ fn check_bucket_name(name: &str) -> Result<(), &'static str> {
         && !name.ends_with('-'))
     {
         return Err("must be a valid R2 bucket name");
-    }
-    Ok(())
-}
-
-/// Whether `url` is somewhere keys may be fetched from: HTTPS, or plain HTTP
-/// on a loopback address, for a local issuer in development.
-pub(super) fn check_url(url: &str) -> Result<(), &'static str> {
-    let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
-        .iter()
-        .any(|prefix| {
-            url.strip_prefix(prefix)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '/']))
-        });
-    let https = url
-        .strip_prefix("https://")
-        .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'));
-    if url.contains(char::is_whitespace) || !(https || loopback) {
-        return Err("must be an https:// URL");
     }
     Ok(())
 }
@@ -1488,60 +1385,6 @@ pub(super) mod tests {
                 assert!(err.contains(expected), "{pointer} {claims}: {err}");
             }
         }
-    }
-
-    #[test]
-    fn pattern_is_exact_or_a_trailing_prefix() {
-        let parse = |p| Pattern::parse(p).unwrap();
-        assert!(parse("example-org/*").matches("example-org/app"));
-        assert!(parse("refs/heads/*").matches("refs/heads/feature/x"));
-        assert!(parse("refs/heads/main").matches("refs/heads/main"));
-        assert!(!parse("refs/heads/main").matches("refs/heads/main2"));
-        assert!(!parse("example-org/*").matches("other-org/app"));
-        // Regex metacharacters are literal.
-        assert!(parse("a.b*").matches("a.bc"));
-        assert!(!parse("a.b*").matches("axbc"));
-        for pattern in ["*", "*x", "a*b", "a**"] {
-            assert_eq!(Pattern::parse(pattern), None, "{pattern}");
-        }
-    }
-
-    fn set(value: Value) -> ClaimSet {
-        serde_json::from_value(value).unwrap()
-    }
-
-    #[test]
-    fn claim_set_needs_every_claim_to_match() {
-        let set = set(json!({ "repository": "example-org/*", "ref": "refs/heads/main" }));
-        assert!(set.matches(&claims()));
-
-        let mut other_ref = claims();
-        other_ref.insert("ref".into(), "refs/heads/dev".into());
-        assert!(!set.matches(&other_ref));
-        other_ref.remove("ref");
-        assert!(!set.matches(&other_ref), "a missing claim never matches");
-    }
-
-    #[test]
-    fn claim_set_matches_lists_numbers_and_booleans() {
-        let matches = |value: Value| set(value).matches(&claims());
-        assert!(
-            matches(json!({ "groups": "cache-uploaders" })),
-            "a list matches if any entry does"
-        );
-        assert!(
-            matches(json!({ "email_verified": true })),
-            "booleans compare as written"
-        );
-        assert!(
-            matches(json!({ "repository_id": 200000002 })),
-            "numbers compare as written"
-        );
-        assert!(!matches(json!({ "groups": "admins" })));
-        assert!(
-            !matches(json!({ "repository_id": "2000000021" })),
-            "IDs compare exactly"
-        );
     }
 
     #[test]
