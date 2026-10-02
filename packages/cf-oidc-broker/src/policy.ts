@@ -129,6 +129,8 @@ const Bucket = v.strictObject({
 const Profile = v.strictObject({
   name: v.pipe(v.string(), v.regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/, "must be 1-64 of [A-Za-z0-9_.-]")),
   subject: v.optional(v.picklist(["actions", "users"], "must be actions or users"), "actions"),
+  // Off switch for incidents: the profile stays in the policy but never matches.
+  enabled: v.optional(v.boolean("must be true or false"), true),
   match: v.optional(v.record(v.pipe(v.string(), v.regex(/^[a-z_]+$/, "must be a claim name")), ClaimValue), {}),
   // For everything the profile hands out: the token and the buckets' credentials.
   ttl: v.optional(Duration),
@@ -176,6 +178,8 @@ export interface Profile {
   name: string;
   /** Only callers of this subject can use the profile. */
   subject: Subject;
+  /** A disabled profile never matches, even when a request names it. */
+  enabled: boolean;
   /** All keys must match (AND). Always includes `repository_owner_id`. */
   match: Record<string, string>;
   ttl: number;
@@ -245,9 +249,12 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
     names.add(profile.name);
 
     for (const [claim, value] of Object.entries(profile.match)) {
-      // Guardrail 2: IDs are exact, never globbed.
+      // Guardrail 2: patterns stay narrow. IDs are exact, never globbed.
       if (claim.endsWith("_id") && value.includes("*")) {
         issues.push(`${at}.match.${claim}: ID claims must be exact, globs are not allowed`);
+      } else if (value.includes("*") && !isPrefixPattern(value)) {
+        // A bare or leading `*` would match far more than intended; one in the middle needs a backtracking matcher.
+        issues.push(`${at}.match.${claim}: * is only allowed once, at the end, after a prefix (e.g. example-org/*)`);
       }
     }
 
@@ -329,6 +336,7 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
     return {
       name: profile.name,
       subject: profile.subject,
+      enabled: profile.enabled,
       match: { ...profile.match, repository_owner_id: github.owner_id },
       ttl,
       max_ttl,
@@ -417,14 +425,17 @@ export function r2Prefixes(bucket: Bucket, claims: Claims): string[] {
 
 export type Claims = Record<string, unknown>;
 
-/** `*` matches any run of characters, including `/`. Everything else is literal. */
+/** Whether a pattern is `<prefix>*`: one `*`, at the end, after a non-empty prefix. */
+function isPrefixPattern(pattern: string): boolean {
+  return pattern.length > 1 && pattern.indexOf("*") === pattern.length - 1;
+}
+
+/**
+ * `<prefix>*` matches any value starting with the prefix, including across `/`. Any other
+ * pattern must equal the value; the policy refuses other uses of `*` when it loads.
+ */
 export function glob(pattern: string, value: string): boolean {
-  if (!pattern.includes("*")) return pattern === value;
-  const re = pattern
-    .split("*")
-    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    .join(".*");
-  return new RegExp(`^${re}$`, "s").test(value);
+  return isPrefixPattern(pattern) ? value.startsWith(pattern.slice(0, -1)) : pattern === value;
 }
 
 /** Whether a person's role on the repo is at least `required`. */
@@ -452,10 +463,12 @@ export function selectProfile(policy: Policy, subject: Subject, claims: Claims, 
   const profiles = policy.profiles.filter((p) => p.subject === subject);
   if (requested !== undefined) {
     const profile = profiles.find((p) => p.name === requested);
-    if (!profile || !matches(profile, claims)) {
+    if (!profile?.enabled || !matches(profile, claims)) {
       const known = policy.profiles.some((p) => p.name === requested);
       const detail = profile
-        ? undefined
+        ? profile.enabled
+          ? undefined
+          : `profile ${requested} is disabled`
         : known
           ? `profile ${requested} isn't for ${subject}`
           : `unknown profile ${requested}`;
@@ -464,7 +477,7 @@ export function selectProfile(policy: Policy, subject: Subject, claims: Claims, 
     return profile;
   }
 
-  const candidates = profiles.filter((p) => matches(p, claims));
+  const candidates = profiles.filter((p) => p.enabled && matches(p, claims));
   if (candidates.length === 0) throw new HttpError("forbidden", "no_match");
   if (candidates.length > 1) {
     throw new HttpError("forbidden", "ambiguous", candidates.map((p) => p.name).join(","));

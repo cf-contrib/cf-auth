@@ -130,8 +130,8 @@ async function authenticate(request: Request, policy: Policy, subject: Subject) 
     return { claims, req: await readTokenRequest(request, subject) };
   }
 
-  // A broker without user profiles serves no people, so it doesn't call GitHub for them.
-  const users = policy.profiles.filter((p) => p.subject === "users");
+  // A broker without enabled user profiles serves no people, so it doesn't call GitHub for them.
+  const users = policy.profiles.filter((p) => p.subject === "users" && p.enabled);
   if (users.length === 0) throw new HttpError("not_found", "no_user_profiles");
   const token = bearer(request, "invalid_user_token");
   // The body first: a malformed request costs no GitHub calls.

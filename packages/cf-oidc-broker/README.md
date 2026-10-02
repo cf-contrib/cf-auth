@@ -102,7 +102,7 @@ profiles:
 
   - name: workers-deploy
     match:
-      repository: "example-org/*"       # globs are allowed on non-ID claims
+      repository: "example-org/*"       # a trailing * is allowed on non-ID claims
       ref: refs/heads/main
       environment: prod
     token:
@@ -143,6 +143,8 @@ profiles:
 
 A profile has a `token`, `buckets`, or both. It's for GitHub Actions jobs unless it says `subject: users`.
 
+To switch a profile off, for example during an incident, set `enabled: false`. It stays in the policy but never matches, and a request naming it is a `403`.
+
 The broker validates the policy on the first request. If it's invalid, the broker fails closed and every request gets `500`.
 
 ### Matching
@@ -150,7 +152,7 @@ The broker validates the policy on the first request. If it's invalid, the broke
 - A profile matches when **all** its `match` keys equal the JWT's claims. There's no OR inside a profile; write two profiles.
 - `github.owner_id` is added to every profile as `repository_owner_id`. A profile can't override it.
 - Any string claim GitHub issues can be matched: `repository`, `repository_id`, `ref`, `ref_type`, `environment`, `event_name`, `workflow_ref`, `job_workflow_ref`, `actor_id`, `runner_environment`, and so on. A claim missing from the JWT never matches.
-- `*` matches any run of characters, including `/`. ID claims (`*_id`) must be exact.
+- A pattern can end in one `*` after a prefix, such as `example-org/*` or `refs/heads/release/*`, and then matches any value starting with that prefix, including across `/`. A `*` anywhere else, or on its own, is refused when the policy loads. ID claims (`*_id`) must be exact.
 - If the request names a `profile`, that profile must match. Otherwise exactly one profile must match. Both failures are a `403`.
 - Unquoted YAML numbers are accepted for IDs and compared as strings.
 - A job is only matched against profiles for `actions` (the default), and a person only against `subject: users` profiles. Naming a profile for the other subject is a `403`. The subject is also the route: jobs call `/v1/actions/token` and people `/v1/users/token`.
@@ -246,7 +248,7 @@ Each entry in `buckets` gets the job [temporary R2 credentials](https://develope
 These are enforced when the policy loads, so an unsafe policy never serves a request:
 
 1. **The owner pin is mandatory.** GitHub issues OIDC tokens to every repository on github.com, and the broker URL is public.
-2. **ID claims can't be globbed.**
+2. **Patterns stay narrow.** ID claims can't use `*`, and other claims only as a single trailing `*` after a prefix, so a pattern can't match everything (`*`) or anything ending in a value (`*main`).
 3. **No token-management permissions.** Granting any permission group matching `API Tokens` is rejected, so a job can't turn its short-lived token into a long-lived one.
 4. **TTLs are capped.** `max_ttl` is at most 24h, and `ttl` can't exceed it.
 5. **The audience must be custom.** `github.audience` is required and can't be GitHub's default (`https://github.com/<owner>`), so a JWT requested for AWS or GCP can't be replayed here.
@@ -257,7 +259,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/v1/actions/token` | `Bearer <github-oidc-jwt>` | For a GitHub Actions job: mint a token, R2 credentials, or both. Body: `{ "profile"?, "ttl"? }`. Returns `{ token?, token_id?, account_id, expires_on, profile, buckets? }`: `token` and `token_id` when the profile has a `token`, and `buckets: [{ name, access_key_id, secret_access_key, session_token, prefixes, endpoint, expires_on }]`, one entry per bucket, when it has `buckets`. |
-| `POST` | `/v1/users/token` | `Bearer <github-user-token>` | For a [person](#people): the same, for the repo in the body. Body: `{ "repository", "profile"?, "ttl"? }`, where `repository` is `owner/name` or its numeric ID. Same response. `404` if no profile is for people. |
+| `POST` | `/v1/users/token` | `Bearer <github-user-token>` | For a [person](#people): the same, for the repo in the body. Body: `{ "repository", "profile"?, "ttl"? }`, where `repository` is `owner/name` or its numeric ID. Same response. `404` if no enabled profile is for people. |
 | `POST` | `/v1/revoke` | `Bearer <minted-token>` | Revoke a token. Holding it is the proof. Returns `204`, also when it's already gone, and `403` for tokens not named `cf-oidc:*`. |
 | `GET` | `/healthz` | public | `200` if the policy and bindings are valid, else `500`. Never shows the policy. |
 
