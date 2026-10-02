@@ -1,7 +1,7 @@
 // @ts-check
 /** @typedef {import("./api.js").TokenExchangeRequest} TokenExchangeRequest */
 /** @typedef {import("./api.js").TokenExchangeResponse} TokenExchangeResponse */
-/** @typedef {import("./api.js").ErrorResponse} ErrorResponse */
+/** @typedef {import("./api.js").Error} BrokerError */
 /** @typedef {import("./api.js").BucketCredentials} BucketCredentials */
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -10,7 +10,7 @@ import { brokerURL, fail, idToken, input, mask, write } from "./runner.js";
 /** Hints for the statuses a misconfigured workflow or policy usually produces. */
 const HINTS = /** @type {Record<number, string>} */ ({
   401: "the broker rejected the OIDC token; check that broker-url matches the GitHub provider's audience in the policy",
-  403: "no profile allows this workflow; the broker's audit log has the reason",
+  403: "the policy doesn't allow this workflow",
   404: "the broker doesn't serve /oauth/token; deploy the broker from the same release as the action",
   500: "the broker is misconfigured; check its logs",
 });
@@ -59,11 +59,10 @@ try {
     signal: AbortSignal.timeout(30_000),
   });
   if (!response.ok) {
-    const { error } = /** @type {Partial<ErrorResponse>} */ (await response.json().catch(() => ({})));
+    const { error, message } = /** @type {Partial<BrokerError>} */ (await response.json().catch(() => ({})));
+    const said = [error, message].filter(Boolean).join(": ");
     const hint = HINTS[response.status];
-    throw new Error(
-      `cf-oidc broker returned ${response.status}${error ? ` (${error})` : ""}${hint ? `: ${hint}` : ""}`,
-    );
+    throw new Error(`cf-oidc broker returned ${response.status}${said ? ` (${said})` : ""}${hint ? `: ${hint}` : ""}`);
   }
 
   // The action asks for Cloudflare credentials, whose response always names the account.

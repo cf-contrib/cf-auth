@@ -7,10 +7,10 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
+use cf_oidc_exchange_sdk::v1::{Error, ErrorCode};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    error::{ErrorCode, HttpError},
     policy::Claims,
     webcrypto::{self, PrivateKey},
 };
@@ -63,8 +63,8 @@ thread_local! {
     static CACHED: RefCell<Option<(String, Rc<SigningKey>)>> = const { RefCell::new(None) };
 }
 
-fn unavailable(detail: impl Into<String>) -> HttpError {
-    HttpError::new(ErrorCode::Misconfigured, "signing_key_unavailable").with_detail(detail)
+fn unavailable(why: impl std::fmt::Display) -> Error {
+    Error::new(ErrorCode::Misconfigured, format!("the signing key: {why}"))
 }
 
 /// The DER inside a PKCS#8 PEM, as `openssl genpkey -algorithm RSA` writes it.
@@ -78,7 +78,7 @@ fn pkcs8_der(pem: &str) -> Option<Vec<u8>> {
 }
 
 /// The RSA signing key in `pem`, a PKCS#8 PEM.
-pub async fn signing_key(pem: &str) -> Result<Rc<SigningKey>, HttpError> {
+pub async fn signing_key(pem: &str) -> Result<Rc<SigningKey>, Error> {
     if let Some(key) = CACHED.with_borrow(|cached| {
         cached
             .as_ref()
@@ -140,12 +140,14 @@ pub fn payload(
     req: &IssueRequest,
     jti: &str,
     now: u64,
-) -> Result<(Map<String, Value>, u64), HttpError> {
+) -> Result<(Map<String, Value>, u64), Error> {
     let expires_at = (now + req.ttl / 1000).min(req.not_after.unwrap_or(u64::MAX));
     // The caller's token was accepted with clock tolerance; a token that can't live at all isn't issued.
     if expires_at <= now {
-        return Err(HttpError::new(ErrorCode::Unauthorized, "invalid_jwt")
-            .with_detail("subject token has expired"));
+        return Err(Error::new(
+            ErrorCode::Unauthorized,
+            "the subject token has expired",
+        ));
     }
 
     let names: BTreeSet<&str> = COPIED
@@ -181,13 +183,8 @@ pub fn payload(
 }
 
 /// Signs a token for another service.
-pub async fn issue(
-    key: &SigningKey,
-    req: &IssueRequest<'_>,
-    now: u64,
-) -> Result<Issued, HttpError> {
-    let internal =
-        |detail: String| HttpError::new(ErrorCode::Internal, "webcrypto").with_detail(detail);
+pub async fn issue(key: &SigningKey, req: &IssueRequest<'_>, now: u64) -> Result<Issued, Error> {
+    let internal = |why: String| Error::new(ErrorCode::InternalError, format!("WebCrypto: {why}"));
     let jti = webcrypto::random_uuid().map_err(internal)?;
     let (claims, expires_at) = payload(req, &jti, now)?;
     let header = json!({ "alg": ALGORITHM, "kid": key.kid, "typ": "JWT" });
@@ -264,7 +261,7 @@ mod tests {
         let (_, expires_at) = payload(&request(&claims, Some(NOW + 60)), "j", NOW).unwrap();
         assert_eq!(expires_at, NOW + 60);
         let err = payload(&request(&claims, Some(NOW)), "j", NOW).unwrap_err();
-        assert_eq!(err.detail.as_deref(), Some("subject token has expired"));
+        assert_eq!(err.message, "the subject token has expired");
     }
 
     #[test]

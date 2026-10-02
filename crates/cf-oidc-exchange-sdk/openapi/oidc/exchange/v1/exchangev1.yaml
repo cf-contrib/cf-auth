@@ -119,14 +119,15 @@ components:
   responses:
     Error:
       description: >-
-        Deliberately generic; the reason goes only to the broker's audit log. 400 for a
-        malformed or unsupported exchange, 401 for an invalid subject token, 403 when no
-        profile allows the caller, 404 when no enabled profile is for people, 500 when the
-        broker is misconfigured, 502 when GitHub or Cloudflare fail.
+        400 for a malformed or unsupported exchange, 401 for an invalid subject token, 403
+        when no profile allows the caller, 404 when no enabled profile is for people, 500
+        when the broker is misconfigured, 502 when GitHub, Cloudflare or the token's issuer
+        fail. For the caller's own mistakes, the message says what was wrong; for the
+        broker's faults it's generic, and the broker's logs say why.
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/ErrorResponse"
+            $ref: "#/components/schemas/Error"
   schemas:
     TokenRevocationRequest:
       type: object
@@ -305,10 +306,23 @@ components:
               use:
                 type: string
                 const: sig
-    ErrorResponse:
+    Error:
       type: object
-      required: [error]
+      description: An error, in the shape cf-nix-cache uses.
+      required: [error, message]
       properties:
         error:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
           type: string
-          enum: [bad_request, unauthorized, forbidden, not_found, misconfigured, upstream_error, internal]
+          description: What went wrong.
+    ErrorCode:
+      type: string
+      enum:
+        - bad_request
+        - unauthorized
+        - forbidden
+        - not_found
+        - misconfigured
+        - internal_error
+        - upstream_error

@@ -91,9 +91,13 @@ export type ErrorCode =
   | "not_found"
   | "misconfigured"
   | "upstream_error"
-  | "internal";
+  | "internal_error";
 
-/** Body of every non-2xx response. Deliberately generic: details only go to the audit log. */
-export interface ErrorResponse {
+/**
+ * Body of every non-2xx response, in the shape cf-nix-cache uses. For the caller's own
+ * mistakes the message says what was wrong; for the broker's faults it's generic.
+ */
+export interface Error {
   error: ErrorCode;
+  message: string;
 }

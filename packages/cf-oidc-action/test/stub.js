@@ -75,7 +75,9 @@ export function startStub({
       const idToken = body?.subject_token_type === "urn:ietf:params:oauth:token-type:id_token";
       if (!exchange || !idToken) return send(400, { error: "bad_request" });
       if (!String(body?.subject_token).startsWith("stub-jwt.")) return send(401, { error: "unauthorized" });
-      if (tokenStatus !== 200) return send(tokenStatus, { error: tokenStatus === 404 ? "not_found" : "forbidden" });
+      if (tokenStatus === 404) return send(404, { error: "not_found", message: "no route for POST /oauth/token" });
+      if (tokenStatus !== 200)
+        return send(tokenStatus, { error: "forbidden", message: "no profile matches the token" });
       // 2026-09-28T12:15:00Z, like the stub buckets' expires_on.
       const expires = { expires_in: 900, expires_at: 1790597700 };
       const r2 = { ...expires, issued_token_type: R2_CREDENTIALS, token_type: "N_A", account_id: STUB_ACCOUNT_ID };

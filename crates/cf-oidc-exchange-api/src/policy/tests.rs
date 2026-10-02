@@ -1,9 +1,12 @@
 //! Ported from the TypeScript broker's `test/policy.test.ts`. All IDs are made up.
 
+use cf_oidc_exchange_sdk::v1::Error;
 use serde_json::{Value, json};
 
-use super::*;
-use crate::error::HttpError;
+use super::{
+    matching::{glob, matches},
+    *,
+};
 
 const ACCOUNT_ID: &str = "0123456789abcdef0123456789abcdef";
 const ZONE_ID: &str = "fedcba9876543210fedcba9876543210";
@@ -147,8 +150,9 @@ fn profile<'a>(policy: &'a Policy, name: &str) -> &'a Profile {
     policy.profiles.iter().find(|p| p.name == name).unwrap()
 }
 
-fn denial<T>(result: Result<T, HttpError>) -> Option<&'static str> {
-    result.err().map(|err| err.reason)
+/// What a refusal says, if it was one.
+fn denial<T>(result: Result<T, Error>) -> Option<String> {
+    result.err().map(|err| err.message)
 }
 
 fn select<'a>(
@@ -156,7 +160,7 @@ fn select<'a>(
     provider: &str,
     claims: &Claims,
     requested: Option<&str>,
-) -> Result<&'a Profile, HttpError> {
+) -> Result<&'a Profile, Error> {
     select_profile(policy, provider, claims, requested, CLOUDFLARE_AUDIENCE)
 }
 
@@ -919,7 +923,7 @@ mod matching {
         let claims = github_claims(json!({ "ref": "refs/heads/dev" }));
         assert_eq!(
             denial(select(&loaded, "github", &claims, None)),
-            Some("no_match")
+            Some("no profile matches the token".to_string())
         );
     }
 
@@ -930,10 +934,9 @@ mod matching {
             json!({ "repository": "example-org/infra", "repository_id": "200000002" }),
         );
         let err = select(&loaded, "github", &claims, None).unwrap_err();
-        assert_eq!(err.reason, "ambiguous");
         assert_eq!(
-            err.detail.as_deref(),
-            Some("infra-cloudflare,workers-deploy")
+            err.message,
+            "profiles infra-cloudflare, workers-deploy all match the token: name one"
         );
         let named = select(&loaded, "github", &claims, Some("infra-cloudflare")).unwrap();
         assert_eq!(named.name, "infra-cloudflare");
@@ -944,10 +947,12 @@ mod matching {
         let loaded = load(&policy());
         let claims = github_claims(json!({}));
         let err = select(&loaded, "github", &claims, Some("infra-cloudflare")).unwrap_err();
-        assert_eq!((err.reason, err.detail), ("profile_mismatch", None));
+        assert_eq!(
+            err.message,
+            "profile infra-cloudflare doesn't match the token"
+        );
         let err = select(&loaded, "github", &claims, Some("nope")).unwrap_err();
-        assert_eq!(err.reason, "profile_mismatch");
-        assert_eq!(err.detail.as_deref(), Some("unknown profile nope"));
+        assert_eq!(err.message, "unknown profile nope");
     }
 
     #[test]
@@ -969,27 +974,25 @@ mod matching {
         let claims = github_claims(json!({}));
         assert_eq!(
             denial(select(&disabled, "github", &claims, None)),
-            Some("no_match")
+            Some("no profile matches the token".to_string())
         );
         let err = select(&disabled, "github", &claims, Some("workers-deploy")).unwrap_err();
-        assert_eq!(
-            err.detail.as_deref(),
-            Some("profile workers-deploy is disabled")
-        );
+        assert_eq!(err.message, "profile workers-deploy is disabled");
     }
 
     #[test]
     fn clamps_ttl_to_max_ttl_and_rejects_nonsense() {
         let loaded = load(&policy());
         let deploy = profile(&loaded, "workers-deploy");
-        assert_eq!(clamp_ttl(None, deploy), Ok(15 * 60_000));
-        assert_eq!(clamp_ttl(Some("5m"), deploy), Ok(5 * 60_000));
-        assert_eq!(clamp_ttl(Some("10h"), deploy), Ok(60 * 60_000));
-        assert_eq!(
-            denial(clamp_ttl(Some("forever"), deploy)),
-            Some("invalid_ttl")
-        );
-        assert_eq!(denial(clamp_ttl(Some("30s"), deploy)), Some("invalid_ttl"));
+        assert_eq!(clamp_ttl(None, deploy).ok(), Some(15 * 60_000));
+        assert_eq!(clamp_ttl(Some("5m"), deploy).ok(), Some(5 * 60_000));
+        assert_eq!(clamp_ttl(Some("10h"), deploy).ok(), Some(60 * 60_000));
+        for ttl in ["forever", "30s"] {
+            assert_eq!(
+                denial(clamp_ttl(Some(ttl), deploy)),
+                Some(format!("ttl {ttl} isn't a duration of at least 1m"))
+            );
+        }
     }
 }
 
@@ -1067,8 +1070,8 @@ mod service_audiences {
         let err =
             select_profile(&loaded, "github", &claims, Some("workers-deploy"), CACHE).unwrap_err();
         assert_eq!(
-            err.detail,
-            Some(format!("profile workers-deploy isn't for {CACHE}"))
+            err.message,
+            format!("profile workers-deploy isn't for {CACHE}")
         );
     }
 }
@@ -1326,11 +1329,14 @@ mod people {
                 "tofu-plan"
             );
             let named = select(&loaded, "people", &me, Some("workers-deploy"));
-            assert_eq!(denial(named), Some("profile_mismatch"));
+            assert_eq!(
+                denial(named).as_deref(),
+                Some("profile workers-deploy isn't for provider people")
+            );
             let no_teams = person(json!({ "team_ids": [] }));
             assert_eq!(
                 denial(select(&loaded, "people", &no_teams, None)),
-                Some("no_match")
+                Some("no profile matches the token".to_string())
             );
         }
 
@@ -1341,10 +1347,13 @@ mod people {
             job.extend(person(json!({ "ref": "refs/heads/dev" })));
             assert_eq!(
                 denial(select(&loaded, "github", &job, None)),
-                Some("no_match")
+                Some("no profile matches the token".to_string())
             );
             let named = select(&loaded, "github", &job, Some("tofu-plan"));
-            assert_eq!(denial(named), Some("profile_mismatch"));
+            assert_eq!(
+                denial(named).as_deref(),
+                Some("profile tofu-plan isn't for provider github")
+            );
         }
     }
 }
@@ -1545,7 +1554,7 @@ mod buckets {
     mod r2_prefixes {
         use super::*;
 
-        fn fill(prefixes: &[&str], claims: &Claims) -> Result<Vec<String>, HttpError> {
+        fn fill(prefixes: &[&str], claims: &Claims) -> Result<Vec<String>, Error> {
             let bucket = Bucket {
                 name: "org-terraform-state".into(),
                 permission: BucketPermission::ObjectReadWrite,
@@ -1610,7 +1619,11 @@ mod buckets {
             ] {
                 let claims = github_claims(json!({ "repository": repository }));
                 let filled = fill(&["github.com/{repository}/"], &claims);
-                assert_eq!(denial(filled), Some("invalid_r2_prefix"), "{case}");
+                let refused = denial(filled).unwrap_or_default();
+                assert!(
+                    refused.starts_with("bucket org-terraform-state: "),
+                    "{case}: {refused}"
+                );
             }
         }
 
@@ -1633,7 +1646,11 @@ mod buckets {
                 ("an empty ID", json!({ "repository_owner_id": "" })),
             ] {
                 let filled = fill(&templates, &github_claims(overrides));
-                assert_eq!(denial(filled), Some("invalid_r2_prefix"), "{case}");
+                let refused = denial(filled).unwrap_or_default();
+                assert!(
+                    refused.starts_with("bucket org-terraform-state: "),
+                    "{case}: {refused}"
+                );
             }
         }
     }

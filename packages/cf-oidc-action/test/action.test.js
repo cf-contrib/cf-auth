@@ -307,7 +307,9 @@ describe("main", () => {
     stub = await startStub({ tokenStatus: 403 });
     const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain("::error::cf-oidc broker returned 403 (forbidden): no profile allows this workflow");
+    expect(r.stdout).toContain(
+      "::error::cf-oidc broker returned 403 (forbidden: no profile matches the token): the policy doesn't allow this workflow",
+    );
     expect(r.env).toEqual({});
     expect(r.state).toEqual({});
   });
@@ -317,7 +319,7 @@ describe("main", () => {
     const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
     expect(r.code).toBe(1);
     expect(r.stdout).toContain(
-      "::error::cf-oidc broker returned 404 (not_found): the broker doesn't serve /oauth/token",
+      "::error::cf-oidc broker returned 404 (not_found: no route for POST /oauth/token): the broker doesn't serve /oauth/token",
     );
   });
 
