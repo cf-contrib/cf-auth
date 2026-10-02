@@ -153,7 +153,7 @@ jobs:
 | `broker returned 401 (unauthorized)` | The broker rejected the OIDC token, usually because `broker-url` doesn't match the GitHub provider's `audience` in the policy. |
 | `broker returned 403 (forbidden)` | No profile allows this workflow, or the named `profile` doesn't match. The broker's audit log (`token.deny`) has the reason. |
 | `broker returned 502 (upstream_error)` | The Cloudflare API refused a call; the audit log has the message. For a profile with `buckets`, it's usually a broker token without enough R2 permissions on the bucket. |
-| `broker returned 500 (misconfigured)` | The broker's policy or bindings are invalid. Check `/healthz` and its logs. |
+| `broker returned 500 (misconfigured)` | The broker's policy or bindings are invalid. Check `/health/ready` and the broker's logs. |
 | `broker-url must use https` | Plain `http` is only accepted for `localhost` and `127.0.0.1`. |
 | `AccessDenied` from S3 on some keys | The credentials only cover the bucket's prefixes: keep every key under `$CLOUDFLARE_R2_PREFIX`. |
 

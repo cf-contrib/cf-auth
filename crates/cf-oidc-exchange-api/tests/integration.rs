@@ -216,7 +216,7 @@ mod token_exchange_for_jobs {
     async fn logs_the_profile_count_when_the_policy_loads() {
         let t = start().await;
         world().policy()["defaults"] = json!({ "ttl": "10m" }); // a policy the Worker hasn't loaded
-        call(Method::GET, "/healthz").await;
+        call(Method::GET, "/health/ready").await;
         assert_eq!(
             t.audit("policy.loaded").await,
             Some(json!({ "event": "policy.loaded", "profiles": 3 }))
@@ -1137,7 +1137,7 @@ mod broker_token {
             json!({ "reason": "broker_token_unavailable" }),
         );
         assert_eq!(token_count(), 1); // nothing minted
-        assert_eq!(call(Method::GET, "/healthz").await.status, 500);
+        assert_eq!(call(Method::GET, "/health/ready").await.status, 503);
     }
 
     #[tokio::test]
@@ -1151,29 +1151,39 @@ mod broker_token {
             json!({ "reason": "broker_token_unavailable", "detail": "BROKER_TOKEN_PLAIN must be a Secrets Store binding" }),
         );
         assert_eq!(token_count(), 1); // nothing minted
-        assert_eq!(call(Method::GET, "/healthz").await.status, 500);
+        assert_eq!(call(Method::GET, "/health/ready").await.status, 503);
     }
 }
 
 mod health {
+    use cf_oidc_exchange_sdk::v1::HealthClient;
+
     use super::*;
 
     #[tokio::test]
-    async fn is_ok_when_the_policy_is_valid() {
+    async fn is_live_and_ready_when_the_policy_is_valid() {
         let _t = start().await;
-        let res = call(Method::GET, "/healthz").await;
-        assert_eq!(res.status, 200);
-        assert_eq!(res.json(), json!({ "status": "ok" }));
-        assert_eq!(res.cache_control.as_deref(), Some("no-store"));
+        let health = HealthClient::new(BROKER);
+        assert!(health.is_live().await.expect("the request failed"));
+        assert!(health.is_ready().await.expect("the request failed"));
+        assert_eq!(
+            call(Method::GET, "/health/ready")
+                .await
+                .cache_control
+                .as_deref(),
+            Some("no-store")
+        );
     }
 
     #[tokio::test]
-    async fn fails_when_the_policy_is_invalid_without_revealing_it() {
+    async fn is_live_but_not_ready_when_the_policy_is_invalid_without_revealing_it() {
         let _t = start().await;
         world().scenario["policy"] = json!("{");
-        let res = call(Method::GET, "/healthz").await;
-        assert_eq!(res.status, 500);
-        assert_eq!(res.json(), json!({ "error": "misconfigured" }));
+        let health = HealthClient::new(BROKER);
+        assert!(health.is_live().await.expect("the request failed"));
+        let res = call(Method::GET, "/health/ready").await;
+        assert_eq!(res.status, 503);
+        assert_eq!(res.text, "");
     }
 }
 
@@ -1690,7 +1700,7 @@ mod tokens_for_other_services {
             job_token(&sign(github_claims(json!({}))), &[]).await.status,
             200
         );
-        assert_eq!(call(Method::GET, "/healthz").await.status, 500);
+        assert_eq!(call(Method::GET, "/health/ready").await.status, 503);
         // Nothing to publish without a key.
         assert_eq!(
             call(Method::GET, "/.well-known/jwks").await.json(),
@@ -1733,7 +1743,7 @@ mod tokens_for_other_services {
     #[tokio::test]
     async fn reports_healthy_when_the_signing_key_loads() {
         let _t = setup().await;
-        assert_eq!(call(Method::GET, "/healthz").await.status, 200);
+        assert_eq!(call(Method::GET, "/health/ready").await.status, 200);
     }
 }
 

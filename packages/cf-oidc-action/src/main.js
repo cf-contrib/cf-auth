@@ -12,7 +12,7 @@ const HINTS = /** @type {Record<number, string>} */ ({
   401: "the broker rejected the OIDC token; check that broker-url matches the GitHub provider's audience in the policy",
   403: "no profile allows this workflow; the broker's audit log has the reason",
   404: "the broker doesn't serve /oauth/token; deploy the broker from the same release as the action",
-  500: "the broker is misconfigured; check its /healthz and logs",
+  500: "the broker is misconfigured; check its /health/ready and logs",
 });
 
 /** Formats a Unix time in seconds like the broker's RFC 3339 timestamps, e.g. `2026-09-28T12:15:00Z`. */

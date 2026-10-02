@@ -56,7 +56,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
    ```sh
    worker-build --release && cp worker/entry.js build/   # then worker_dir = ".../crates/cf-oidc-exchange-api/build"
    ```
-4. **Check** that `<broker-url>/healthz` returns `200` (`https://cf-oidc-exchange.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or the broker token can't be read; the reasons are in Workers Logs.
+4. **Check** that `<broker-url>/health/ready` returns `200` (`https://cf-oidc-exchange.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or the broker token can't be read; the reasons are in Workers Logs.
 
 ## Bindings
 
@@ -383,7 +383,8 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 | `POST` | `/oauth/revoke` | `token` in the body | [Revoke](#revocation) (RFC 7009) a token the broker minted. What the action's post step uses. |
 | `GET` | `/.well-known/openid-configuration` | public | The broker's issuer, key and endpoint URLs, for services that verify [its tokens](#tokens-for-other-services). |
 | `GET` | `/.well-known/jwks` | public | The public key the broker signs its own tokens with. Empty without `CF_OIDC_EXCHANGE_API_SIGNING_KEY`. |
-| `GET` | `/healthz` | public | `200` if the policy and bindings are valid, else `500`. Never shows the policy. |
+| `GET` | `/health/live` | public | `200` whenever the Worker serves HTTP. |
+| `GET` | `/health/ready` | public | `200` if the policy loads and the broker token (and the signing key, when a profile needs it) can be read within 2 seconds, else `503` with no body. Why goes to Workers Logs (`not ready: …`). |
 
 ### Token exchange
 

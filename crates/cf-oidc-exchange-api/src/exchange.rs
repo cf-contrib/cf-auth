@@ -416,9 +416,9 @@ pub async fn jwks(config: &Config) -> Result<Jwks, HttpError> {
     Ok(Jwks { keys: vec![jwk] })
 }
 
-/// Serves `GET /healthz`: the policy loads, the broker token can be read, and
-/// so can the signing key if a profile issues the broker's own tokens.
-pub async fn health(config: &Config) -> Result<(), HttpError> {
+/// Whether the broker can serve: the policy loads, the broker token can be
+/// read, and so can the signing key if a profile issues the broker's own tokens.
+pub async fn ready(config: &Config) -> Result<(), HttpError> {
     config.cloudflare().await?;
     if config
         .policy
