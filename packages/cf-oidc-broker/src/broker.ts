@@ -143,13 +143,13 @@ function people(policy: Policy) {
   return { provider, profiles };
 }
 
-/** Checks a person's GitHub token for the requested repo. */
+/** Checks a person's GitHub token, and their role on the repo they ask for, if any. */
 async function verifyUser(provider: Provider, profiles: Profile[], token: string, fields: TokenFields) {
   // Teams cost extra GitHub calls, so they're only looked up if a profile that could match needs them.
   const candidates = fields.profile === undefined ? profiles : profiles.filter((p) => p.name === fields.profile);
   const teams = candidates.some((p) => p.claims.team_id !== undefined);
-  const ownerId = provider.claims.repository_owner_id as string;
-  return verifyGitHubUser(token, fields.repository as string, { ownerId, teams });
+  const ownerIds = provider.claims.repository_owner_id ?? [];
+  return verifyGitHubUser(token, fields.repository, { ownerIds, teams });
 }
 
 /** A verified caller of a token route. */

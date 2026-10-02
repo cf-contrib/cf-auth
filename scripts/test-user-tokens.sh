@@ -128,7 +128,7 @@ jq -n \
           audience: $audience,
           claims: { repository_owner_id: $owner }
         },
-        { name: "people", type: "github-user", claims: { repository_owner_id: $owner } }
+        { name: "people", issuer: "https://github.com", claims: { repository_owner_id: $owner } }
       ],
       profiles: ([
         { name: "ci", provider: "github", claims: { repository_id: $repo }, token: $token },

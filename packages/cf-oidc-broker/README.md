@@ -5,7 +5,7 @@
 > policy, and mints a short-lived Cloudflare API token with exactly that
 > profile's permissions, R2 credentials limited to the repo's key prefix, or
 > both. People can get the same from their GitHub token, through a
-> [`github-user` provider](#people).
+> provider for [`https://github.com`](#people).
 
 [![CI](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-auth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
@@ -100,9 +100,9 @@ providers:
       namespace_id: "4000001"                # REQUIRED here: your group's ID
 
   - name: people                             # a person's GitHub token, with gh-cloudflare
-    type: github-user
+    issuer: https://github.com
     claims:
-      repository_owner_id: "100000001"
+      repository_owner_id: "100000001"       # the owner the repos people ask for must belong to
 
 defaults:
   ttl: 15m     # default 15m
@@ -174,6 +174,14 @@ profiles:
       - name: org-terraform-state
         permission: object-read-only
         prefixes: ["{repository_owner_id}/{repository_id}/"]
+
+  - name: on-call                       # for people on a list, without a repo
+    provider: people
+    claims:
+      actor_id: ["300000004", "300000005"]
+    buckets:
+      - name: org-runbooks
+        permission: object-read-only
 ```
 
 A profile has a `token`, `buckets`, or both, for callers with a token from its `provider`. A profile with an `audience` instead issues the broker's own token for that service: see [Tokens for other services](#tokens-for-other-services).
@@ -189,11 +197,12 @@ A provider is who you trust to vouch for a caller. `providers` is a list, like `
 | Field | |
 |---|---|
 | `name` | Required, unique. Profiles name it in `provider`. |
-| `type` | `oidc` (the default), for a CI job's OIDC token; or `github-user`, for [a person's GitHub token](#people). At most one `github-user` provider. |
-| `issuer` | `oidc`: required. The token's `iss` must equal it. `https://`, or plain `http://` on `127.0.0.1`, `localhost` or `[::1]` for local development. One provider per issuer. |
-| `audience` | `oidc`: required. The token's `aud` must contain it. Use one only the broker accepts, such as its URL: for GitHub Actions it can't be GitHub's default `https://github.com/<owner>`, so a token requested for AWS or GCP can't be replayed here. |
-| `jwks_uri` | `oidc`: optional. Otherwise the keys come from the issuer's `/.well-known/openid-configuration`, which must name the same issuer. They never come from a URL in the token. |
-| `claims` | Every token from this provider must have these, whichever profile it gets. Profiles can't override them. |
+| `issuer` | Required. For a CI provider, the token's `iss`, exactly. `https://github.com` means [people's GitHub tokens](#people), which aren't OIDC tokens and are checked with GitHub's API. `https://`, or plain `http://` on `127.0.0.1`, `localhost` or `[::1]` for local development. One provider per issuer. |
+| `audience` | Required for an OIDC issuer. The token's `aud` must contain it. Use one only the broker accepts, such as its URL: for GitHub Actions it can't be GitHub's default `https://github.com/<owner>`, so a token requested for AWS or GCP can't be replayed here. Not for `https://github.com`. |
+| `jwks_uri` | OIDC only, optional. Otherwise the keys come from the issuer's `/.well-known/openid-configuration`, which must name the same issuer. They never come from a URL in the token. |
+| `claims` | Every token from this provider must have these, whichever profile it gets. A profile can narrow a list to some of its values, but not widen or change it. |
+
+`audience` is a field, not one of the `claims`, because it says whether the token is meant for the broker at all: it's checked with the signature, `iss` and expiry (`401` if wrong), before `claims` pick a profile (`403` if none does).
 
 Issuers that give a token to anyone's projects must have the tenant pinned in `claims`, exactly:
 
@@ -202,38 +211,44 @@ Issuers that give a token to anyone's projects must have the tenant pinned in `c
 | `https://token.actions.githubusercontent.com` (and `/<enterprise>`) | `repository_owner_id` |
 | `https://gitlab.com` | `namespace_id` or `project_id` |
 | `https://app.terraform.io` | `terraform_organization_id` |
-| `github-user` | `repository_owner_id`: the repo a person asks for must belong to it |
+| `https://github.com` (people) | `repository_owner_id`, for profiles with `repository_permission`: the repo a person asks for must belong to it |
 
 A profile's `provider` can be left out when the policy has exactly one provider. Tokens are RS256.
 
 ### Matching
 
-- A profile matches when **all** of its `claims` and its provider's `claims` equal the token's. There's no OR inside a profile; write two profiles.
+- A profile matches when **all** of its `claims` and its provider's `claims` match the token's. A claim's value can be one value or a list, which matches **any** of them: `ref: [refs/heads/main, refs/heads/release/*]`, or `repository_owner_id: ["100000001", "100000002"]` to pin two orgs. A claim that's a list in the token matches if any of its values does.
 - Any string claim the issuer puts in its tokens can be matched. GitHub Actions: `repository`, `repository_id`, `ref`, `ref_type`, `environment`, `event_name`, `workflow_ref`, `job_workflow_ref`, `actor_id`, `runner_environment`, and so on. GitLab CI: `project_path`, `project_id`, `namespace_id`, `ref`, `ref_protected`, `environment`, and so on. A claim missing from the token never matches.
 - A pattern can end in one `*` after a prefix, such as `example-org/*` or `refs/heads/release/*`, and then matches any value starting with that prefix, including across `/`. A `*` anywhere else, or on its own, is refused when the policy loads. ID claims (`*_id`) must be exact.
 - If the request names a `profile`, that profile must match. Otherwise exactly one profile must match. Both failures are a `403`.
 - Unquoted YAML numbers are accepted for IDs and compared as strings.
-- A token only matches profiles for the provider that issued it: an OIDC token is matched to its provider by `iss`, and a person's GitHub token goes to the `github-user` provider. Naming another provider's profile is a `403`.
+- A token only matches profiles for the provider that issued it: an OIDC token is matched to its provider by `iss`, and a person's GitHub token goes to the `https://github.com` provider. Naming another provider's profile is a `403`.
+- Jobs and people stay separate providers on purpose. A GitHub Actions token also has an `actor_id`, the person who started the run, so a profile for people that jobs could match would give their credentials to every workflow those people trigger.
 
 ### People
 
-A profile for a `github-user` provider gives people credentials for a repo, from their GitHub user token. The client is [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare), which sends `gh auth token` to [`POST /oauth/token`](#token-exchange) with the repo to act for:
+A provider with `issuer: https://github.com` gives people credentials from their GitHub user token. The client is [gh-cloudflare](https://github.com/gh-extensions/gh-cloudflare), which sends `gh auth token` to [`POST /oauth/token`](#token-exchange):
 
 ```sh
 gh cloudflare exec --profile tofu-plan -- tofu plan
 ```
 
-The broker asks GitHub, with the person's token, who they are, what the repo's IDs are, what their role on it is and, if a profile needs it, which teams they're in. It builds the claims from those answers. Nothing in them comes from the request except which repo to look up.
+A GitHub token isn't signed: there's nothing in it to read. So the broker asks GitHub, with the person's token, who they are and, if they name a repo, what the repo's IDs are, what their role on it is and, if a profile needs it, which teams they're in. It builds the claims from those answers. Nothing in them comes from the request except which repo to look up.
+
+A profile for people is pinned one of two ways:
+
+- **A role on a repo**, with `repository_permission`. The person names a `repository`, which must belong to the provider's `repository_owner_id`, and GitHub manages who has access: add them to the repo or a team. Takes two or three GitHub calls.
+- **A list of who**, with `actor_id`: a list of numeric GitHub user IDs, never usernames, which can be renamed and re-registered. No repository needed, and one GitHub call. Access is managed in the policy, so removing someone takes a deploy, and it doesn't check that they're still in your org.
 
 | Claim | Matches when |
 |---|---|
-| `repository_permission` | **Required.** The person's role on the repo is *at least* this: `read`, `triage`, `write`, `maintain` or `admin`. |
-| `team_id` | The person is a *member of* this team. GitHub answers for a token with the `repo`, `read:org` or `user` scope; gh's token has `repo`. |
-| `repository`, `repository_id` | The repo, as for jobs. |
-| `actor_id` | The person's numeric user ID. |
+| `repository_permission` | The person's role on the repo is *at least* this: `read`, `triage`, `write`, `maintain` or `admin`. One role. |
+| `team_id` | The person is a *member of* this team (any of a list). Needs `repository_permission`. GitHub answers for a token with the `repo`, `read:org` or `user` scope; gh's token has `repo`. |
+| `repository`, `repository_id` | The repo, as for jobs. Needs `repository_permission`. |
+| `actor_id` | The person's numeric user ID, or any of a list. |
 
-- The repo must belong to the provider's `repository_owner_id`.
 - Claims only jobs have (`ref`, `environment`, `workflow_ref`, …) can't be used for people, and `team_id` and `repository_permission` can only be used for them.
+- The provider can pin `repository_owner_id` (the repos people may ask for) and `actor_id` (who may use any of its profiles); the rest goes on profiles.
 - Bucket prefixes are filled in from the repo GitHub returned, so `{repository_owner_id}/{repository_id}/` gives a person the same prefix the repo's jobs get.
 - `max_ttl` defaults to `1h` for people's profiles, even if `defaults.max_ttl` is higher. A profile can set its own.
 - GitHub App installation tokens (`ghs_…`, including `GITHUB_TOKEN`) are refused: they identify a repo, not a person. Jobs send their OIDC token instead.
@@ -251,9 +266,9 @@ Version 1 policies are refused (`500`, with `version 1 is no longer supported` i
 | `version: 1` | `version: 2` |
 | `github.audience` | the top-level `issuer` (the broker's URL), and the GitHub provider's `audience` |
 | `github.issuer` | the GitHub provider's `issuer`, now required: `https://token.actions.githubusercontent.com` |
-| `github.owner_id` | the GitHub provider's `claims.repository_owner_id`, and the same on a `github-user` provider |
+| `github.owner_id` | the GitHub provider's `claims.repository_owner_id`, and the same on the `https://github.com` provider |
 | `subject: actions` (the default) | `provider: <the GitHub provider>` (or nothing, with one provider) |
-| `subject: users` | `provider: <a github-user provider>` |
+| `subject: users` | `provider: <the provider with issuer: https://github.com>` |
 | `match:` | `claims:` |
 | `token.ttl`, `token.max_ttl` | `ttl`, `max_ttl` on the profile |
 
@@ -488,8 +503,8 @@ Denials are `token.deny` with a `reason`:
 ## Limitations
 
 - **One account per broker.** Tokens are minted in `CF_OIDC_BROKER_ACCOUNT_ID` only. Deploy one broker per account.
-- **RS256 only, one provider per issuer.** Issuers that sign with another algorithm (such as ES256) aren't supported yet. A provider pins one tenant, so two GitHub orgs need two brokers.
-- **People need a github.com account.** GitHub Enterprise Server's API isn't supported for `github-user` providers.
+- **RS256 only, one provider per issuer.** Issuers that sign with another algorithm (such as ES256) aren't supported yet. To serve several GitHub orgs, list their IDs in the provider's `repository_owner_id`.
+- **People need a github.com account.** GitHub Enterprise Server's API isn't supported for people.
 - **Bucket prefixes use GitHub's claims.** Other issuers' callers can get buckets without `prefixes`, or a token, but not prefix-limited credentials yet.
 - **People use their gh token.** It's sent to the broker as is. A GitHub App, whose short-lived tokens only it accepts, may come later.
 - **A person's role and teams are checked on every mint.** Each mint makes two or three GitHub API calls with their token, which counts against their rate limit. Teams past the first 1000 aren't seen.

@@ -96,7 +96,7 @@ describe("loadPolicy", () => {
         type: "oidc",
         issuer: GITHUB_ACTIONS_ISSUER,
         audience: AUDIENCE,
-        claims: { repository_owner_id: OWNER_ID },
+        claims: { repository_owner_id: [OWNER_ID] },
       },
     ]);
     const deploy = p.profiles.find((r) => r.name === "workers-deploy");
@@ -108,7 +108,7 @@ describe("loadPolicy", () => {
 
   it("adds the provider's claims to every profile", () => {
     for (const profile of loadPolicy(policy()).profiles) {
-      expect(profile.claims.repository_owner_id).toBe(OWNER_ID);
+      expect(profile.claims.repository_owner_id).toEqual([OWNER_ID]);
     }
   });
 
@@ -123,8 +123,26 @@ describe("loadPolicy", () => {
     (p.providers[0] as { claims: Record<string, unknown> }).claims.repository_owner_id = Number(OWNER_ID);
     (p.profiles[0] as TestPolicy["profiles"][number]).claims.repository_id = 200000002;
     const loaded = loadPolicy(p);
-    expect(loaded.providers[0]?.claims.repository_owner_id).toBe(OWNER_ID);
-    expect(loaded.profiles[0]?.claims.repository_id).toBe("200000002");
+    expect(loaded.providers[0]?.claims.repository_owner_id).toEqual([OWNER_ID]);
+    expect(loaded.profiles[0]?.claims.repository_id).toEqual(["200000002"]);
+  });
+
+  it("takes one value or a list, and loads both as a list", () => {
+    const p = policy();
+    (p.profiles[1] as TestPolicy["profiles"][number]).claims.ref = ["refs/heads/main", "refs/heads/release/*"];
+    (p.providers[0] as { claims: Record<string, unknown> }).claims.repository_owner_id = [
+      Number(OWNER_ID),
+      "100000002",
+    ];
+    const loaded = loadPolicy(p);
+    expect(loaded.profiles[1]?.claims.ref).toEqual(["refs/heads/main", "refs/heads/release/*"]);
+    expect(loaded.profiles[1]?.claims.repository_owner_id).toEqual([OWNER_ID, "100000002"]);
+  });
+
+  it("rejects an empty list", () => {
+    const p = policy();
+    (p.profiles[1] as TestPolicy["profiles"][number]).claims.ref = [];
+    expect(issues(p).join()).toMatch(/profiles\.1\.claims\.ref/);
   });
 
   it("refuses version 1 with a pointer to the migration", () => {
@@ -157,12 +175,24 @@ describe("loadPolicy", () => {
       ]);
     });
 
-    it("requires an issuer and an audience for an oidc provider", () => {
+    it("requires an issuer", () => {
       const p = policy();
       p.providers.push({ name: "other", claims: {} });
-      expect(issues(p)).toEqual([
-        "providers.1 (other).issuer: required for an oidc provider",
-        "providers.1 (other).audience: required for an oidc provider",
+      expect(issues(p).join()).toMatch(/providers\.1\.issuer/);
+    });
+
+    it("requires an audience for an OIDC issuer", () => {
+      const p = policy();
+      p.providers.push({ name: "other", issuer: "https://issuer.example.com", claims: {} });
+      expect(issues(p)).toEqual(["providers.1 (other).audience: required for an OIDC issuer"]);
+    });
+
+    it("treats https://github.com as people's GitHub tokens, and any other issuer as OIDC", () => {
+      const p = policy();
+      p.providers.push({ ...PEOPLE });
+      expect(loadPolicy(p).providers.map((r) => [r.name, r.type])).toEqual([
+        ["github", "oidc"],
+        ["people", "github-user"],
       ]);
     });
 
@@ -178,22 +208,26 @@ describe("loadPolicy", () => {
       expect(issues(p).join().includes("must be an https:// URL")).toBe(!ok);
     });
 
-    it("refuses issuer fields on a github-user provider", () => {
+    it("refuses an audience on the provider for people", () => {
       const p = policy();
-      p.providers.push({ ...PEOPLE, issuer: "https://github.com" });
-      expect(issues(p)).toEqual(["providers.1 (people).issuer: not for a github-user provider"]);
+      p.providers.push({ ...PEOPLE, audience: AUDIENCE });
+      expect(issues(p)).toEqual([
+        "providers.1 (people).audience: not for https://github.com, whose tokens aren't OIDC tokens",
+      ]);
     });
 
-    it("allows only one github-user provider", () => {
+    it("allows one provider for people, like any issuer", () => {
       const p = policy();
       p.providers.push({ ...PEOPLE }, { ...PEOPLE, name: "more-people" });
-      expect(issues(p)).toEqual(["providers.2 (more-people): only one github-user provider is allowed"]);
+      expect(issues(p)).toEqual(["providers.2 (more-people).issuer: another provider has the same issuer"]);
     });
 
-    it("refuses roles and teams on a github-user provider", () => {
+    it("only lets the provider for people pin the owner and who", () => {
       const p = policy();
       p.providers.push({ ...PEOPLE, claims: { ...PEOPLE.claims, team_id: TEAM_ID } });
-      expect(issues(p)).toEqual(["providers.1 (people).claims: repository_permission and team_id go on profiles"]);
+      expect(issues(p)).toEqual([
+        "providers.1 (people).claims.team_id: a provider for people pins repository_owner_id or actor_id; the rest go on profiles",
+      ]);
     });
   });
 
@@ -224,11 +258,14 @@ describe("loadPolicy", () => {
       expect(issues(p)).toEqual([]);
     });
 
-    it("1: requires a github-user provider to pin the owner", () => {
+    it("1: lets a profile narrow its provider's list, but not widen it", () => {
       const p = policy();
-      p.providers.push({ name: "people", type: "github-user", claims: {} });
+      (p.providers[0] as { claims: Record<string, unknown> }).claims.repository_owner_id = [OWNER_ID, "100000002"];
+      (p.profiles[1] as TestPolicy["profiles"][number]).claims.repository_owner_id = OWNER_ID;
+      expect(loadPolicy(p).profiles[1]?.claims.repository_owner_id).toEqual([OWNER_ID]);
+      (p.profiles[1] as TestPolicy["profiles"][number]).claims.repository_owner_id = [OWNER_ID, "999"];
       expect(issues(p)).toEqual([
-        "providers.1 (people).claims.repository_owner_id: required, a numeric GitHub org or user ID",
+        "profiles.1 (workers-deploy).claims.repository_owner_id: conflicts with provider github",
       ]);
     });
 
@@ -398,6 +435,23 @@ describe("matching", () => {
     expect(matches(profile("workers-deploy"), claims)).toBe(false);
   });
 
+  it("matches any value of a list", () => {
+    const p = policy();
+    (p.profiles[1] as TestPolicy["profiles"][number]).claims.ref = ["refs/heads/main", "refs/heads/release/*"];
+    const deploy = loadPolicy(p).profiles[1] as Profile;
+    expect(matches(deploy, githubClaims({ ref: "refs/heads/main" }))).toBe(true);
+    expect(matches(deploy, githubClaims({ ref: "refs/heads/release/2026" }))).toBe(true);
+    expect(matches(deploy, githubClaims({ ref: "refs/heads/dev" }))).toBe(false);
+  });
+
+  it("matches a claim that's a list in the token if any of its values does", () => {
+    const p = policy();
+    (p.profiles[1] as TestPolicy["profiles"][number]).claims = { groups: ["deployers", "admins"] };
+    const deploy = loadPolicy(p).profiles[1] as Profile;
+    expect(matches(deploy, githubClaims({ groups: ["readers", "deployers"] }))).toBe(true);
+    expect(matches(deploy, githubClaims({ groups: ["readers"] }))).toBe(false);
+  });
+
   it("compares ID claims exactly", () => {
     expect(matches(profile("infra-cloudflare"), githubClaims({ repository_id: "200000002" }))).toBe(true);
     expect(matches(profile("infra-cloudflare"), githubClaims({ repository_id: "2000000021" }))).toBe(false);
@@ -540,18 +594,36 @@ describe("profiles for people", () => {
 
   it("adds the people provider's owner pin", () => {
     const p = loadPolicy(withUser({ repository_permission: "write" }));
-    expect(p.profiles.find((r) => r.name === "tofu-plan")?.claims.repository_owner_id).toBe(OWNER_ID);
+    expect(p.profiles.find((r) => r.name === "tofu-plan")?.claims.repository_owner_id).toEqual([OWNER_ID]);
   });
 
-  it("rejects an unknown provider type", () => {
-    const p = withUser({ repository_permission: "write" });
-    (p.providers[1] as Record<string, unknown>).type = "robot";
-    expect(issues(p)).toEqual(["providers.1.type: must be oidc or github-user"]);
-  });
-
-  it("6: requires repository_permission", () => {
+  it("6: needs a role on the repo or a list of who", () => {
     expect(issues(withUser({ team_id: TEAM_ID }))).toEqual([
-      "profiles.3 (tofu-plan).claims.repository_permission: required for a github-user provider",
+      "profiles.3 (tofu-plan).claims: a profile for people needs repository_permission (a role on the repo they ask for) or actor_id (who may use it)",
+      "profiles.3 (tofu-plan).claims.team_id: needs repository_permission",
+    ]);
+  });
+
+  it("6: accepts a list of who may use it, without the owner pin", () => {
+    const p = loadPolicy(withUser({ actor_id: [USER_ID, "300000005"] }));
+    const profile = p.profiles.find((r) => r.name === "tofu-plan");
+    // The owner pin bounds the repos people ask for; a list of who has no repo.
+    expect(profile?.claims).toEqual({ actor_id: [USER_ID, "300000005"] });
+    expect(matches(profile as Profile, { actor: "octocat", actor_id: USER_ID })).toBe(true);
+    expect(matches(profile as Profile, { actor: "someone", actor_id: "300000099" })).toBe(false);
+  });
+
+  it("6: needs the provider's owner pin for a role on the repo", () => {
+    const p = withUser({ repository_permission: "write" });
+    (p.providers[1] as { claims: Record<string, unknown> }).claims = {};
+    expect(issues(p)).toEqual([
+      "profiles.3 (tofu-plan).claims.repository_permission: needs provider people to pin repository_owner_id, the owner the repo must belong to",
+    ]);
+  });
+
+  it("takes one role, the least", () => {
+    expect(issues(withUser({ repository_permission: ["read", "write"] }))).toEqual([
+      "profiles.3 (tofu-plan).claims.repository_permission: one role, the least the person must have",
     ]);
   });
 
@@ -567,8 +639,8 @@ describe("profiles for people", () => {
     (p.profiles[0] as TestProfile).claims.team_id = TEAM_ID;
     (p.profiles[0] as TestProfile).claims.repository_permission = "write";
     expect(issues(p)).toEqual([
-      "profiles.0 (infra-cloudflare).claims.team_id: only for github-user providers",
-      "profiles.0 (infra-cloudflare).claims.repository_permission: only for github-user providers",
+      "profiles.0 (infra-cloudflare).claims.team_id: only for people (https://github.com)",
+      "profiles.0 (infra-cloudflare).claims.repository_permission: only for people (https://github.com)",
     ]);
   });
 

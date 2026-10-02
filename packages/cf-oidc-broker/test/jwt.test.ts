@@ -10,7 +10,7 @@ const github: Provider = {
   type: "oidc",
   issuer: "https://token.actions.githubusercontent.com",
   audience: AUDIENCE,
-  claims: { repository_owner_id: OWNER_ID },
+  claims: { repository_owner_id: [OWNER_ID] },
 };
 
 let issuer: Awaited<ReturnType<typeof createIssuer>>;
@@ -84,7 +84,12 @@ describe("providerFor", () => {
     audience: AUDIENCE,
     claims: {},
   };
-  const people: Provider = { name: "people", type: "github-user", claims: { repository_owner_id: OWNER_ID } };
+  const people: Provider = {
+    name: "people",
+    type: "github-user",
+    issuer: "https://github.com",
+    claims: { repository_owner_id: [OWNER_ID] },
+  };
 
   it("picks the provider by the token's issuer", async () => {
     expect(providerFor(await issuer.sign(), [people, gitlab, github])).toBe(github);

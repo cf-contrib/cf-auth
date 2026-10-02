@@ -34,7 +34,9 @@ function checkFields(type: ProviderType, fields: Record<string, unknown>): Token
   if ((profile?.length ?? 0) > 64 || (ttl?.length ?? 0) > 16) throw invalid("profile or ttl too long");
   if (type === "oidc") return { profile, ttl };
 
+  // Optional: without one, only who the person is counts.
   const { repository } = fields;
+  if (repository === undefined) return { profile, ttl };
   if (typeof repository !== "string" || repository.length > 200 || !REPOSITORY.test(repository)) {
     throw invalid("repository must be owner/name or a numeric ID");
   }

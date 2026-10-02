@@ -25,22 +25,34 @@ const ROLES: [keyof NonNullable<Repository["permissions"]>, RepositoryPermission
 ];
 
 export interface UserCheck {
-  /** `github.owner_id`: the repo must belong to it. */
-  ownerId: string;
+  /** The owners a requested repo must belong to: the provider's `repository_owner_id` pin. */
+  ownerIds: string[];
   /** Whether a profile could match on `team_id`. Otherwise the teams aren't looked up. */
   teams: boolean;
 }
 
 /**
- * Checks a person's GitHub user token (`gh auth token`) and returns their claims for
- * `repository`, as GitHub reports them: who they are, the repo's IDs, their role on
- * it and, if asked, the IDs of their teams in the pinned owner. Nothing in the claims
- * comes from the request except which repo to look up.
+ * Checks a person's GitHub user token (`gh auth token`) and returns their claims, as
+ * GitHub reports them: who they are and, for a `repository`, the repo's IDs, their role on
+ * it and, if asked, the IDs of their teams in the pinned owners. Nothing in the claims comes
+ * from the request except which repo to look up.
  */
-export async function verifyGitHubUser(token: string, repository: string, check: UserCheck): Promise<Claims> {
+export async function verifyGitHubUser(
+  token: string,
+  repository: string | undefined,
+  check: UserCheck,
+): Promise<Claims> {
   // GITHUB_TOKEN and other installation tokens identify a repo, not a person.
   if (token.startsWith("ghs_")) {
     throw new HttpError("unauthorized", "installation_token", "GitHub Actions jobs exchange their OIDC token instead");
+  }
+  // Without a repo, only who the person is: one call, for profiles that list who may use them.
+  if (repository === undefined) {
+    const user = await get<User>("/user", token, "invalid_user_token");
+    return { actor: user.login, actor_id: String(user.id) };
+  }
+  if (check.ownerIds.length === 0) {
+    throw new HttpError("forbidden", "repository_forbidden", "the provider pins no repository_owner_id");
   }
 
   const repoPath = /^\d+$/.test(repository) ? `/repositories/${repository}` : `/repos/${repository}`;
@@ -55,7 +67,7 @@ export async function verifyGitHubUser(token: string, repository: string, check:
   const repo = repoResult.value;
 
   // Checked here rather than left to the owner pin, so another org's repo costs no team lookups.
-  if (String(repo.owner.id) !== check.ownerId) {
+  if (!check.ownerIds.includes(String(repo.owner.id))) {
     throw new HttpError("forbidden", "repository_forbidden", `${repo.full_name} is outside the pinned owner`);
   }
 
@@ -69,17 +81,17 @@ export async function verifyGitHubUser(token: string, repository: string, check:
     repository_owner_id: String(repo.owner.id),
   };
   if (role) claims.repository_permission = role;
-  if (check.teams) claims.team_ids = await teamIds(token, check.ownerId);
+  if (check.teams) claims.team_ids = await teamIds(token, check.ownerIds);
   return claims;
 }
 
-/** IDs of the caller's teams in the owner. GitHub accepts `repo`, `read:org` or `user` for it, and gh's token has `repo`. */
-async function teamIds(token: string, ownerId: string): Promise<string[]> {
+/** IDs of the caller's teams in the pinned owners. GitHub accepts `repo`, `read:org` or `user` for it, and gh's token has `repo`. */
+async function teamIds(token: string, ownerIds: string[]): Promise<string[]> {
   const ids: string[] = [];
   for (let page = 1; page <= MAX_TEAM_PAGES; page++) {
     const teams = await get<Team[]>(`/user/teams?per_page=100&page=${page}`, token, "teams_forbidden");
     for (const team of teams) {
-      if (String(team.organization?.id) === ownerId) ids.push(String(team.id));
+      if (ownerIds.includes(String(team.organization?.id))) ids.push(String(team.id));
     }
     if (teams.length < 100) break;
   }

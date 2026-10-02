@@ -709,13 +709,45 @@ describe("token exchange for people", () => {
     expect(github.requests).toEqual([]);
   });
 
-  it.each([[undefined], [{}], [{ repository: "example-org" }], [{ repository: "a/b/c" }], [{ repository: 200000003 }]])(
+  it.each([[{ repository: "example-org" }], [{ repository: "a/b/c" }], [{ repository: 200000003 }]])(
     "400s on body %j, without calling GitHub",
     async (body) => {
       expect((await mintFor(body)).status).toBe(400);
       expect(github.requests).toEqual([]);
     },
   );
+
+  it("without a repository, only asks GitHub who the person is", async () => {
+    // Every profile here needs a role on a repo, so none matches.
+    const res = await mintFor({});
+    expect(res.status).toBe(403);
+    expect(deny()).toMatchObject({ provider: "people", reason: "no_match", actor_id: USER_ID });
+    expect(github.requests).toEqual(["/user"]);
+  });
+
+  it("issues to a person on a profile's list, with one GitHub call", async () => {
+    withUserProfiles({
+      name: "on-call",
+      provider: "people",
+      claims: { actor_id: [USER_ID, "300000099"] },
+      buckets: [{ name: "org-terraform-state", permission: "object-read-only", prefixes: ["shared/"] }],
+    } as unknown as Partial<TestProfile>);
+    const res = await mintFor({ profile: "on-call" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as TokenExchangeResponse).buckets?.[0]?.prefixes).toEqual(["shared/"]);
+    expect(github.requests).toEqual(["/user"]);
+  });
+
+  it("refuses a person who isn't on the list", async () => {
+    withUserProfiles({
+      name: "on-call",
+      provider: "people",
+      claims: { actor_id: "300000099" },
+      buckets: [{ name: "org-terraform-state", permission: "object-read-only", prefixes: ["shared/"] }],
+    } as unknown as Partial<TestProfile>);
+    expect((await mintFor({ profile: "on-call" })).status).toBe(403);
+    expect(deny()).toMatchObject({ reason: "profile_mismatch" });
+  });
 
   it("404s when no profile is for people, without calling GitHub", async () => {
     policyFile = JSON.stringify(testPolicy(ISSUER));
@@ -1002,7 +1034,6 @@ describe("POST /oauth/token", () => {
       { requested_token_type: "urn:ietf:params:oauth:token-type:refresh_token" },
       "unsupported_requested_token_type",
     ],
-    ["a person without a repository", { subject_token_type: ACCESS_TOKEN }, "invalid_body"],
   ])("400s on %s, without calling anyone", async (_, override, reason) => {
     const res = await exchange({
       grant_type: GRANT,

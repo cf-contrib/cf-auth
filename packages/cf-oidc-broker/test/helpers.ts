@@ -45,7 +45,6 @@ export interface TestPolicy {
   issuer?: string;
   providers: {
     name: string;
-    type?: string;
     issuer?: string;
     audience?: string;
     jwks_uri?: string;
@@ -68,7 +67,7 @@ export interface TestPolicy {
 }
 
 /** The provider for people's GitHub tokens, pinned to the test org. */
-export const PEOPLE = { name: "people", type: "github-user", claims: { repository_owner_id: OWNER_ID } };
+export const PEOPLE = { name: "people", issuer: "https://github.com", claims: { repository_owner_id: OWNER_ID } };
 
 /** A version 2 policy: one GitHub Actions provider, `github`, and three profiles for it. */
 export function testPolicy(issuer: string): TestPolicy {

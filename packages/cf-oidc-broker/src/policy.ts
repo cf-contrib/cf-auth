@@ -1,6 +1,9 @@
 import * as v from "valibot";
 import { HttpError } from "./errors.js";
 
+/** People's GitHub tokens: opaque, so the broker checks them with GitHub's API instead of a signature. */
+export const GITHUB_USERS_ISSUER = "https://github.com";
+
 /** GitHub Actions' OIDC issuer. GitHub Enterprise Cloud adds `/<enterprise>`. */
 export const GITHUB_ACTIONS_ISSUER = "https://token.actions.githubusercontent.com";
 
@@ -51,7 +54,7 @@ type PrefixClaim = keyof typeof PREFIX_CLAIMS;
 export const REPOSITORY_PERMISSIONS = ["read", "triage", "write", "maintain", "admin"] as const;
 export type RepositoryPermission = (typeof REPOSITORY_PERMISSIONS)[number];
 
-/** What a github-user claim set can hold: what the broker looks up for a person, nothing a job's token has. */
+/** What a profile for people can match: what the broker looks up for a person, nothing a job's token has. */
 const USER_MATCH = [
   "repository",
   "repository_id",
@@ -63,6 +66,12 @@ const USER_MATCH = [
 
 /** Claims the broker checks against GitHub for a person, rather than compares with a value. */
 const USER_ONLY_MATCH = ["team_id", "repository_permission"];
+
+/** Claims that only exist once a person names a repository, so they need a role on it. */
+const REPO_MATCH = ["repository", "repository_id", "repository_owner_id", "team_id"];
+
+/** What a provider for people can pin for every profile: the repo owner, and who. */
+const USER_PROVIDER_PINS = ["repository_owner_id", "actor_id"];
 
 /** Default `max_ttl` for profiles for people, unless the profile sets its own. */
 const USER_DEFAULT_MAX_TTL = HOUR;
@@ -110,7 +119,16 @@ const IssuerUrl = v.pipe(
 
 const Name = v.pipe(v.string(), v.regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/, "must be 1-64 of [A-Za-z0-9_.-]"));
 
-const ClaimSet = v.optional(v.record(v.pipe(v.string(), v.regex(/^[a-z_]+$/, "must be a claim name")), ClaimValue), {});
+// One value, or a list meaning any of them. Either way it's a list once loaded.
+const ClaimValues = v.pipe(
+  v.union([ClaimValue, v.pipe(v.array(ClaimValue), v.minLength(1, "must list at least one value"))]),
+  v.transform((value) => (Array.isArray(value) ? value : [value])),
+);
+
+const ClaimSet = v.optional(
+  v.record(v.pipe(v.string(), v.regex(/^[a-z_]+$/, "must be a claim name")), ClaimValues),
+  {},
+);
 
 /** Cloudflare's native token `resources`, e.g. `com.cloudflare.api.account.zone.<zone_id>: "*"`. */
 const Resources = v.pipe(
@@ -135,8 +153,8 @@ const Bucket = v.strictObject({
 
 const ProviderSchema = v.strictObject({
   name: Name,
-  type: v.optional(v.picklist(["oidc", "github-user"], "must be oidc or github-user"), "oidc"),
-  issuer: v.optional(IssuerUrl),
+  // https://github.com for people's GitHub tokens; any other issuer's tokens are OIDC tokens.
+  issuer: IssuerUrl,
   audience: v.optional(v.pipe(v.string(), v.nonEmpty())),
   jwks_uri: v.optional(IssuerUrl),
   // Every token from this provider must have these, whichever profile it gets.
@@ -185,20 +203,26 @@ export interface Bucket {
   prefixes: string[];
 }
 
-/** How a provider's tokens are checked: as OIDC tokens, or as a person's GitHub token with the GitHub API. */
+/**
+ * How a provider's tokens are checked, which follows from its issuer: a person's GitHub token
+ * with GitHub's API, any other issuer's as an OIDC token.
+ */
 export type ProviderType = "oidc" | "github-user";
+
+/** Claim name to the values it may have: any of them. */
+export type ClaimPatterns = Record<string, string[]>;
 
 export interface Provider {
   name: string;
   type: ProviderType;
-  /** `oidc` only: the token's `iss`, exactly. */
-  issuer?: string;
-  /** `oidc` only: a value the token's `aud` must contain. */
+  /** The token's `iss`, exactly; `https://github.com` for people's GitHub tokens. */
+  issuer: string;
+  /** OIDC only: a value the token's `aud` must contain. */
   audience?: string;
-  /** `oidc` only: where the keys are, if not in the issuer's discovery document. */
+  /** OIDC only: where the keys are, if not in the issuer's discovery document. */
   jwks_uri?: string;
   /** Every token from this provider must have these. */
-  claims: Record<string, string>;
+  claims: ClaimPatterns;
 }
 
 export interface Profile {
@@ -211,8 +235,8 @@ export interface Profile {
   enabled: boolean;
   /** What the profile issues for: Cloudflare credentials, or the broker's own token for this service. */
   audience: string;
-  /** All must match (AND): the profile's own claims and its provider's. */
-  claims: Record<string, string>;
+  /** All must match (AND), each any of its values: the profile's own claims and its provider's. */
+  claims: ClaimPatterns;
   ttl: number;
   max_ttl: number;
   /** The token's policies. Absent for a profile with only `buckets`. */
@@ -255,25 +279,31 @@ function tenantClaims(issuer: string): string[] | undefined {
 }
 
 /** Guardrail 2 for a claim set: patterns stay narrow, and IDs are exact. */
-function checkPatterns(at: string, claims: Record<string, string>, issues: string[]) {
-  for (const [claim, value] of Object.entries(claims)) {
-    if (claim.endsWith("_id") && value.includes("*")) {
-      issues.push(`${at}.${claim}: ID claims must be exact, globs are not allowed`);
-    } else if (value.includes("*") && !isPrefixPattern(value)) {
-      // A bare or leading `*` would match far more than intended; one in the middle needs a backtracking matcher.
-      issues.push(`${at}.${claim}: * is only allowed once, at the end, after a prefix (e.g. example-org/*)`);
+function checkPatterns(at: string, claims: ClaimPatterns, issues: string[]) {
+  for (const [claim, values] of Object.entries(claims)) {
+    for (const value of values) {
+      if (claim.endsWith("_id") && value.includes("*")) {
+        issues.push(`${at}.${claim}: ID claims must be exact, globs are not allowed`);
+      } else if (value.includes("*") && !isPrefixPattern(value)) {
+        // A bare or leading `*` would match far more than intended; one in the middle needs a backtracking matcher.
+        issues.push(`${at}.${claim}: * is only allowed once, at the end, after a prefix (e.g. example-org/*)`);
+      }
     }
   }
 }
 
-/** Checks a `github-user` claim set: only what the broker looks up for a person, with a valid role. */
-function checkUserClaims(at: string, claims: Record<string, string>, issues: string[]) {
+/** Checks a claim set for people: only what the broker looks up for a person, with one valid role. */
+function checkUserClaims(at: string, claims: ClaimPatterns, issues: string[]) {
   for (const claim of Object.keys(claims)) {
     if (!USER_MATCH.includes(claim)) {
       issues.push(`${at}.${claim}: not available for people; use ${USER_MATCH.join(", ")}`);
     }
   }
-  const role = claims.repository_permission;
+  const roles = claims.repository_permission;
+  if (roles !== undefined && roles.length > 1) {
+    issues.push(`${at}.repository_permission: one role, the least the person must have`);
+  }
+  const role = roles?.[0];
   if (role !== undefined && !(REPOSITORY_PERMISSIONS as readonly string[]).includes(role)) {
     issues.push(`${at}.repository_permission: must be one of ${REPOSITORY_PERMISSIONS.join(", ")}`);
   }
@@ -287,43 +317,41 @@ function checkUserClaims(at: string, claims: Record<string, string>, issues: str
 function loadProviders(raw: v.InferOutput<typeof ProviderSchema>[], issues: string[]): Provider[] {
   const names = new Set<string>();
   const issuers = new Set<string>();
-  let githubUsers = 0;
   return raw.map((provider, i) => {
     const at = `providers.${i} (${provider.name})`;
     if (names.has(provider.name)) issues.push(`${at}: duplicate provider name`);
     names.add(provider.name);
+    if (issuers.has(provider.issuer)) issues.push(`${at}.issuer: another provider has the same issuer`);
+    issuers.add(provider.issuer);
     checkPatterns(`${at}.claims`, provider.claims, issues);
 
-    if (provider.type === "github-user") {
-      // Checked with the GitHub API, not as an OIDC token.
-      for (const field of ["issuer", "audience", "jwks_uri"] as const) {
-        if (provider[field] !== undefined) issues.push(`${at}.${field}: not for a github-user provider`);
+    if (provider.issuer === GITHUB_USERS_ISSUER) {
+      // A person's GitHub token is checked with GitHub's API: it has no audience or keys.
+      for (const field of ["audience", "jwks_uri"] as const) {
+        if (provider[field] !== undefined)
+          issues.push(`${at}.${field}: not for ${GITHUB_USERS_ISSUER}, whose tokens aren't OIDC tokens`);
       }
-      if (++githubUsers > 1) issues.push(`${at}: only one github-user provider is allowed`);
-      checkUserClaims(`${at}.claims`, provider.claims, issues);
-      // Guardrail 1: the person picks the repo, so the owner it must belong to is pinned.
-      if (!/^\d+$/.test(provider.claims.repository_owner_id ?? "")) {
-        issues.push(`${at}.claims.repository_owner_id: required, a numeric GitHub org or user ID`);
+      for (const claim of Object.keys(provider.claims)) {
+        if (!USER_PROVIDER_PINS.includes(claim)) {
+          issues.push(
+            `${at}.claims.${claim}: a provider for people pins ${USER_PROVIDER_PINS.join(" or ")}; the rest go on profiles`,
+          );
+        }
       }
-      if ("repository_permission" in provider.claims || "team_id" in provider.claims) {
-        issues.push(`${at}.claims: repository_permission and team_id go on profiles`);
-      }
-      return { name: provider.name, type: provider.type, claims: provider.claims };
+      return { name: provider.name, type: "github-user", issuer: provider.issuer, claims: provider.claims };
     }
 
-    if (provider.issuer === undefined) issues.push(`${at}.issuer: required for an oidc provider`);
-    if (provider.audience === undefined) issues.push(`${at}.audience: required for an oidc provider`);
+    if (provider.audience === undefined) issues.push(`${at}.audience: required for an OIDC issuer`);
     for (const claim of USER_ONLY_MATCH) {
-      if (claim in provider.claims) issues.push(`${at}.claims.${claim}: only for github-user providers`);
+      if (claim in provider.claims) issues.push(`${at}.claims.${claim}: only for people (${GITHUB_USERS_ISSUER})`);
     }
-    const issuer = provider.issuer ?? "";
-    if (issuer && issuers.has(issuer)) issues.push(`${at}.issuer: another provider has the same issuer`);
-    issuers.add(issuer);
 
     // Guardrail 1: an issuer that gives anyone's projects a token needs the tenant pinned.
-    const tenant = tenantClaims(issuer);
+    const tenant = tenantClaims(provider.issuer);
     if (tenant && !tenant.some((claim) => provider.claims[claim] !== undefined)) {
-      issues.push(`${at}.claims: must pin ${tenant.join(" or ")}: ${issuer} issues tokens to anyone's projects`);
+      issues.push(
+        `${at}.claims: must pin ${tenant.join(" or ")}: ${provider.issuer} issues tokens to anyone's projects`,
+      );
     }
     // Guardrail 5: a custom audience, so a GitHub token requested for AWS or GCP can't be replayed here.
     const audience = provider.audience ?? "";
@@ -332,8 +360,8 @@ function loadProviders(raw: v.InferOutput<typeof ProviderSchema>[], issues: stri
     }
     return {
       name: provider.name,
-      type: provider.type,
-      issuer,
+      type: "oidc",
+      issuer: provider.issuer,
       audience,
       ...(provider.jwks_uri ? { jwks_uri: provider.jwks_uri } : {}),
       claims: provider.claims,
@@ -396,24 +424,43 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
     const type = provider?.type ?? "oidc";
 
     checkPatterns(`${at}.claims`, profile.claims, issues);
-    // Guardrail 6: a person has no ref, environment or workflow, and the client picks the
-    // repo, so a profile for people matches only what the broker looks up, and must require
-    // a role on that repo. Other profiles can't use the keys only a person has.
+    // The provider's claims every token for this profile must also have.
+    let inherited: ClaimPatterns = provider?.claims ?? {};
+    // Guardrail 6: a person has no ref, environment or workflow, and picks the repo, so a
+    // profile for people matches only what the broker looks up. It's pinned either to a role
+    // on the repo they ask for, which must belong to the provider's owner, or to who they are.
     if (type === "github-user") {
       checkUserClaims(`${at}.claims`, profile.claims, issues);
-      if (profile.claims.repository_permission === undefined) {
-        issues.push(`${at}.claims.repository_permission: required for a github-user provider`);
+      const repoScoped = profile.claims.repository_permission !== undefined;
+      if (repoScoped && provider?.claims.repository_owner_id === undefined) {
+        issues.push(
+          `${at}.claims.repository_permission: needs provider ${provider?.name} to pin repository_owner_id, the owner the repo must belong to`,
+        );
+      }
+      if (!repoScoped) {
+        if (profile.claims.actor_id === undefined && provider?.claims.actor_id === undefined) {
+          issues.push(
+            `${at}.claims: a profile for people needs repository_permission (a role on the repo they ask for) or actor_id (who may use it)`,
+          );
+        }
+        for (const claim of REPO_MATCH) {
+          if (claim in profile.claims) issues.push(`${at}.claims.${claim}: needs repository_permission`);
+        }
+        // Without a repo, the owner pin has nothing to bound: it applies to repo-scoped profiles.
+        const { repository_owner_id: _, ...rest } = inherited;
+        inherited = rest;
       }
     } else {
       for (const claim of USER_ONLY_MATCH) {
-        if (claim in profile.claims) issues.push(`${at}.claims.${claim}: only for github-user providers`);
+        if (claim in profile.claims) issues.push(`${at}.claims.${claim}: only for people (${GITHUB_USERS_ISSUER})`);
       }
     }
 
-    // Guardrail 1: a provider's claims apply to every profile for it and can't be overridden.
-    for (const [claim, value] of Object.entries(provider?.claims ?? {})) {
+    // Guardrail 1: a provider's claims apply to every profile for it. A profile can narrow
+    // them to some of their values, but not widen or change them.
+    for (const [claim, values] of Object.entries(inherited)) {
       const own = profile.claims[claim];
-      if (own !== undefined && own !== value) {
+      if (own !== undefined && !own.every((value) => values.includes(value))) {
         issues.push(`${at}.claims.${claim}: conflicts with provider ${provider?.name}`);
       }
     }
@@ -472,7 +519,7 @@ export function loadPolicy(input: unknown, accountId?: string): Policy {
       type,
       enabled: profile.enabled,
       audience,
-      claims: { ...profile.claims, ...provider?.claims },
+      claims: { ...inherited, ...profile.claims },
       ttl,
       max_ttl,
       ...(token ? { policies: token.policies } : {}),
@@ -579,14 +626,24 @@ function hasRole(role: unknown, required: string): boolean {
   return roles.includes(role) && roles.indexOf(role) >= roles.indexOf(required);
 }
 
+/** Whether one value of a token's claim matches one of the patterns. */
+function matchesValue(claim: string, patterns: string[], value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  return patterns.some((pattern) => (claim.endsWith("_id") ? value === pattern : glob(pattern, value)));
+}
+
+/** Whether every claim of the profile matches, each by any of its values. */
 export function matches(profile: Profile, claims: Claims): boolean {
-  return Object.entries(profile.claims).every(([claim, pattern]) => {
+  return Object.entries(profile.claims).every(([claim, patterns]) => {
     // Only a person's claims carry these: the teams they're in and their role on the repo.
-    if (claim === "team_id") return Array.isArray(claims.team_ids) && claims.team_ids.includes(pattern);
-    if (claim === "repository_permission") return hasRole(claims.repository_permission, pattern);
+    if (claim === "team_id")
+      return Array.isArray(claims.team_ids) && claims.team_ids.some((id) => patterns.includes(id));
+    if (claim === "repository_permission") return hasRole(claims.repository_permission, patterns[0] as string);
     const value = claims[claim];
-    if (typeof value !== "string") return false;
-    return claim.endsWith("_id") ? value === pattern : glob(pattern, value);
+    // A claim that's a list in the token matches if any of its values does.
+    return Array.isArray(value)
+      ? value.some((v) => matchesValue(claim, patterns, v))
+      : matchesValue(claim, patterns, value);
   });
 }
 
