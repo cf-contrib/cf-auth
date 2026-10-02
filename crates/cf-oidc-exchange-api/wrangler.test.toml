@@ -1,0 +1,48 @@
+# The integration tests' Worker: a `stand-ins` build, which takes its upstreams
+# from the tests' stand-ins and, on every request, the scenario each test sets:
+# the policy, the account, and which bindings below hold the broker token and
+# the signing key. Run with tests/run.sh, which creates the secrets.
+name = "cf-oidc-exchange-test"
+main = "build-test/entry.js"
+compatibility_date = "2026-08-15"
+
+[build]
+command = "worker-build --dev -d build-test . --features stand-ins && cp worker/entry.js build-test/ && cp policy.example.json build-test/policy.json"
+
+[vars]
+CF_OIDC_EXCHANGE_SCENARIO_URL = "http://127.0.0.1:8791/scenario"
+CF_OIDC_EXCHANGE_GITHUB_API_URL = "http://127.0.0.1:8791/github"
+CF_OIDC_EXCHANGE_CLOUDFLARE_API_URL = "http://127.0.0.1:8791/cloudflare/client/v4"
+# A broker token as a plain variable, which the Worker must refuse.
+BROKER_TOKEN_PLAIN = "test-broker-token"
+
+[[secrets_store_secrets]]
+binding = "CF_OIDC_BROKER_TOKEN"
+store_id = "00000000000000000000000000000000"
+secret_name = "broker-token"
+
+[[secrets_store_secrets]]
+binding = "BROKER_TOKEN_ROTATED"
+store_id = "00000000000000000000000000000000"
+secret_name = "broker-token-rotated"
+
+# Never created, so reading it fails.
+[[secrets_store_secrets]]
+binding = "BROKER_TOKEN_MISSING"
+store_id = "00000000000000000000000000000000"
+secret_name = "broker-token-missing"
+
+[[secrets_store_secrets]]
+binding = "CF_OIDC_BROKER_SIGNING_KEY"
+store_id = "00000000000000000000000000000000"
+secret_name = "signing-key"
+
+[[secrets_store_secrets]]
+binding = "SIGNING_KEY_SMALL"
+store_id = "00000000000000000000000000000000"
+secret_name = "signing-key-small"
+
+[[secrets_store_secrets]]
+binding = "SIGNING_KEY_NOT_PEM"
+store_id = "00000000000000000000000000000000"
+secret_name = "signing-key-not-pem"

@@ -66,26 +66,86 @@ fn policy_text() -> Result<String, HttpError> {
     Err(not_loaded())
 }
 
+/// Which bindings the Worker reads, and the policy. Always the constants above
+/// and the policy module, except in a `stand-ins` build, where the integration
+/// tests choose them.
+struct Bindings {
+    account_id: String,
+    broker_token: String,
+    signing_key: String,
+    policy: String,
+}
+
+impl Bindings {
+    async fn read(env: &Env) -> Result<Self, HttpError> {
+        #[cfg(feature = "stand-ins")]
+        if let Ok(url) = env.var("CF_OIDC_EXCHANGE_SCENARIO_URL") {
+            return Self::scenario(&url.to_string()).await;
+        }
+        Ok(Self {
+            account_id: env
+                .var(ACCOUNT_ID)
+                .map(|var| var.to_string())
+                .unwrap_or_default(),
+            broker_token: BROKER_TOKEN.into(),
+            signing_key: SIGNING_KEY.into(),
+            policy: policy_text()?,
+        })
+    }
+
+    /// The integration tests' scenario: the policy, the account, and which
+    /// bindings hold the broker token and the signing key.
+    #[cfg(feature = "stand-ins")]
+    async fn scenario(url: &str) -> Result<Self, HttpError> {
+        #[derive(serde::Deserialize)]
+        struct Scenario {
+            policy: serde_json::Value,
+            account_id: String,
+            broker_token: String,
+            signing_key: String,
+        }
+        let failed = |err: reqwest::Error| misconfigured("scenario_unavailable", err.to_string());
+        let scenario: Scenario = reqwest::get(url)
+            .await
+            .map_err(failed)?
+            .json()
+            .await
+            .map_err(failed)?;
+        Ok(Self {
+            account_id: scenario.account_id,
+            broker_token: scenario.broker_token,
+            signing_key: scenario.signing_key,
+            policy: match scenario.policy {
+                serde_json::Value::String(text) => text,
+                other => other.to_string(),
+            },
+        })
+    }
+}
+
 pub struct Config {
     pub policy: Rc<Policy>,
     pub account_id: String,
+    broker_token: String,
+    signing_key: String,
     env: Env,
 }
 
 impl Config {
     /// Loads the policy, or the copy already loaded, and checks the bindings it needs.
-    pub fn load(env: &Env) -> Result<Self, HttpError> {
-        let account_id = env
-            .var(ACCOUNT_ID)
-            .map(|var| var.to_string())
-            .unwrap_or_default();
+    pub async fn load(env: &Env) -> Result<Self, HttpError> {
+        let Bindings {
+            account_id,
+            broker_token,
+            signing_key,
+            policy: raw,
+        } = Bindings::read(env).await?;
         if account_id.is_empty() {
             return Err(misconfigured(
                 "misconfigured",
                 format!("{ACCOUNT_ID} must be set"),
             ));
         }
-        let raw = policy_text()?;
         let policy = LOADED.with_borrow_mut(|loaded| {
             let stale = loaded
                 .as_ref()
@@ -114,6 +174,8 @@ impl Config {
             Some(Ok(policy)) => Ok(Self {
                 policy,
                 account_id,
+                broker_token,
+                signing_key,
                 env: env.clone(),
             }),
             _ => Err(HttpError::new(ErrorCode::Misconfigured, "invalid_policy")),
@@ -136,7 +198,7 @@ impl Config {
     /// The Cloudflare API, as the broker token.
     pub async fn cloudflare(&self) -> Result<Cloudflare, HttpError> {
         let token = self
-            .secret(BROKER_TOKEN, "broker_token_unavailable")
+            .secret(&self.broker_token, "broker_token_unavailable")
             .await?;
         Ok(Cloudflare::new(
             &self.cloudflare_api(),
@@ -149,11 +211,14 @@ impl Config {
     /// tokens of its own and publishes no keys.
     pub fn has_signing_key(&self) -> bool {
         let env: &JsValue = self.env.as_ref();
-        js_sys::Reflect::has(env.unchecked_ref(), &JsValue::from_str(SIGNING_KEY)).unwrap_or(false)
+        js_sys::Reflect::get(env.unchecked_ref(), &JsValue::from_str(&self.signing_key))
+            .is_ok_and(|binding| !binding.is_undefined())
     }
 
     pub async fn signing_key(&self) -> Result<Rc<SigningKey>, HttpError> {
-        let pem = self.secret(SIGNING_KEY, "signing_key_unavailable").await?;
+        let pem = self
+            .secret(&self.signing_key, "signing_key_unavailable")
+            .await?;
         issuer::signing_key(&pem).await
     }
 
@@ -165,11 +230,11 @@ impl Config {
         self.upstream("CF_OIDC_EXCHANGE_CLOUDFLARE_API_URL", cloudflare::API_URL)
     }
 
-    /// An upstream's base URL. Only a build with `upstream-overrides`, for the
-    /// integration tests, takes another one from the environment.
+    /// An upstream's base URL. Only a `stand-ins` build, for the integration
+    /// tests, takes another one from the environment.
     #[allow(unused_variables)]
     fn upstream(&self, binding: &str, default: &str) -> String {
-        #[cfg(feature = "upstream-overrides")]
+        #[cfg(feature = "stand-ins")]
         if let Ok(url) = self.env.var(binding) {
             return url.to_string();
         }

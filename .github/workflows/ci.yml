@@ -38,6 +38,10 @@ jobs:
       - name: Build Rust Worker
         working-directory: crates/cf-oidc-exchange-api
         run: nix develop --command worker-build --release
+      # The Worker's flows end to end, under wrangler dev, against the tests'
+      # stand-ins for the OIDC issuers, GitHub and Cloudflare.
+      - name: Integration Test Rust Worker
+        run: nix develop --command crates/cf-oidc-exchange-api/tests/run.sh
       - name: Validate Terraform Module
         working-directory: packages/cf-oidc-broker/terraform
         run: |

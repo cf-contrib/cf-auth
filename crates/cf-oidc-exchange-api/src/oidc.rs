@@ -253,7 +253,10 @@ async fn jwks_uri(provider: &Provider) -> Result<String, HttpError> {
     );
     let doc: Discovery = get_json(&url).await?;
     if doc.issuer.as_ref().and_then(Value::as_str) != Some(provider.issuer.as_str()) {
-        let named = doc.issuer.map(|i| i.to_string()).unwrap_or_default();
+        let named = match doc.issuer {
+            Some(Value::String(issuer)) => issuer,
+            other => other.map(|i| i.to_string()).unwrap_or_default(),
+        };
         return Err(unavailable(format!(
             "{url} is for issuer {}",
             shown(&named)
