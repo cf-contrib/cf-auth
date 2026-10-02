@@ -32,20 +32,16 @@ use cf_oidc_exchange_sdk::v1::{
     Jwks, TokenExchangeRequest, TokenExchangeRequestSubjectTokenType as SubjectTokenType,
     TokenExchangeResponse, TokenExchangeResponseTokenType as TokenType, TokenRevocationRequest,
 };
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use cloudflare::v4::{
-    ApiOpError, HttpClient, IamCreatePayload, IamEffect, IamPermissionGroup,
-    IamPolicyWithPermissionGroupsAndResources, R2TempAccessCredsRequest,
+    ApiOpError, HttpClient, IamCreatePayload, IamTokenStatus, R2TempAccessCredsRequest,
     R2TempAccessCredsRequestPermission,
 };
 use serde_json::{Map, Value, json};
 use tracing::{error, info, warn};
 use worker::{Date, send::SendFuture};
 
-use super::config::{
-    BucketConfig, BucketPermission, CLOUDFLARE_AUDIENCE, Config, Effect, PolicyConfig,
-    ProfileConfig, ProviderConfig, TokenPolicyConfig,
-};
+use super::config::{BucketPermission, CLOUDFLARE_AUDIENCE, Config, ProfileConfig, ProviderConfig};
 
 /// The token exchange grant, RFC 8693's.
 const TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
@@ -72,47 +68,92 @@ impl ExchangeServiceHandler {
         Self { config }
     }
 
-    /// The Cloudflare API, as the Cloudflare token, read now.
-    async fn cloudflare(&self) -> Result<Cloudflare, Error> {
-        let token = self
-            .config
-            .cloudflare_token()
-            .await
-            .map_err(|err| Error::new(ErrorCode::Misconfigured, err.to_string()))?;
-        Ok(Cloudflare::new(
-            self.config.cloudflare_url(),
-            self.config.account_id(),
-            &token,
-        ))
+    /// Cloudflare's API, as the Cloudflare token, read now.
+    async fn cloudflare(&self) -> Result<HttpClient, Error> {
+        let client = self.config.cloudflare().await;
+        client.map_err(|err| Error::new(ErrorCode::Misconfigured, err.to_string()))
     }
 
     /// The signing key, read now, or `None` if none is bound.
     async fn signing_key(&self) -> Result<Option<SigningKey>, Error> {
-        match self
-            .config
-            .signing_key()
-            .await
-            .map_err(|err| Error::new(ErrorCode::Misconfigured, err.to_string()))?
-        {
-            Some(pem) => SigningKey::import(&pem).await.map(Some).map_err(|err| {
-                Error::new(ErrorCode::Misconfigured, format!("the signing key: {err}"))
-            }),
-            None => Ok(None),
+        let misconfigured = |why: String| Error::new(ErrorCode::Misconfigured, why);
+        match self.config.signing_key().await {
+            Ok(Some(pem)) => SigningKey::import(&pem)
+                .await
+                .map(Some)
+                .map_err(|err| misconfigured(format!("the signing key: {err}"))),
+            Ok(None) => Ok(None),
+            Err(err) => Err(misconfigured(err.to_string())),
         }
     }
 
     /// Deletes expired `cf-oidc:` tokens, for the hourly cron. Returns how many.
     pub async fn cleanup(&self) -> Result<usize, Error> {
-        self.cloudflare()
-            .await?
-            .cleanup(Date::now().as_millis())
-            .await
+        let cloudflare = self.cloudflare().await?;
+        let account_id = self.config.account_id();
+        let now = Date::now().as_millis() / 1000;
+
+        // Collect first: deleting while paginating would shift later pages and
+        // skip tokens.
+        let mut expired = Vec::new();
+        for page in 1.. {
+            let tokens = cloudflare
+                .account_api_tokens_list_tokens(
+                    account_id,
+                    Some(page as f64),
+                    Some(PAGE_SIZE as f64),
+                    None,
+                    Some(true),
+                )
+                .await
+                .map_err(|err| upstream("tokens.list", err))?
+                .result
+                .unwrap_or_default();
+            let count = tokens.len();
+            for token in tokens {
+                let (Some(id), Some(name), Some(expires_on)) =
+                    (token.id, token.name, token.expires_on)
+                else {
+                    continue;
+                };
+                let lapsed = token.status == Some(IamTokenStatus::Expired)
+                    || expires_on.timestamp() <= now as i64;
+                if name.starts_with(TOKEN_PREFIX) && lapsed {
+                    expired.push((id, name, expires_on));
+                }
+            }
+            if count < PAGE_SIZE {
+                break;
+            }
+        }
+
+        let mut deleted = 0;
+        for (id, name, expires_on) in expired {
+            match cloudflare
+                .account_api_tokens_delete_token(account_id, &id)
+                .await
+            {
+                Ok(_) => {
+                    deleted += 1;
+                    info!(
+                        event = "token.cleanup",
+                        token_id = %id,
+                        name = %name,
+                        expires_at = expires_on.timestamp(),
+                    );
+                }
+                Err(err) if err.api().is_some_and(|api| api.status == 404) => {}
+                Err(err) => return Err(upstream("tokens.delete", err)),
+            }
+        }
+        Ok(deleted)
     }
 
     /// The broker's own token, for a profile with another service's `audience`.
     async fn service_token(
         &self,
-        caller: &Caller<'_>,
+        identity: &Identity,
+        provider: &ProviderConfig,
         profile: &ProfileConfig,
         ttl: u64,
     ) -> Result<TokenExchangeResponse, Error> {
@@ -126,17 +167,17 @@ impl ExchangeServiceHandler {
             ));
         };
         let now = Date::now().as_millis() / 1000;
-        let (claims, expires_at) =
-            payload(&self.config.policy().issuer, caller, profile, ttl, now)?;
+        let issuer = &self.config.policy().issuer;
+        let (claims, expires_at) = payload(issuer, identity, provider, profile, ttl, now)?;
         let signed = key.sign(claims).await.map_err(|err| {
             Error::new(ErrorCode::InternalError, format!("signing a token: {err}"))
         })?;
         info!(
             event = "token.issue",
-            provider = %caller.provider.name,
+            provider = %provider.name,
             profile = %profile.name,
-            sub = caller.identity.subject(),
-            claims = %serde_json::Value::Object(caller.matched(Some(profile))),
+            sub = identity.subject(),
+            claims = %serde_json::Value::Object(provider.matched(Some(profile), &identity.claims)),
             audience = %profile.audience,
             jti = %signed.jti,
             expires_at,
@@ -154,13 +195,18 @@ impl ExchangeServiceHandler {
         })
     }
 
-    /// A Cloudflare API token, R2 credentials, or both, as the profile has them.
+    /// A Cloudflare API token, R2 credentials, or both, as the profile has
+    /// them.
     async fn cloudflare_credentials(
         &self,
-        caller: &Caller<'_>,
+        identity: &Identity,
+        provider: &ProviderConfig,
         profile: &ProfileConfig,
         ttl: u64,
     ) -> Result<TokenExchangeResponse, Error> {
+        let account_id = self.config.account_id();
+        let claims = serde_json::Value::Object(provider.matched(Some(profile), &identity.claims));
+
         // Filled in before anything is minted, so an unusable claim leaves
         // nothing behind.
         let buckets = profile.buckets.as_deref().unwrap_or_default();
@@ -170,7 +216,7 @@ impl ExchangeServiceHandler {
                 bucket
                     .prefixes
                     .iter()
-                    .map(|prefix| prefix.fill(&caller.identity.claims))
+                    .map(|prefix| prefix.fill(&identity.claims))
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|why| {
                         Error::new(
@@ -185,70 +231,144 @@ impl ExchangeServiceHandler {
         let now = Date::now().as_millis() / 1000;
         // In whole seconds, which is what the tokens API takes.
         let expires_on = DateTime::from_timestamp((now + ttl / 1000) as i64, 0).unwrap_or_default();
-        let mut token: Option<ApiToken> = None;
+
+        // The token: its permission groups looked up by name, then minted. Not
+        // retried: a create that failed midway leaves an orphan the cleanup
+        // removes.
+        let mut token = None;
         if let Some(config) = &profile.token {
-            let minted = cloudflare
-                .mint(&config.policies, caller.token_name(), expires_on)
-                .await?;
+            let groups = cloudflare
+                .account_api_tokens_list_permission_groups(account_id, None::<&str>, None::<&str>)
+                .await
+                .map_err(|err| upstream("permissionGroups.list", err))?
+                .result
+                .unwrap_or_default();
+            let policies = config
+                .iam_policies(&groups)
+                .map_err(|why| Error::new(ErrorCode::Misconfigured, why))?;
+            let payload = IamCreatePayload {
+                condition: None,
+                expires_on: Some(expires_on),
+                name: token_name(provider, identity),
+                not_before: None,
+                policies,
+            };
+            let created = cloudflare
+                .account_api_tokens_create_token(account_id, payload)
+                .await
+                .map_err(|err| upstream("tokens.create", err))?
+                .result;
+            let Some((Some(id), Some(value), expires)) =
+                created.map(|created| (created.id, created.value, created.expires_on))
+            else {
+                return Err(missing("tokens.create"));
+            };
+            let expires = expires.unwrap_or(expires_on);
             info!(
                 event = "token.mint",
-                provider = %caller.provider.name,
+                provider = %provider.name,
                 profile = %profile.name,
-                sub = caller.identity.subject(),
-                claims = %serde_json::Value::Object(caller.matched(Some(profile))),
-                token_id = %minted.token_id,
-                expires_at = minted.expires_on.timestamp(),
+                sub = identity.subject(),
+                claims = %claims,
+                token_id = %id,
+                expires_at = expires.timestamp(),
             );
-            token = Some(minted);
+            token = Some((id, value, expires));
         }
 
+        // The buckets' credentials, with the Cloudflare token, whose ID is
+        // its R2 access key ID, as their parent. Half a profile isn't handed
+        // out: if one bucket's fail, the token is deleted, and credentials
+        // already issued can't be revoked, but nobody has them.
         let mut issued = Vec::new();
-        for (bucket, prefixes) in buckets.iter().zip(prefixes) {
-            match cloudflare.issue_r2(bucket, &prefixes, ttl).await {
-                Ok(credentials) => {
+        if !buckets.is_empty() {
+            let r2 = async {
+                let parent_access_key_id = cloudflare
+                    .account_api_tokens_verify_token(account_id)
+                    .await
+                    .map_err(|err| upstream("tokens.verify", err))?
+                    .result
+                    .ok_or_else(|| missing("tokens.verify"))?
+                    .id;
+                for (bucket, prefixes) in buckets.iter().zip(prefixes) {
+                    let request = R2TempAccessCredsRequest {
+                        bucket: bucket.name.clone(),
+                        objects: None,
+                        parent_access_key_id: parent_access_key_id.clone(),
+                        permission: match bucket.permission {
+                            BucketPermission::ObjectReadWrite => {
+                                R2TempAccessCredsRequestPermission::ObjectReadWrite
+                            }
+                            BucketPermission::ObjectReadOnly => {
+                                R2TempAccessCredsRequestPermission::ObjectReadOnly
+                            }
+                        },
+                        prefixes: (!prefixes.is_empty()).then(|| prefixes.clone()),
+                        ttl_seconds: (ttl / 1000) as f64,
+                    };
+                    let credentials = cloudflare
+                        .r2_create_temp_access_credentials(account_id, request)
+                        .await
+                        .map_err(|err| upstream("temporaryCredentials.create", err))?
+                        .result;
+                    let (Some(access_key_id), Some(secret_access_key), Some(session_token)) = (
+                        credentials.access_key_id,
+                        credentials.secret_access_key,
+                        credentials.session_token,
+                    ) else {
+                        return Err(missing("temporaryCredentials.create"));
+                    };
                     info!(
                         event = "r2.issued",
-                        provider = %caller.provider.name,
+                        provider = %provider.name,
                         profile = %profile.name,
-                        sub = caller.identity.subject(),
-                        claims = %serde_json::Value::Object(caller.matched(Some(profile))),
+                        sub = identity.subject(),
+                        claims = %claims,
                         bucket = %bucket.name,
                         prefixes = ?prefixes,
                         permission = bucket.permission.as_str(),
                         expires_at = expires_on.timestamp(),
                     );
                     issued.push(BucketCredentials {
-                        access_key_id: credentials.access_key_id,
-                        endpoint: format!(
-                            "https://{}.r2.cloudflarestorage.com",
-                            self.config.account_id()
-                        ),
+                        access_key_id,
+                        endpoint: format!("https://{account_id}.r2.cloudflarestorage.com"),
                         expires_on,
                         name: bucket.name.clone(),
                         prefixes,
-                        secret_access_key: credentials.secret_access_key,
-                        session_token: credentials.session_token,
+                        secret_access_key,
+                        session_token,
                     });
                 }
-                Err(err) => {
-                    // Half a profile isn't handed out. Credentials already
-                    // issued can't be revoked, but nobody has them.
-                    if let Some(token) = &token {
-                        cloudflare.discard(&token.token_id).await;
+                Ok(())
+            };
+            if let Err(err) = r2.await {
+                // Best effort: the cleanup is the fallback.
+                if let Some((token_id, _, _)) = &token {
+                    match cloudflare
+                        .account_api_tokens_delete_token(account_id, token_id)
+                        .await
+                    {
+                        Ok(_) => info!(event = "token.revoke", token_id, reason = "discarded"),
+                        Err(err) => error!(
+                            event = "token.revoke",
+                            token_id,
+                            reason = "discard_failed",
+                            detail = %err,
+                        ),
                     }
-                    return Err(err);
                 }
+                return Err(err);
             }
         }
 
         let expires_at = token
             .as_ref()
-            .map_or(expires_on, |t| t.expires_on)
+            .map_or(expires_on, |(_, _, at)| *at)
             .timestamp();
         let (access_token, token_id, issued_token_type, token_type) = match token {
-            Some(token) => (
-                Some(token.token),
-                Some(token.token_id),
+            Some((id, value, _)) => (
+                Some(value),
+                Some(id),
                 IssuedTokenType::UrnIetfParamsOauthTokenTypeAccessToken,
                 TokenType::Bearer,
             ),
@@ -261,7 +381,7 @@ impl ExchangeServiceHandler {
         };
         Ok(TokenExchangeResponse {
             access_token,
-            account_id: Some(self.config.account_id().into()),
+            account_id: Some(account_id.into()),
             buckets: (!issued.is_empty()).then_some(issued),
             expires_at,
             expires_in: (expires_at - now as i64).max(0),
@@ -281,7 +401,7 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
     async fn exchange_token(&self, request: TokenExchangeRequest) -> v1::ExchangeTokenResponse {
         SendFuture::new(async move {
             let policy = self.config.policy();
-            let mut caller: Option<Caller> = None;
+            let mut caller: Option<(Identity, &ProviderConfig)> = None;
             let mut named: Option<&ProfileConfig> = None;
             let exchanged = async {
                 // What the generated validation can't check: the audience,
@@ -322,11 +442,19 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                 let (SubjectTokenType::UrnIetfParamsOauthTokenTypeIdToken
                 | SubjectTokenType::UrnIetfParamsOauthTokenTypeJwt) = request.subject_token_type;
 
-                let caller = caller.insert(Caller::of(&request.subject_token, policy)?);
+                // Who the layer verified the caller is.
+                let unauthorized = |why: &str| Error::new(ErrorCode::Unauthorized, why);
+                let identity = cf_oidc_core::verified(&request.subject_token)
+                    .ok_or_else(|| unauthorized("the subject token wasn't verified"))?;
+                let provider = policy
+                    .provider_for(&identity.claims)
+                    .map_err(|why| unauthorized(&why))?;
+                let (identity, provider) = &*caller.insert((identity, provider));
+
                 let profile = policy
                     .profile_for(
-                        &caller.provider.name,
-                        &caller.identity.claims,
+                        &provider.name,
+                        &identity.claims,
                         request.profile.as_deref(),
                         audience,
                     )
@@ -336,9 +464,10 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                     .ttl_for(request.ttl.as_deref())
                     .map_err(|why| Error::new(ErrorCode::BadRequest, why))?;
                 if profile.audience == CLOUDFLARE_AUDIENCE {
-                    self.cloudflare_credentials(caller, profile, ttl).await
+                    self.cloudflare_credentials(identity, provider, profile, ttl)
+                        .await
                 } else {
-                    self.service_token(caller, profile, ttl).await
+                    self.service_token(identity, provider, profile, ttl).await
                 }
             };
 
@@ -350,10 +479,12 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                         .or(request.profile.as_deref());
                     warn!(
                         event = "token.deny",
-                        provider = caller.as_ref().map(|c| c.provider.name.as_str()),
+                        provider = caller.as_ref().map(|(_, provider)| provider.name.as_str()),
                         profile,
-                        sub = caller.as_ref().and_then(|c| c.identity.subject()),
-                        claims = caller.as_ref().map(|c| display(serde_json::Value::Object(c.matched(named)))),
+                        sub = caller.as_ref().and_then(|(identity, _)| identity.subject()),
+                        claims = caller.as_ref().map(|(identity, provider)| {
+                            display(serde_json::Value::Object(provider.matched(named, &identity.claims)))
+                        }),
                         error = err.error.as_str(),
                         message = %err.message,
                     );
@@ -390,11 +521,50 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
     /// was revoked or already gone.
     async fn revoke_token(&self, request: TokenRevocationRequest) -> v1::RevokeTokenResponse {
         SendFuture::new(async move {
+            // Holding the token is the proof: Cloudflare says which it is,
+            // and it's deleted if the broker minted it. Cloudflare doesn't
+            // recognize one invalid, expired, deleted or another account's.
             let revoked = async {
+                let account_id = self.config.account_id();
+                let presenter = HttpClient::new()
+                    .with_base_url(self.config.cloudflare_url())
+                    .with_api_key(&request.token);
+                let status = |err: &ApiOpError<_>| err.api().map(|api| api.status);
+                let id = match presenter.account_api_tokens_verify_token(account_id).await {
+                    Ok(verified) => match verified.result {
+                        Some(result) => result.id,
+                        None => return Ok(None),
+                    },
+                    Err(err) if matches!(status(&err), Some(400 | 401 | 403 | 404)) => {
+                        return Ok(None);
+                    }
+                    Err(err) => return Err(upstream("tokens.verify", err)),
+                };
+
                 let cloudflare = self.cloudflare().await?;
-                cloudflare
-                    .revoke(self.config.cloudflare_url(), &request.token)
+                let name = match cloudflare
+                    .account_api_tokens_token_details(account_id, &id)
                     .await
+                {
+                    Ok(details) => details.result.and_then(|token| token.name),
+                    Err(err) if err.api().is_some_and(|api| api.status == 404) => return Ok(None),
+                    Err(err) => return Err(upstream("tokens.get", err)),
+                };
+                if !name.is_some_and(|name| name.starts_with(TOKEN_PREFIX)) {
+                    return Err(Error::new(
+                        ErrorCode::Forbidden,
+                        format!("token {id} wasn't minted by the broker, so it isn't revoked here"),
+                    ));
+                }
+
+                match cloudflare
+                    .account_api_tokens_delete_token(account_id, &id)
+                    .await
+                {
+                    Ok(_) => Ok(Some(id)),
+                    Err(err) if err.api().is_some_and(|api| api.status == 404) => Ok(Some(id)),
+                    Err(err) => Err(upstream("tokens.delete", err)),
+                }
             };
             match revoked.await {
                 Ok(Some(token_id)) => {
@@ -492,48 +662,12 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
     }
 }
 
-/// The caller of an exchange: who the auth layer verified it is, and its
-/// provider.
-struct Caller<'p> {
-    identity: Identity,
-    provider: &'p ProviderConfig,
-}
-
-impl<'p> Caller<'p> {
-    /// The caller presenting `token`, as the auth layer verified it.
-    fn of(token: &str, policy: &'p PolicyConfig) -> Result<Self, Error> {
-        let unauthorized = |why: &str| Error::new(ErrorCode::Unauthorized, why);
-        let identity = cf_oidc_core::verified(token)
-            .ok_or_else(|| unauthorized("the subject token wasn't verified"))?;
-        let provider = policy
-            .provider_for(&identity.claims)
-            .map_err(|why| unauthorized(&why))?;
-        Ok(Self { identity, provider })
-    }
-
-    /// The claims its provider's and `profile`'s claim sets match on, with
-    /// their values: what's worth writing down about a caller, and copying
-    /// into the broker's own tokens. Never secret.
-    fn matched(&self, profile: Option<&ProfileConfig>) -> Map<String, Value> {
-        let profile = profile.map(|p| p.claims.as_slice()).unwrap_or_default();
-        self.provider
-            .claims
-            .iter()
-            .chain(profile)
-            .flat_map(|set| set.names())
-            .filter_map(|name| {
-                let value = self.identity.claims.get(name).filter(|v| copyable(v))?;
-                Some((name.to_string(), value.clone()))
-            })
-            .collect()
-    }
-
-    /// `cf-oidc:<provider>:<sub>`, whatever the issuer, cut to fit.
-    fn token_name(&self) -> String {
-        let sub = self.identity.subject().unwrap_or("unknown");
-        let name = format!("{TOKEN_PREFIX}{}:{sub}", self.provider.name);
-        name.chars().take(NAME_MAX).collect()
-    }
+/// `cf-oidc:<provider>:<sub>`, whatever the issuer, cut to fit: what a token
+/// minted for `identity` is named.
+fn token_name(provider: &ProviderConfig, identity: &Identity) -> String {
+    let sub = identity.subject().unwrap_or("unknown");
+    let name = format!("{TOKEN_PREFIX}{}:{sub}", provider.name);
+    name.chars().take(NAME_MAX).collect()
 }
 
 /// A Cloudflare API failure, reported as a `502`.
@@ -548,337 +682,12 @@ fn upstream<E: std::fmt::Debug>(what: &str, err: ApiOpError<E>) -> Error {
     )
 }
 
+/// A Cloudflare API answer without what it should have had.
 fn missing(what: &str) -> Error {
     Error::new(
         ErrorCode::UpstreamError,
         format!("Cloudflare: {what} returned nothing"),
     )
-}
-
-/// The status Cloudflare answered with, if it answered.
-fn status<E: std::fmt::Debug>(err: &ApiOpError<E>) -> Option<u16> {
-    err.api().map(|api| api.status)
-}
-
-/// The Cloudflare API, as the Cloudflare token.
-struct Cloudflare {
-    client: HttpClient,
-    account_id: String,
-}
-
-/// A token the broker minted.
-struct ApiToken {
-    token: String,
-    token_id: String,
-    expires_on: DateTime<Utc>,
-}
-
-/// R2 temporary credentials for a bucket.
-struct R2Credentials {
-    access_key_id: String,
-    secret_access_key: String,
-    session_token: String,
-}
-
-/// A permission group: its ID, and what the policies name it by.
-struct Group {
-    id: String,
-    name: String,
-    scopes: Vec<String>,
-}
-
-impl Cloudflare {
-    fn new(api_url: &str, account_id: &str, token: &str) -> Self {
-        Self {
-            client: HttpClient::new().with_base_url(api_url).with_api_key(token),
-            account_id: account_id.into(),
-        }
-    }
-
-    /// Mints a token. Not retried: a create that failed midway leaves an orphan
-    /// the cleanup removes.
-    async fn mint(
-        &self,
-        policies: &[TokenPolicyConfig],
-        name: String,
-        expires_on: DateTime<Utc>,
-    ) -> Result<ApiToken, Error> {
-        let policies = self.resolve(policies).await?;
-        let payload = IamCreatePayload {
-            condition: None,
-            expires_on: Some(expires_on),
-            name,
-            not_before: None,
-            policies,
-        };
-        let created = self
-            .client
-            .account_api_tokens_create_token(&self.account_id, payload)
-            .await
-            .map_err(|err| upstream("tokens.create", err))?
-            .result
-            .ok_or_else(|| missing("tokens.create"))?;
-        let (Some(token_id), Some(token)) = (created.id, created.value) else {
-            return Err(missing("tokens.create"));
-        };
-        Ok(ApiToken {
-            token,
-            token_id,
-            expires_on: created.expires_on.unwrap_or(expires_on),
-        })
-    }
-
-    /// Deletes a token that was minted but won't be handed out. Best effort:
-    /// the cleanup is the fallback.
-    async fn discard(&self, token_id: &str) {
-        let deleted = self
-            .client
-            .account_api_tokens_delete_token(&self.account_id, token_id)
-            .await;
-        match deleted {
-            Ok(_) => info!(event = "token.revoke", token_id, reason = "discarded"),
-            Err(err) => error!(
-                event = "token.revoke",
-                token_id,
-                reason = "discard_failed",
-                detail = %err,
-            ),
-        }
-    }
-
-    /// Revokes a token the caller presents. Holding it is the proof of
-    /// authorization. Returns the deleted token's ID, or `None` if it was
-    /// already gone.
-    async fn revoke(&self, api_url: &str, presented: &str) -> Result<Option<String>, Error> {
-        let presenter = HttpClient::new()
-            .with_base_url(api_url)
-            .with_api_key(presented);
-        // The API's answer for a token it doesn't recognize: invalid, expired,
-        // deleted, another account's.
-        let id = match presenter
-            .account_api_tokens_verify_token(&self.account_id)
-            .await
-        {
-            Ok(verified) => match verified.result {
-                Some(result) => result.id,
-                None => return Ok(None),
-            },
-            Err(err) if matches!(status(&err), Some(400 | 401 | 403 | 404)) => return Ok(None),
-            Err(err) => return Err(upstream("tokens.verify", err)),
-        };
-
-        let name = match self
-            .client
-            .account_api_tokens_token_details(&self.account_id, &id)
-            .await
-        {
-            Ok(details) => details.result.and_then(|token| token.name),
-            Err(err) if status(&err) == Some(404) => return Ok(None),
-            Err(err) => return Err(upstream("tokens.get", err)),
-        };
-        if !name.is_some_and(|name| name.starts_with(TOKEN_PREFIX)) {
-            return Err(Error::new(
-                ErrorCode::Forbidden,
-                format!("token {id} wasn't minted by the broker, so it isn't revoked here"),
-            ));
-        }
-
-        match self
-            .client
-            .account_api_tokens_delete_token(&self.account_id, &id)
-            .await
-        {
-            Ok(_) => Ok(Some(id)),
-            Err(err) if status(&err) == Some(404) => Ok(Some(id)),
-            Err(err) => Err(upstream("tokens.delete", err)),
-        }
-    }
-
-    /// Deletes expired `cf-oidc:` tokens. Returns how many were removed.
-    async fn cleanup(&self, now_ms: u64) -> Result<usize, Error> {
-        // Collect first: deleting while paginating would shift later pages and
-        // skip tokens.
-        let mut expired = Vec::new();
-        for page in 1.. {
-            let tokens = self
-                .client
-                .account_api_tokens_list_tokens(
-                    &self.account_id,
-                    Some(page as f64),
-                    Some(PAGE_SIZE as f64),
-                    None,
-                    Some(true),
-                )
-                .await
-                .map_err(|err| upstream("tokens.list", err))?
-                .result
-                .unwrap_or_default();
-            let count = tokens.len();
-            for token in tokens {
-                let (Some(id), Some(name), Some(expires_on)) =
-                    (token.id, token.name, token.expires_on)
-                else {
-                    continue;
-                };
-                let lapsed = token.status == Some(cloudflare::v4::IamTokenStatus::Expired)
-                    || expires_on.timestamp_millis() as u64 <= now_ms;
-                if name.starts_with(TOKEN_PREFIX) && lapsed {
-                    expired.push((id, name, expires_on));
-                }
-            }
-            if count < PAGE_SIZE {
-                break;
-            }
-        }
-
-        let mut deleted = 0;
-        for (id, name, expires_on) in expired {
-            match self
-                .client
-                .account_api_tokens_delete_token(&self.account_id, &id)
-                .await
-            {
-                Ok(_) => {
-                    deleted += 1;
-                    info!(
-                        event = "token.cleanup",
-                        token_id = %id,
-                        name = %name,
-                        expires_at = expires_on.timestamp(),
-                    );
-                }
-                Err(err) if status(&err) == Some(404) => {}
-                Err(err) => return Err(upstream("tokens.delete", err)),
-            }
-        }
-        Ok(deleted)
-    }
-
-    /// Creates temporary S3 credentials for a bucket, limited to `prefixes`
-    /// (filled in), with the Cloudflare token as their parent.
-    async fn issue_r2(
-        &self,
-        bucket: &BucketConfig,
-        prefixes: &[String],
-        ttl: u64,
-    ) -> Result<R2Credentials, Error> {
-        // The token's ID is its R2 access key ID.
-        let parent_access_key_id = self
-            .client
-            .account_api_tokens_verify_token(&self.account_id)
-            .await
-            .map_err(|err| upstream("tokens.verify", err))?
-            .result
-            .ok_or_else(|| missing("tokens.verify"))?
-            .id;
-        let request = R2TempAccessCredsRequest {
-            bucket: bucket.name.clone(),
-            objects: None,
-            parent_access_key_id,
-            permission: match bucket.permission {
-                BucketPermission::ObjectReadWrite => {
-                    R2TempAccessCredsRequestPermission::ObjectReadWrite
-                }
-                BucketPermission::ObjectReadOnly => {
-                    R2TempAccessCredsRequestPermission::ObjectReadOnly
-                }
-            },
-            prefixes: (!prefixes.is_empty()).then(|| prefixes.to_vec()),
-            ttl_seconds: (ttl / 1000) as f64,
-        };
-        let creds = self
-            .client
-            .r2_create_temp_access_credentials(&self.account_id, request)
-            .await
-            .map_err(|err| upstream("temporaryCredentials.create", err))?
-            .result;
-        let (Some(access_key_id), Some(secret_access_key), Some(session_token)) = (
-            creds.access_key_id,
-            creds.secret_access_key,
-            creds.session_token,
-        ) else {
-            return Err(missing("temporaryCredentials.create"));
-        };
-        Ok(R2Credentials {
-            access_key_id,
-            secret_access_key,
-            session_token,
-        })
-    }
-
-    /// Resolves permission-group names to IDs; resources are already in the
-    /// API's shape. An unknown name is a configuration error, never a silent
-    /// drop.
-    async fn resolve(
-        &self,
-        policies: &[TokenPolicyConfig],
-    ) -> Result<Vec<IamPolicyWithPermissionGroupsAndResources>, Error> {
-        let groups: Vec<Group> = self
-            .client
-            .account_api_tokens_list_permission_groups(&self.account_id, None::<&str>, None::<&str>)
-            .await
-            .map_err(|err| upstream("permissionGroups.list", err))?
-            .result
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|group| {
-                Some(Group {
-                    id: group.id?,
-                    name: group.name?,
-                    scopes: group.scopes.unwrap_or_default(),
-                })
-            })
-            .collect();
-        policies
-            .iter()
-            .map(|policy| {
-                let scope = policy.scope();
-                let permission_groups = policy
-                    .permissions
-                    .iter()
-                    .map(|name| {
-                        pick_group(&groups, name, scope).map(|group| IamPermissionGroup {
-                            id: group.id.clone(),
-                            meta: None,
-                            name: None,
-                        })
-                    })
-                    .collect::<Result<_, _>>()?;
-                Ok(IamPolicyWithPermissionGroupsAndResources {
-                    effect: match policy.effect {
-                        Effect::Allow => IamEffect::Allow,
-                        Effect::Deny => IamEffect::Deny,
-                    },
-                    id: None,
-                    permission_groups,
-                    resources: policy.iam_resources(),
-                })
-            })
-            .collect()
-    }
-}
-
-fn pick_group<'g>(groups: &'g [Group], name: &str, scope: &str) -> Result<&'g Group, Error> {
-    let named: Vec<&Group> = groups.iter().filter(|g| g.name == name).collect();
-    if let [group] = named.as_slice() {
-        return Ok(group);
-    }
-    let scoped: Vec<&Group> = named
-        .iter()
-        .copied()
-        .filter(|g| g.scopes.iter().any(|s| s == scope))
-        .collect();
-    if let [group] = scoped.as_slice() {
-        return Ok(group);
-    }
-    Err(Error::new(
-        ErrorCode::Misconfigured,
-        if named.is_empty() {
-            format!("no permission group is named {name}")
-        } else {
-            format!("several permission groups are named {name}, at no one scope of the resources")
-        },
-    ))
 }
 
 /// The claims of a token for another service, issued at `now` (seconds since
@@ -890,12 +699,13 @@ fn pick_group<'g>(groups: &'g [Group], name: &str, scope: &str) -> Result<&'g Gr
 /// such as an email, stay behind. Signing adds its `jti`.
 fn payload(
     issuer: &str,
-    caller: &Caller,
+    identity: &Identity,
+    provider: &ProviderConfig,
     profile: &ProfileConfig,
     ttl: u64,
     now: u64,
 ) -> Result<(Map<String, Value>, u64), Error> {
-    let claims = &caller.identity.claims;
+    let claims = &identity.claims;
     let not_after = claims
         .get("exp")
         .and_then(Value::as_u64)
@@ -910,13 +720,13 @@ fn payload(
         ));
     }
 
-    let mut payload = caller.matched(Some(profile));
-    let subject = match caller.identity.subject() {
+    let mut payload = provider.matched(Some(profile), claims);
+    let subject = match identity.subject() {
         Some(sub) => sub.to_string(),
-        None => format!("{}:unknown", caller.provider.name),
+        None => format!("{}:unknown", provider.name),
     };
     for (name, value) in [
-        ("provider", json!(caller.provider.name)),
+        ("provider", json!(provider.name)),
         ("profile", json!(profile.name)),
         ("iss", json!(issuer)),
         ("aud", json!(profile.audience)),
@@ -930,84 +740,50 @@ fn payload(
     Ok((payload, expires_at))
 }
 
-/// Whether a claim's value is one to copy: a string, number or boolean, or a
-/// list of them, as claim sets match on.
-fn copyable(value: &Value) -> bool {
-    match value {
-        Value::String(text) => !text.is_empty(),
-        Value::Number(_) | Value::Bool(_) => true,
-        Value::Array(values) => values.iter().all(|v| !v.is_array() && copyable(v)),
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::config::{
-        ACCOUNT_SCOPE, R2_SCOPE, ZONE_SCOPE,
-        tests::{CACHE, ISSUER, NOW, claims, parse, policy},
-    };
+    use crate::service::config::tests::{CACHE, ISSUER, NOW, claims, parse, policy};
 
-    fn caller<'p>(policy: &'p PolicyConfig, claims: Map<String, Value>) -> Caller<'p> {
-        Caller {
-            identity: Identity {
-                issuer: ISSUER.into(),
-                claims,
-                claim_set: 0,
-            },
-            provider: &policy.providers[0],
+    fn identity(claims: Map<String, Value>) -> Identity {
+        Identity {
+            issuer: ISSUER.into(),
+            claims,
+            claim_set: 0,
         }
     }
 
     #[test]
     fn names_tokens_after_the_provider_and_the_subject() {
         let policy = parse(&policy());
+        let provider = &policy.providers[0];
         assert_eq!(
-            caller(&policy, claims()).token_name(),
+            token_name(provider, &identity(claims())),
             "cf-oidc:github:repo:example-org/app:ref:refs/heads/main"
         );
         assert_eq!(
-            caller(&policy, Map::new()).token_name(),
+            token_name(provider, &identity(Map::new())),
             "cf-oidc:github:unknown"
         );
 
         let mut long = claims();
         long.insert("sub".into(), "x".repeat(200).into());
-        let name = caller(&policy, long).token_name();
+        let name = token_name(provider, &identity(long));
         assert_eq!(name.chars().count(), 120);
         assert!(name.starts_with("cf-oidc:github:xxx"));
     }
 
     #[test]
-    fn knows_a_caller_by_the_claims_the_policy_matches_on() {
-        let policy = parse(&policy());
-        let mut claims = claims();
-        claims.insert("email".into(), "someone@example.com".into());
-        let caller = caller(&policy, claims);
-        assert_eq!(
-            Value::Object(caller.matched(Some(&policy.profiles[0]))),
-            json!({
-                "ref": "refs/heads/main",
-                "repository": "example-org/app",
-                "repository_owner_id": "100000001",
-            })
-        );
-        assert_eq!(
-            Value::Object(caller.matched(None)),
-            json!({ "repository_owner_id": "100000001" })
-        );
-    }
-
-    #[test]
     fn copies_only_the_claims_the_policy_matches_on() {
         let policy = parse(&policy());
+        let (provider, profile) = (&policy.providers[0], &policy.profiles[1]);
         let mut matched = claims();
         matched.insert("email".into(), "someone@example.com".into());
         let (issued, expires_at) = payload(
             "https://cf-oidc-exchange.example.com",
-            &caller(&policy, matched),
-            &policy.profiles[1],
+            &identity(matched),
+            provider,
+            profile,
             15 * 60_000,
             NOW,
         )
@@ -1033,48 +809,13 @@ mod tests {
         expired.insert("exp".into(), json!(NOW));
         let err = payload(
             "https://x.example.com",
-            &caller(&policy, expired),
-            &policy.profiles[1],
+            &identity(expired),
+            provider,
+            profile,
             60_000,
             NOW,
         )
         .unwrap_err();
         assert_eq!(err.message, "the subject token has expired");
-    }
-
-    #[test]
-    fn picks_permission_groups_by_name_then_scope() {
-        let group = |id: &str, name: &str, scope: &str| Group {
-            id: id.into(),
-            name: name.into(),
-            scopes: vec![scope.into()],
-        };
-        let groups = [
-            group("pg-dns-write", "DNS Write", ZONE_SCOPE),
-            group("pg-lb-write-account", "Load Balancers Write", ACCOUNT_SCOPE),
-            group("pg-lb-write-zone", "Load Balancers Write", ZONE_SCOPE),
-        ];
-        let pick = |name, scope| {
-            pick_group(&groups, name, scope)
-                .map(|g| g.id.as_str())
-                .map_err(|err| err.message)
-        };
-        assert_eq!(pick("DNS Write", ACCOUNT_SCOPE), Ok("pg-dns-write"));
-        assert_eq!(
-            pick("Load Balancers Write", ZONE_SCOPE),
-            Ok("pg-lb-write-zone")
-        );
-        assert_eq!(
-            pick("Load Balancers Write", ACCOUNT_SCOPE),
-            Ok("pg-lb-write-account")
-        );
-        assert_eq!(
-            pick("Load Balancers Write", R2_SCOPE),
-            Err("several permission groups are named Load Balancers Write, at no one scope of the resources".into())
-        );
-        assert_eq!(
-            pick("Nope", ACCOUNT_SCOPE),
-            Err("no permission group is named Nope".into())
-        );
     }
 }

@@ -19,7 +19,10 @@ use std::collections::BTreeMap;
 
 use cf_oidc_core::{ClaimSet, Provider, check_url};
 use cloudflare::v4::{
-    IamResources, IamResourcesTypeObjectNested, IamResourcesTypeObjectNestedAdditionalProperty,
+    HttpClient, IamEffect, IamPermissionGroup,
+    IamPermissionsGroupResponseCollectionResultItem as PermissionGroup,
+    IamPolicyWithPermissionGroupsAndResources as IamPolicy, IamResources,
+    IamResourcesTypeObjectNested, IamResourcesTypeObjectNestedAdditionalProperty,
     IamResourcesTypeObjectString,
 };
 use serde::{Deserialize, Deserializer};
@@ -128,9 +131,12 @@ impl Config {
         &self.policy
     }
 
-    /// Reads the Cloudflare token.
-    pub async fn cloudflare_token(&self) -> worker::Result<String> {
-        self.cloudflare_token.read().await
+    /// Cloudflare's API, as the Cloudflare token, read now.
+    pub async fn cloudflare(&self) -> worker::Result<HttpClient> {
+        let token = self.cloudflare_token.read().await?;
+        Ok(HttpClient::new()
+            .with_base_url(&self.cloudflare_url)
+            .with_api_key(&token))
     }
 
     /// Where Cloudflare's API is.
@@ -395,6 +401,26 @@ impl Provider for ProviderConfig {
 }
 
 impl ProviderConfig {
+    /// The claims its claim sets and `profile`'s match on, with their values
+    /// in `claims`: what's worth writing down about a caller, and copying into
+    /// the broker's own tokens. Never secret.
+    pub fn matched(
+        &self,
+        profile: Option<&ProfileConfig>,
+        claims: &Map<String, Value>,
+    ) -> Map<String, Value> {
+        let profile = profile.map(|p| p.claims.as_slice()).unwrap_or_default();
+        self.claims
+            .iter()
+            .chain(profile)
+            .flat_map(ClaimSet::names)
+            .filter_map(|name| {
+                let value = claims.get(name).filter(|v| copyable(v))?;
+                Some((name.to_string(), value.clone()))
+            })
+            .collect()
+    }
+
     fn check(&self, at: &str) -> Result<(), String> {
         check_name(&self.name).map_err(|why| format!("{at}.name {why}"))?;
         check_url(&self.issuer).map_err(|why| format!("{at}.issuer {why}"))?;
@@ -603,6 +629,42 @@ pub struct TokenConfig {
 }
 
 impl TokenConfig {
+    /// The policies, in the API's shape, with each permission's group from
+    /// `groups`, the account's.
+    ///
+    /// # Errors
+    ///
+    /// A permission no group is named, never silently dropped.
+    pub fn iam_policies(&self, groups: &[PermissionGroup]) -> Result<Vec<IamPolicy>, String> {
+        self.policies
+            .iter()
+            .map(|policy| {
+                let scope = policy.scope();
+                let permission_groups = policy
+                    .permissions
+                    .iter()
+                    .map(|name| {
+                        let id = group_id(groups, name, scope)?;
+                        Ok(IamPermissionGroup {
+                            id,
+                            meta: None,
+                            name: None,
+                        })
+                    })
+                    .collect::<Result<_, String>>()?;
+                Ok(IamPolicy {
+                    effect: match policy.effect {
+                        Effect::Allow => IamEffect::Allow,
+                        Effect::Deny => IamEffect::Deny,
+                    },
+                    id: None,
+                    permission_groups,
+                    resources: policy.iam_resources(),
+                })
+            })
+            .collect()
+    }
+
     fn check(&self, at: &str, account_id: &str) -> Result<(), String> {
         if self.policies.is_empty() {
             return Err(format!("{at}.policies must contain at least one policy"));
@@ -719,6 +781,37 @@ impl TokenPolicyConfig {
         });
         if nested { ZONE_SCOPE } else { ACCOUNT_SCOPE }
     }
+}
+
+/// The ID of the group named `name`, or, of several so named, the one at
+/// `scope`.
+fn group_id(groups: &[PermissionGroup], name: &str, scope: &str) -> Result<String, String> {
+    let named: Vec<&PermissionGroup> = groups
+        .iter()
+        .filter(|group| group.name.as_deref() == Some(name))
+        .collect();
+    let scoped = || {
+        named
+            .iter()
+            .copied()
+            .filter(|group| group.scopes.iter().flatten().any(|s| s == scope))
+    };
+    let group = match named.as_slice() {
+        [] => return Err(format!("no permission group is named {name}")),
+        [group] => *group,
+        _ => match scoped().collect::<Vec<_>>().as_slice() {
+            [group] => *group,
+            _ => {
+                return Err(format!(
+                    "several permission groups are named {name}, at no one scope of the resources"
+                ));
+            }
+        },
+    };
+    group
+        .id
+        .clone()
+        .ok_or_else(|| format!("permission group {name} has no ID"))
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
@@ -872,6 +965,17 @@ fn is_segment(segment: &str) -> bool {
         && segment
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Whether a claim's value is one to copy: a string, number or boolean, or a
+/// list of them, as claim sets match on.
+fn copyable(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.is_empty(),
+        Value::Number(_) | Value::Bool(_) => true,
+        Value::Array(values) => values.iter().all(|v| !v.is_array() && copyable(v)),
+        _ => false,
+    }
 }
 
 /// A Cloudflare ID: 32 lowercase hex digits.
@@ -1551,5 +1655,56 @@ pub(super) mod tests {
             json!({ "com.cloudflare.api.account.a": { "com.cloudflare.api.account.zone.*": "*" } });
         assert_eq!(json(flat.clone()), flat);
         assert_eq!(json(nested.clone()), nested);
+    }
+
+    #[test]
+    fn knows_a_caller_by_the_claims_the_policy_matches_on() {
+        let policy = parse(&policy());
+        let mut claims = claims();
+        claims.insert("email".into(), "someone@example.com".into());
+        let provider = &policy.providers[0];
+        assert_eq!(
+            Value::Object(provider.matched(Some(&policy.profiles[0]), &claims)),
+            json!({
+                "ref": "refs/heads/main",
+                "repository": "example-org/app",
+                "repository_owner_id": "100000001",
+            })
+        );
+        assert_eq!(
+            Value::Object(provider.matched(None, &claims)),
+            json!({ "repository_owner_id": "100000001" })
+        );
+    }
+
+    #[test]
+    fn picks_permission_groups_by_name_then_scope() {
+        let groups: Vec<PermissionGroup> = serde_json::from_value(json!([
+            { "id": "pg-dns-write", "name": "DNS Write", "scopes": [ZONE_SCOPE] },
+            { "id": "pg-lb-write-account", "name": "Load Balancers Write", "scopes": [ACCOUNT_SCOPE] },
+            { "id": "pg-lb-write-zone", "name": "Load Balancers Write", "scopes": [ZONE_SCOPE] },
+        ]))
+        .unwrap();
+        let pick = |name, scope| group_id(&groups, name, scope);
+        assert_eq!(
+            pick("DNS Write", ACCOUNT_SCOPE).as_deref(),
+            Ok("pg-dns-write")
+        );
+        assert_eq!(
+            pick("Load Balancers Write", ZONE_SCOPE).as_deref(),
+            Ok("pg-lb-write-zone")
+        );
+        assert_eq!(
+            pick("Load Balancers Write", ACCOUNT_SCOPE).as_deref(),
+            Ok("pg-lb-write-account")
+        );
+        assert_eq!(
+            pick("Load Balancers Write", R2_SCOPE),
+            Err("several permission groups are named Load Balancers Write, at no one scope of the resources".into())
+        );
+        assert_eq!(
+            pick("Nope", ACCOUNT_SCOPE),
+            Err("no permission group is named Nope".into())
+        );
     }
 }
