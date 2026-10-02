@@ -34,7 +34,7 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<HttpResponse
 /// The hourly cleanup of expired `cf-oidc:` tokens.
 #[event(scheduled)]
 async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    let deleted = match Config::load(&env) {
+    let deleted = match Config::load(&env).await {
         Ok(config) => exchange::cleanup(&config).await,
         Err(err) => Err(err),
     };

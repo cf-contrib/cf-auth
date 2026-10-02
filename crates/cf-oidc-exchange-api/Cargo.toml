@@ -39,9 +39,22 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 # WebCrypto bindings for RS256, so no RSA crate ends up in the wasm bundle.
 web-sys = { version = "0.3", features = ["Crypto", "CryptoKey", "SubtleCrypto", "WorkerGlobalScope"] }
 
+[dev-dependencies]
+# The integration tests' stand-ins for the OIDC issuers, GitHub and Cloudflare,
+# served over axum on tokio, and their calls to the Worker over reqwest.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "form"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+# Signs the stand-in issuers' tokens and verifies the broker's, with keys made
+# from fixed seeds. Only in the tests: the Worker signs with WebCrypto.
+rand_chacha = "0.3"
+rsa = { version = "0.9", features = ["sha2"] }
+
 [features]
 # Opt-in integration tests which require `wrangler dev` running locally.
 integration = []
-# Lets CF_OIDC_EXCHANGE_GITHUB_API_URL and CF_OIDC_EXCHANGE_CLOUDFLARE_API_URL
-# point the Worker at stand-ins, for the integration tests. Never in a release.
-upstream-overrides = []
+# For the integration tests, never a release: CF_OIDC_EXCHANGE_GITHUB_API_URL
+# and CF_OIDC_EXCHANGE_CLOUDFLARE_API_URL point the Worker at the tests'
+# stand-ins, and CF_OIDC_EXCHANGE_SCENARIO_URL at the policy, account and
+# bindings each test chooses.
+stand-ins = []

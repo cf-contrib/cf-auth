@@ -36,7 +36,7 @@ impl ExchangeServiceHandler {
         Fut: Future<Output = Result<T, HttpError>>,
     {
         let env = self.env.clone();
-        SendFuture::new(async move { flow(Config::load(&env)?).await }).await
+        SendFuture::new(async move { flow(Config::load(&env).await?).await }).await
     }
 }
 
