@@ -52,7 +52,7 @@ $EDITOR policy.yaml                            # providers, profiles; see Policy
 export CLOUDFLARE_API_TOKEN=...                # deploy token, not the broker token
 tofu init
 tofu apply
-curl -fsS "$(tofu output -raw broker_url)/health/ready"   # 503 if the policy or a secret is wrong
+curl -fsS "$(tofu output -raw broker_url)/.well-known/openid-configuration"   # 500 if the policy is wrong
 ```
 
 Terraform only references the secret by store ID and name. The token's value

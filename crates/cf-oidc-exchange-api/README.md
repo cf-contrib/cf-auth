@@ -56,7 +56,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
    ```sh
    worker-build --release && cp worker/entry.js build/   # then worker_dir = ".../crates/cf-oidc-exchange-api/build"
    ```
-4. **Check** that `<broker-url>/health/ready` returns `200` (`https://cf-oidc-exchange.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or the broker token can't be read; the reasons are in Workers Logs.
+4. **Check** that `<broker-url>/.well-known/openid-configuration` returns `200` (`https://cf-oidc-exchange.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or the broker token can't be read; the reasons are in Workers Logs.
 
 ## Bindings
 
@@ -384,7 +384,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 | `GET` | `/.well-known/openid-configuration` | public | The broker's issuer, key and endpoint URLs, for services that verify [its tokens](#tokens-for-other-services). |
 | `GET` | `/.well-known/jwks` | public | The public key the broker signs its own tokens with. Empty without `CF_OIDC_EXCHANGE_API_SIGNING_KEY`. |
 | `GET` | `/health/live` | public | `200` whenever the Worker serves HTTP. |
-| `GET` | `/health/ready` | public | `200` if the policy loads and the broker token (and the signing key, when a profile needs it) can be read, else `503` with no body. Why goes to Workers Logs (`not ready: …`). |
+| `GET` | `/health/ready` | public | `200` whenever the Worker serves HTTP. It reads neither the policy nor the secrets: a route that needs them fails closed with `500`, with why in Workers Logs. |
 
 ### Token exchange
 
@@ -525,7 +525,7 @@ Denials are `token.deny` with a `reason`:
 | `src/github.rs` | People's GitHub tokens, checked with GitHub's API. |
 | `src/issuer.rs` | The broker's own RS256 tokens, for profiles with another service's `audience`. |
 | `src/cloudflare.rs` | Account API tokens and R2 temporary credentials, through [cloudflare-rs](https://github.com/cf-contrib/cloudflare-rs). |
-| `src/exchange.rs` | The flows: exchange, revocation, discovery, JWKS, health, cleanup. |
+| `src/exchange.rs` | The flows: exchange, revocation, discovery, JWKS, cleanup. |
 | `src/service` | The generated API's implementation, and the layer around its router. |
 | `src/webcrypto.rs` | RS256 and SHA-256 through the runtime's WebCrypto: no RSA crate in the wasm. |
 | `worker/entry.js` | The entry module: hands the Worker `policy.json`, a module beside it. |

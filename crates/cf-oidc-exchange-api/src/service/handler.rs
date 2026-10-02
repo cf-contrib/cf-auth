@@ -5,8 +5,8 @@ use std::future::Future;
 use async_trait::async_trait;
 use cf_oidc_exchange_sdk::v1::{
     DiscoveryResponse, ErrorResponse, ErrorResponseError, ExchangeServiceApi,
-    ExchangeTokenResponse, HealthCheck, HealthCheckError, JwksResponse, RevokeTokenResponse,
-    TokenExchangeRequest, TokenRevocationRequest,
+    ExchangeTokenResponse, JwksResponse, RevokeTokenResponse, TokenExchangeRequest,
+    TokenRevocationRequest,
 };
 use worker::{Env, console_error, send::SendFuture};
 
@@ -130,33 +130,5 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
             Ok(jwks) => JwksResponse::Ok(jwks),
             Err(err) => JwksResponse::InternalServerError(internal(&err)),
         }
-    }
-}
-
-/// Readiness, for the SDK's `HealthHandler`: the policy loads, the broker token
-/// can be read, and so can the signing key if a profile issues the broker's own
-/// tokens. A missing secret shows up here rather than on the first exchange.
-pub struct Readiness {
-    env: Env,
-}
-
-impl Readiness {
-    pub fn new(env: Env) -> Self {
-        Self { env }
-    }
-}
-
-impl HealthCheck for Readiness {
-    fn check(&self) -> impl Future<Output = Result<(), HealthCheckError>> + Send {
-        let env = self.env.clone();
-        // Like the flows, it reads secrets and runs WebCrypto, whose futures aren't `Send`.
-        SendFuture::new(async move {
-            let ready = async { exchange::ready(&Config::load(&env).await?).await }.await;
-            // The SDK's handler answers with the status only, so why goes to the log.
-            ready.map_err(|err| {
-                console_error!("not ready: {err}");
-                err.into()
-            })
-        })
     }
 }

@@ -156,11 +156,11 @@ WRANGLER_PID=$!
 
 # The first run builds the Worker, which takes a while.
 for _ in $(seq 300); do
-  status=$(curl -s -o /dev/null -w '%{http_code}' "$BROKER/health/ready" || true)
+  status=$(curl -s -o /dev/null -w '%{http_code}' "$BROKER/.well-known/openid-configuration" || true)
   [[ $status == 200 ]] && break
-  if [[ $status == 503 ]]; then
+  if [[ $status == 500 ]]; then
     sed -n 's/.*\("reason":"[^"]*"\).*/\1/p; /policy.invalid/p' "$LOG" | tail -5 >&2
-    die "/health/ready returned 503: is the broker token in the local Secrets Store? (see --help)"
+    die "the discovery document returned 500: the test policy didn't load (see the policy.invalid line above)"
   fi
   kill -0 "$WRANGLER_PID" 2>/dev/null || { tail -20 "$LOG" >&2; die "wrangler dev exited"; }
   sleep 1
