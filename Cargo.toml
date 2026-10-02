@@ -1,0 +1,9 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+# The Worker ships as WebAssembly: build it for size, which also starts it faster.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

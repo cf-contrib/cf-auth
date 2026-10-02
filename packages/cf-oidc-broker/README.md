@@ -388,7 +388,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 
 ### Token exchange
 
-`POST /oauth/token` is an [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693) token exchange, form-encoded or JSON. The token goes in the body, and `subject_token_type` says whose it is. [`openapi.yaml`](openapi.yaml) is the contract.
+`POST /oauth/token` is an [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693) token exchange, form-encoded or JSON. The token goes in the body, and `subject_token_type` says whose it is. [`exchangev1.yaml`](../../crates/cf-oidc-exchange-sdk/openapi/oidc/exchange/v1/exchangev1.yaml) is the contract.
 
 ```sh
 curl -sS https://cf-oidc-broker.example.com/oauth/token \

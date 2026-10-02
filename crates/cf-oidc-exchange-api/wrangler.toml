@@ -1,0 +1,8 @@
+# Local development of the Rust Worker. Production deploys use the release's
+# index.js and index_bg.wasm (see packages/cf-oidc-broker/terraform until it moves).
+name = "cf-oidc-exchange"
+main = "build/index.js"
+compatibility_date = "2026-08-15"
+
+[build]
+command = "worker-build --dev"

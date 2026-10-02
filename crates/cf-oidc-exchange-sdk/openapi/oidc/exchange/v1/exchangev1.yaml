@@ -1,20 +1,27 @@
-# The broker's OAuth contract. Keep it in step with src/api.ts, which the
-# action type-checks against; the Worker's tests exercise every response it lists.
+# The broker's OAuth contract. crates/cf-oidc-exchange-sdk generates the Rust
+# types, server and client from it; keep packages/cf-oidc-broker/src/api.ts, which
+# the action type-checks against, in step until the TypeScript broker is retired.
 openapi: 3.1.0
 info:
   title: cf-oidc-broker
   version: "1"
   description: >-
+    Bodies are form-encoded, as RFC 8693 and RFC 7009 have it.
+
     Exchanges a GitHub identity for short-lived Cloudflare credentials, or for a token the
     broker signs for another service (RFC 8693 token exchange at `POST /oauth/token`), and
     revokes Cloudflare tokens (RFC 7009 at `POST /oauth/revoke`). Services verify the
     broker's tokens with the keys at `/.well-known/jwks`.
 servers:
   - url: https://cf-oidc-broker.example.com
+tags:
+  - name: ExchangeService
+    description: Token exchange and revocation, and the metadata to verify the broker's own tokens.
 paths:
   /oauth/token:
     post:
       operationId: exchangeToken
+      tags: [ExchangeService]
       summary: Exchange a GitHub OIDC or user token for a Cloudflare API token and/or R2 credentials.
       description: >-
         The subject token is in the body, not an `Authorization` header. Which profile
@@ -25,9 +32,6 @@ paths:
         required: true
         content:
           application/x-www-form-urlencoded:
-            schema:
-              $ref: "#/components/schemas/TokenExchangeRequest"
-          application/json:
             schema:
               $ref: "#/components/schemas/TokenExchangeRequest"
       responses:
@@ -57,6 +61,7 @@ paths:
   /oauth/revoke:
     post:
       operationId: revokeToken
+      tags: [ExchangeService]
       summary: Revoke a Cloudflare API token the broker minted.
       description: >-
         Holding the token is the proof. Answers `200` whether the token was revoked, already
@@ -66,9 +71,6 @@ paths:
         required: true
         content:
           application/x-www-form-urlencoded:
-            schema:
-              $ref: "#/components/schemas/TokenRevocationRequest"
-          application/json:
             schema:
               $ref: "#/components/schemas/TokenRevocationRequest"
       responses:
@@ -85,6 +87,7 @@ paths:
   /.well-known/openid-configuration:
     get:
       operationId: discovery
+      tags: [ExchangeService]
       summary: Where to find the broker's keys and endpoints.
       description: >-
         Tokens come from exchange only, so there's no authorization endpoint: the broker
@@ -101,6 +104,7 @@ paths:
   /.well-known/jwks:
     get:
       operationId: jwks
+      tags: [ExchangeService]
       summary: The public key the broker signs its own tokens with.
       responses:
         "200":
