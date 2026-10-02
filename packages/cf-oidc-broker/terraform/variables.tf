@@ -37,6 +37,15 @@ variable "broker_token_secret" {
   description = "Secrets Store secret holding the broker token: an account-owned token with \"Account API Tokens Write\", plus R2 permissions covering what profiles' buckets delegate (it creates those credentials and is their parent). Terraform only references it; the value never enters state."
 }
 
+variable "signing_key_secret" {
+  type = object({
+    secret_store_id = string
+    secret_name     = string
+  })
+  description = "Secrets Store secret holding the RSA private key (PKCS#8 PEM, at least 2048 bits, e.g. from `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072`) the broker signs its own tokens with. Needed only for profiles with an audience. Terraform only references it; the value never enters state."
+  default     = null
+}
+
 variable "policy_file" {
   type        = string
   description = "Path to the policy YAML, rendered as a template with $${account_id}, $${broker_url} and policy_vars. Use an absolute path such as \"$${path.root}/policy.yaml\"."

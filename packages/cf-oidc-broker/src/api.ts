@@ -7,10 +7,14 @@ export type SubjectTokenType =
   | "urn:ietf:params:oauth:token-type:jwt"
   | "urn:ietf:params:oauth:token-type:access_token";
 
-/** What comes back: a Cloudflare API token, or only R2 credentials for a profile without a `token`. */
+/**
+ * What comes back: a Cloudflare API token, only R2 credentials for a profile without a
+ * `token`, or, for another service's audience, a JWT the broker signed.
+ */
 export type IssuedTokenType =
   | "urn:ietf:params:oauth:token-type:access_token"
-  | "urn:cf-oidc-auth:params:oauth:token-type:r2-credentials";
+  | "urn:cf-oidc-auth:params:oauth:token-type:r2-credentials"
+  | "urn:ietf:params:oauth:token-type:jwt";
 
 /**
  * Body of `POST /oauth/token`, an RFC 8693 token exchange, form-encoded or JSON. `profile`,
@@ -20,7 +24,10 @@ export interface TokenExchangeRequest {
   grant_type: "urn:ietf:params:oauth:grant-type:token-exchange";
   subject_token: string;
   subject_token_type: SubjectTokenType;
-  /** Defaults to Cloudflare, the only audience so far: `https://api.cloudflare.com`. */
+  /**
+   * `https://api.cloudflare.com` (the default) for Cloudflare credentials, or the URL of a
+   * service the policy issues the broker's own tokens for.
+   */
   audience?: string | undefined;
   requested_token_type?: IssuedTokenType | undefined;
   profile?: string | undefined;
@@ -32,6 +39,8 @@ export interface TokenExchangeRequest {
 /**
  * `200` response of `POST /oauth/token`. A profile with only `buckets` has no single bearer
  * token, so it returns no `access_token` and `token_type: "N_A"`, with the credentials in `buckets`.
+ * For another service's audience, `access_token` is a JWT the broker signed, verifiable with
+ * the keys at `/.well-known/jwks`.
  */
 export interface TokenExchangeResponse {
   access_token?: string;
@@ -43,7 +52,8 @@ export interface TokenExchangeResponse {
   expires_at: number;
   /** The Cloudflare API token's ID, present with `access_token`. */
   token_id?: string;
-  account_id: string;
+  /** The Cloudflare account, for the Cloudflare audience. */
+  account_id?: string;
   profile: string;
   buckets?: BucketCredentials[];
 }

@@ -21,6 +21,7 @@ export type AuditEvent =
   | "token.revoke"
   | "token.cleanup"
   | "r2.issued"
+  | "token.issue"
   | "policy.loaded"
   | "policy.invalid";
 

@@ -1,14 +1,13 @@
 import type { IssuedTokenType, SubjectTokenType, TokenExchangeRequest } from "./api.js";
 import { HttpError } from "./errors.js";
 import { REPOSITORY } from "./github.js";
-import type { Subject } from "./policy.js";
+import { CLOUDFLARE_AUDIENCE, type Subject } from "./policy.js";
 
 export const TOKEN_EXCHANGE =
   "urn:ietf:params:oauth:grant-type:token-exchange" satisfies TokenExchangeRequest["grant_type"];
 export const ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token" satisfies IssuedTokenType;
 export const R2_CREDENTIALS = "urn:cf-oidc-auth:params:oauth:token-type:r2-credentials" satisfies IssuedTokenType;
-/** The audience for Cloudflare API tokens and R2 credentials, and the default. */
-export const CLOUDFLARE_AUDIENCE = "https://api.cloudflare.com";
+export const JWT = "urn:ietf:params:oauth:token-type:jwt" satisfies IssuedTokenType;
 
 /** Who presents each kind of subject token. */
 const SUBJECTS: Record<SubjectTokenType, Subject> = {
@@ -67,12 +66,20 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
 export interface Exchange {
   subject: Subject;
   token: string;
+  /** Cloudflare, or a service the policy issues the broker's own tokens for. Checked against the policy later. */
+  audience: string;
   fields: TokenFields;
 }
 
+/** What each audience can hand out: Cloudflare credentials, or a JWT for any other service. */
+const ISSUABLE = {
+  cloudflare: [ACCESS_TOKEN, R2_CREDENTIALS] as unknown[],
+  service: [JWT, ACCESS_TOKEN] as unknown[],
+};
+
 /**
  * Reads an RFC 8693 token exchange, form-encoded or JSON. Anything it doesn't support, such
- * as delegation with `actor_token` or another audience, is refused rather than ignored.
+ * as delegation with `actor_token`, is refused rather than ignored.
  */
 export async function readExchangeRequest(request: Request): Promise<Exchange> {
   const body = await readBody(request);
@@ -93,17 +100,15 @@ export async function readExchangeRequest(request: Request): Promise<Exchange> {
   if (subject === undefined) {
     throw new HttpError("bad_request", "unsupported_subject_token_type", shown(subject_token_type));
   }
-  if (audience !== undefined && audience !== CLOUDFLARE_AUDIENCE) {
+  if (audience !== undefined && (typeof audience !== "string" || audience === "" || audience.length > 200)) {
     throw new HttpError("bad_request", "invalid_target", shown(audience));
   }
-  if (
-    requested_token_type !== undefined &&
-    requested_token_type !== ACCESS_TOKEN &&
-    requested_token_type !== R2_CREDENTIALS
-  ) {
+  const target = audience ?? CLOUDFLARE_AUDIENCE;
+  const issuable = target === CLOUDFLARE_AUDIENCE ? ISSUABLE.cloudflare : ISSUABLE.service;
+  if (requested_token_type !== undefined && !issuable.includes(requested_token_type)) {
     throw new HttpError("bad_request", "unsupported_requested_token_type", shown(requested_token_type));
   }
-  return { subject, token: subject_token, fields: checkFields(subject, body) };
+  return { subject, token: subject_token, audience: target, fields: checkFields(subject, body) };
 }
 
 /**

@@ -1,14 +1,17 @@
 // End-to-end tests of the Worker's handlers inside workerd, with GitHub and the
 // Cloudflare API replaced by in-memory fakes.
 import { createExecutionContext, createScheduledController, waitOnExecutionContext } from "cloudflare:test";
+import { createLocalJWKSet, decodeProtectedHeader, exportPKCS8, generateKeyPair, type JWK, jwtVerify } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TokenExchangeResponse } from "../src/api.js";
 import { createBroker, type Env } from "../src/broker.js";
+import { clearSigningKey } from "../src/issuer.js";
 import { clearParent } from "../src/r2.js";
 import { clearCache } from "../src/resolve.js";
 import { tokenName } from "../src/tokens.js";
 import {
   ACCOUNT_ID,
+  AUDIENCE,
   BROKER_TOKEN,
   BROKER_TOKEN_ID,
   createIssuer,
@@ -1029,6 +1032,209 @@ describe("POST /oauth/token", () => {
     const res = await exchange(await forJob({ profile: "infra-cloudflare" }));
     expect(res.status).toBe(403);
     expect(deny()).toMatchObject({ subject: "actions", reason: "profile_mismatch" });
+  });
+});
+
+describe("tokens for other services", () => {
+  const CACHE = "https://cf-nix-cache.example.com";
+  const JWT_TYPE = "urn:ietf:params:oauth:token-type:jwt";
+  let signingPem: string;
+
+  beforeAll(async () => {
+    const { privateKey } = await generateKeyPair("RS256", { extractable: true });
+    signingPem = await exportPKCS8(privateKey);
+  });
+
+  beforeEach(() => {
+    clearSigningKey();
+    env.CF_OIDC_BROKER_SIGNING_KEY = { get: async () => signingPem };
+    const policy = testPolicy(ISSUER);
+    const services = [
+      { name: "nix-push", audience: CACHE, match: { ref: "refs/heads/main" }, ttl: "15m" },
+      {
+        name: "nix-push-people",
+        subject: "users",
+        audience: CACHE,
+        match: { repository_permission: "write" },
+        ttl: "30m",
+      },
+    ];
+    policy.profiles.push(...(services as unknown as TestProfile[]));
+    policyFile = JSON.stringify(policy);
+  });
+
+  /** The broker's published keys, as a service would fetch them. */
+  async function brokerKeys() {
+    const res = await call("GET", "/.well-known/jwks");
+    expect(res.status).toBe(200);
+    return createLocalJWKSet((await res.json()) as { keys: JWK[] });
+  }
+
+  const forCache = (subjectToken: string, type = ID_TOKEN, extra: Record<string, unknown> = {}) =>
+    call("POST", "/oauth/token", {
+      body: { grant_type: GRANT, subject_token: subjectToken, subject_token_type: type, audience: CACHE, ...extra },
+    });
+
+  it("issues a job a token the service can verify with the broker's keys", async () => {
+    const sub = "repo:example-org/api:environment:prod";
+    const res = await forCache(await issuer.sign(githubClaims({ sub })));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TokenExchangeResponse;
+    expect(body).toEqual({
+      access_token: expect.any(String),
+      issued_token_type: JWT_TYPE,
+      token_type: "Bearer",
+      expires_in: expect.any(Number),
+      expires_at: expect.any(Number),
+      profile: "nix-push",
+    });
+
+    const { payload, protectedHeader } = await jwtVerify(body.access_token as string, await brokerKeys(), {
+      issuer: AUDIENCE,
+      audience: CACHE,
+      algorithms: ["RS256"],
+    });
+    expect(protectedHeader).toMatchObject({ alg: "RS256", typ: "JWT" });
+    expect(payload).toMatchObject({
+      sub,
+      profile: "nix-push",
+      repository: "example-org/api",
+      repository_owner_id: OWNER_ID,
+      ref: "refs/heads/main",
+      run_id: "1234567890",
+    });
+    expect(payload.jti).toEqual(expect.any(String));
+    // Only the identity goes to Cloudflare's side: no API token, no R2 credentials.
+    expect(cf.requests).toEqual([]);
+    expect(auditLines().find((l) => l.event === "token.issue")).toMatchObject({
+      subject: "actions",
+      profile: "nix-push",
+      audience: CACHE,
+      jti: payload.jti,
+    });
+  });
+
+  it("never outlives the job's OIDC token", async () => {
+    const before = Math.floor(Date.now() / 1000);
+    const res = await forCache(await issuer.sign(githubClaims(), { expiresIn: "2m" }));
+    const body = (await res.json()) as TokenExchangeResponse;
+    // The profile's ttl is 15m; the GitHub token's 2m wins.
+    expect(body.expires_at - before).toBeLessThanOrEqual(2 * 60 + 1);
+    expect(body.expires_at - before).toBeGreaterThan(60);
+  });
+
+  it("issues a person a token named after their GitHub user", async () => {
+    const before = Math.floor(Date.now() / 1000);
+    const res = await forCache(USER_TOKEN, ACCESS_TOKEN, { repository: "example-org/infra" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TokenExchangeResponse;
+    const { payload } = await jwtVerify(body.access_token as string, await brokerKeys(), { audience: CACHE });
+    expect(payload).toMatchObject({
+      sub: `user:${USER_ID}`,
+      actor: "octocat",
+      repository: "example-org/infra",
+      repository_permission: "write",
+      profile: "nix-push-people",
+    });
+    // A GitHub user token doesn't expire, so the profile's 30m applies.
+    expect(body.expires_at - before).toBeGreaterThan(29 * 60);
+    expect(body.expires_at - before).toBeLessThanOrEqual(30 * 60 + 1);
+  });
+
+  it("publishes a discovery document and only the public key", async () => {
+    const res = await call("GET", "/.well-known/openid-configuration");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(await res.json()).toMatchObject({
+      issuer: AUDIENCE,
+      jwks_uri: `${AUDIENCE}/.well-known/jwks`,
+      token_endpoint: `${AUDIENCE}/oauth/token`,
+      revocation_endpoint: `${AUDIENCE}/oauth/revoke`,
+      grant_types_supported: [GRANT],
+      id_token_signing_alg_values_supported: ["RS256"],
+    });
+
+    const { keys } = (await (await call("GET", "/.well-known/jwks")).json()) as { keys: JWK[] };
+    // Only the public members: no d, p, q or the CRT values.
+    expect(keys).toEqual([
+      { kty: "RSA", n: expect.any(String), e: "AQAB", kid: expect.any(String), alg: "RS256", use: "sig" },
+    ]);
+    const res2 = await forCache(await issuer.sign());
+    const { access_token } = (await res2.json()) as TokenExchangeResponse;
+    expect(decodeProtectedHeader(access_token as string).kid).toBe(keys[0]?.kid);
+  });
+
+  it("400s on an audience no profile is for, without verifying anything", async () => {
+    const res = await call("POST", "/oauth/token", {
+      body: {
+        grant_type: GRANT,
+        subject_token: "not-checked",
+        subject_token_type: ID_TOKEN,
+        audience: "https://other.example.com",
+      },
+    });
+    expect(res.status).toBe(400);
+    expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({ reason: "invalid_target" });
+    expect(github.requests).toEqual([]);
+  });
+
+  it("403s on a Cloudflare profile named for the service", async () => {
+    const res = await forCache(await issuer.sign(), ID_TOKEN, { profile: "workers-deploy" });
+    expect(res.status).toBe(403);
+    expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({
+      reason: "profile_mismatch",
+      detail: `profile workers-deploy isn't for ${CACHE}`,
+    });
+  });
+
+  it("400s on a Cloudflare token type requested for the service", async () => {
+    const res = await forCache(await issuer.sign(), ID_TOKEN, {
+      requested_token_type: "urn:cf-oidc-auth:params:oauth:token-type:r2-credentials",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("fails closed without a signing key, and leaves Cloudflare profiles working", async () => {
+    delete env.CF_OIDC_BROKER_SIGNING_KEY;
+    const res = await forCache(await issuer.sign());
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "misconfigured" });
+    expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({ reason: "signing_key_unavailable" });
+
+    expect((await jobToken(await issuer.sign())).status).toBe(200);
+    expect((await call("GET", "/healthz")).status).toBe(500);
+    // Nothing to publish without a key.
+    expect(await (await call("GET", "/.well-known/jwks")).json()).toEqual({ keys: [] });
+  });
+
+  it("fails closed on a signing key that isn't an RSA PKCS#8 PEM", async () => {
+    env.CF_OIDC_BROKER_SIGNING_KEY = { get: async () => "not a key" };
+    expect((await forCache(await issuer.sign())).status).toBe(500);
+    expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({
+      reason: "signing_key_unavailable",
+      detail: "not an RSA private key in PKCS#8 PEM",
+    });
+  });
+
+  it("fails closed on an RSA key under 2048 bits", async () => {
+    // jose won't generate one this small, so WebCrypto does.
+    const weak = (await crypto.subtle.generateKey(
+      { name: "RSASSA-PKCS1-v1_5", modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true,
+      ["sign", "verify"],
+    )) as CryptoKeyPair;
+    const der = new Uint8Array((await crypto.subtle.exportKey("pkcs8", weak.privateKey)) as ArrayBuffer);
+    const pem = `-----BEGIN PRIVATE KEY-----\n${btoa(String.fromCharCode(...der))}\n-----END PRIVATE KEY-----`;
+    env.CF_OIDC_BROKER_SIGNING_KEY = { get: async () => pem };
+    expect((await forCache(await issuer.sign())).status).toBe(500);
+    expect(auditLines().find((l) => l.event === "token.deny")).toMatchObject({
+      reason: "signing_key_unavailable",
+      detail: "RSA key is 1024 bits, at least 2048 needed",
+    });
+  });
+
+  it("reports healthy when the signing key loads", async () => {
+    expect((await call("GET", "/healthz")).status).toBe(200);
   });
 });
 

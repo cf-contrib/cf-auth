@@ -63,7 +63,8 @@ try {
     );
   }
 
-  const t = /** @type {TokenExchangeResponse} */ (await response.json());
+  // The action asks for Cloudflare credentials, whose response always names the account.
+  const t = /** @type {TokenExchangeResponse & { account_id: string }} */ (await response.json());
   requireStrings(t, ["account_id"]);
   // A profile with only buckets has no token.
   if (t.access_token !== undefined || t.token_id !== undefined) {
