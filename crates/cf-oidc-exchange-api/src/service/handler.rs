@@ -35,7 +35,7 @@ use cf_oidc_exchange_sdk::v1::{
     Jwks, TokenExchangeRequest, TokenExchangeRequestSubjectTokenType as SubjectTokenType,
     TokenExchangeResponse, TokenExchangeResponseTokenType as TokenType, TokenRevocationRequest,
 };
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use cloudflare::v4::{
     ApiOpError, HttpClient, IamCreatePayload, IamEffect, IamPermissionGroup,
     IamPolicyWithPermissionGroupsAndResources, IamResources, IamResourcesTypeObjectNested,
@@ -46,7 +46,7 @@ use serde::ser::{Serialize, SerializeMap, Serializer};
 use serde_json::{Map, Value, json};
 use web_sys::{CryptoKey, SubtleCrypto, WorkerGlobalScope};
 use worker::{
-    console_error, console_log, console_warn,
+    Date, console_error, console_log, console_warn,
     js_sys::{self, Uint8Array},
     send::SendFuture,
     wasm_bindgen::{JsCast, JsValue},
@@ -85,41 +85,6 @@ const ACCOUNT_SCOPE: &str = "com.cloudflare.api.account";
 const ZONE_SCOPE: &str = "com.cloudflare.api.account.zone";
 const R2_SCOPE: &str = "com.cloudflare.edge.r2.bucket";
 
-fn now_ms() -> u64 {
-    worker::Date::now().as_millis()
-}
-
-/// A configuration the handler can't work with: a secret that can't be read, a
-/// key that isn't one.
-fn misconfigured(why: impl std::fmt::Display) -> Error {
-    Error::new(ErrorCode::Misconfigured, why.to_string())
-}
-
-/// What a caller is told of a fault of the broker's, instead of why. `None` for
-/// the caller's own mistakes, which say what they were.
-fn generic(code: &ErrorCode) -> Option<&'static str> {
-    match code {
-        ErrorCode::Misconfigured => Some("the broker is misconfigured; its logs say why"),
-        ErrorCode::InternalError => Some("the broker failed; its logs say why"),
-        ErrorCode::UpstreamError => {
-            Some("a service the broker relies on failed; its logs say which")
-        }
-        _ => None,
-    }
-}
-
-/// The error a caller gets: the error itself for a mistake of theirs, and for a
-/// fault of the broker's the code alone, with why logged.
-fn public(err: Error) -> Error {
-    match generic(&err.error) {
-        Some(message) => {
-            console_error!("{err}");
-            Error::new(err.error, message)
-        }
-        None => err,
-    }
-}
-
 /// The broker's API, over the Worker's configuration.
 #[derive(Clone)]
 pub struct ExchangeServiceHandler {
@@ -138,7 +103,7 @@ impl ExchangeServiceHandler {
             .config
             .cloudflare_token()
             .await
-            .map_err(misconfigured)?;
+            .map_err(|err| Error::new(ErrorCode::Misconfigured, err.to_string()))?;
         Ok(Cloudflare::new(
             self.config.cloudflare_api(),
             self.config.account_id(),
@@ -148,7 +113,12 @@ impl ExchangeServiceHandler {
 
     /// The signing key, read now, or `None` if none is bound.
     async fn signing_key(&self) -> Result<Option<SigningKey>, Error> {
-        match self.config.signing_key().await.map_err(misconfigured)? {
+        match self
+            .config
+            .signing_key()
+            .await
+            .map_err(|err| Error::new(ErrorCode::Misconfigured, err.to_string()))?
+        {
             Some(pem) => SigningKey::import(&pem).await.map(Some),
             None => Ok(None),
         }
@@ -156,7 +126,10 @@ impl ExchangeServiceHandler {
 
     /// Deletes expired `cf-oidc:` tokens, for the hourly cron. Returns how many.
     pub async fn cleanup(&self) -> Result<usize, Error> {
-        self.cloudflare().await?.cleanup(now_ms()).await
+        self.cloudflare()
+            .await?
+            .cleanup(Date::now().as_millis())
+            .await
     }
 
     /// The broker's own token, for a profile with another service's `audience`.
@@ -167,12 +140,15 @@ impl ExchangeServiceHandler {
         ttl: u64,
     ) -> Result<TokenExchangeResponse, Error> {
         let Some(key) = self.signing_key().await? else {
-            return Err(misconfigured(format!(
-                "a token for {} needs a signing key, and none is bound",
-                profile.audience
-            )));
+            return Err(Error::new(
+                ErrorCode::Misconfigured,
+                format!(
+                    "a token for {} needs a signing key, and none is bound",
+                    profile.audience
+                ),
+            ));
         };
-        let now = now_ms() / 1000;
+        let now = Date::now().as_millis() / 1000;
         let issued = key
             .issue(&self.config.policy().issuer, caller, profile, ttl, now)
             .await?;
@@ -180,7 +156,10 @@ impl ExchangeServiceHandler {
             .audit("token.issue", Some(profile))
             .with("audience", profile.audience.as_str())
             .with("jti", issued.jti.as_str())
-            .with("expires_on", rfc3339(issued.expires_at * 1000))
+            .with(
+                "expires_on",
+                json!(DateTime::from_timestamp(issued.expires_at as i64, 0)),
+            )
             .emit();
         Ok(TokenExchangeResponse {
             access_token: Some(issued.jwt),
@@ -223,21 +202,22 @@ impl ExchangeServiceHandler {
             .collect::<Result<Vec<_>, _>>()?;
 
         let cloudflare = self.cloudflare().await?;
-        let now = now_ms();
+        let now = Date::now().as_millis() / 1000;
+        // In whole seconds, which is what the tokens API takes.
+        let expires_on = DateTime::from_timestamp((now + ttl / 1000) as i64, 0).unwrap_or_default();
         let mut token: Option<MintedToken> = None;
         if let Some(config) = &profile.token {
             let minted = cloudflare
-                .mint(&config.policies, caller.token_name(), ttl, now)
+                .mint(&config.policies, caller.token_name(), expires_on)
                 .await?;
             caller
                 .audit("token.mint", Some(profile))
                 .with("token_id", minted.token_id.as_str())
-                .with("expires_on", minted.expires_on.as_str())
+                .with("expires_on", json!(minted.expires_on))
                 .emit();
             token = Some(minted);
         }
 
-        let expires_on = rfc3339(now + ttl);
         let mut issued = Vec::new();
         for (bucket, prefixes) in buckets.iter().zip(prefixes) {
             match cloudflare.issue_r2(bucket, &prefixes, ttl).await {
@@ -247,7 +227,7 @@ impl ExchangeServiceHandler {
                         .with("bucket", bucket.name.as_str())
                         .with("prefixes", prefixes.clone())
                         .with("permission", json!(bucket.permission))
-                        .with("expires_on", expires_on.as_str())
+                        .with("expires_on", json!(expires_on))
                         .emit();
                     issued.push(BucketCredentials {
                         access_key_id: credentials.access_key_id,
@@ -255,7 +235,7 @@ impl ExchangeServiceHandler {
                             "https://{}.r2.cloudflarestorage.com",
                             self.config.account_id()
                         ),
-                        expires_on: datetime(now + ttl),
+                        expires_on,
                         name: bucket.name.clone(),
                         prefixes,
                         secret_access_key: credentials.secret_access_key,
@@ -273,10 +253,10 @@ impl ExchangeServiceHandler {
             }
         }
 
-        let expires_at = match &token {
-            Some(token) => token.expires_at,
-            None => ((now + ttl) / 1000) as i64,
-        };
+        let expires_at = token
+            .as_ref()
+            .map_or(expires_on, |t| t.expires_on)
+            .timestamp();
         let (access_token, token_id, issued_token_type, token_type) = match token {
             Some(token) => (
                 Some(token.token),
@@ -296,24 +276,13 @@ impl ExchangeServiceHandler {
             account_id: Some(self.config.account_id().into()),
             buckets: (!issued.is_empty()).then_some(issued),
             expires_at,
-            expires_in: (expires_at - (now / 1000) as i64).max(0),
+            expires_in: (expires_at - now as i64).max(0),
             issued_token_type,
             profile: profile.name.clone(),
             token_id,
             token_type,
         })
     }
-}
-
-/// Milliseconds since the epoch, in whole seconds, which is what the tokens
-/// API takes.
-fn datetime(ms: u64) -> DateTime<Utc> {
-    DateTime::from_timestamp((ms / 1000) as i64, 0).unwrap_or_default()
-}
-
-/// [`datetime`], as RFC 3339.
-fn rfc3339(ms: u64) -> String {
-    datetime(ms).to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 #[async_trait::async_trait]
@@ -329,9 +298,9 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
             let exchanged = async {
                 let exchange = Exchange::read(&request, policy)?;
                 let caller = caller.insert(Caller::of(&request.subject_token, policy)?);
-                let profile = select_profile(policy, caller, exchange.profile, exchange.audience)?;
+                let profile = policy.profile_for(caller, exchange.profile, exchange.audience)?;
                 named = Some(profile);
-                let ttl = clamp_ttl(exchange.ttl, profile)?;
+                let ttl = profile.ttl_for(exchange.ttl)?;
                 if profile.audience == CLOUDFLARE_AUDIENCE {
                     self.cloudflare_credentials(caller, profile, ttl).await
                 } else {
@@ -351,18 +320,26 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                         .with("error", err.error.as_str())
                         .with("message", err.message.as_str())
                         .emit();
-                    let code = err.error.clone();
-                    let err = public(err);
-                    match code {
+                    // A caller's mistake says what it was. A fault of the
+                    // broker's doesn't: the audit line does.
+                    match err.error {
                         ErrorCode::BadRequest => v1::ExchangeTokenResponse::BadRequest(err),
                         ErrorCode::Unauthorized => v1::ExchangeTokenResponse::Unauthorized(err),
                         ErrorCode::Forbidden => v1::ExchangeTokenResponse::Forbidden(err),
-                        ErrorCode::UpstreamError => v1::ExchangeTokenResponse::BadGateway(err),
+                        ErrorCode::UpstreamError => {
+                            v1::ExchangeTokenResponse::BadGateway(Error::new(
+                                err.error,
+                                "a service the broker relies on failed; its logs say which",
+                            ))
+                        }
                         // Nothing in an exchange is a 404.
                         ErrorCode::NotFound
                         | ErrorCode::Misconfigured
                         | ErrorCode::InternalError => {
-                            v1::ExchangeTokenResponse::InternalServerError(err)
+                            v1::ExchangeTokenResponse::InternalServerError(Error::new(
+                                err.error,
+                                "the broker failed; its logs say why",
+                            ))
                         }
                     }
                 }
@@ -397,13 +374,21 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                         .with("error", err.error.as_str())
                         .with("message", err.message.as_str())
                         .emit();
-                    let code = err.error.clone();
-                    let err = public(err);
-                    match code {
+                    // As for an exchange: the broker's faults say why only in
+                    // the audit line.
+                    match err.error {
                         ErrorCode::BadRequest => v1::RevokeTokenResponse::BadRequest(err),
                         ErrorCode::Forbidden => v1::RevokeTokenResponse::Forbidden(err),
-                        ErrorCode::UpstreamError => v1::RevokeTokenResponse::BadGateway(err),
-                        _ => v1::RevokeTokenResponse::InternalServerError(err),
+                        ErrorCode::UpstreamError => {
+                            v1::RevokeTokenResponse::BadGateway(Error::new(
+                                err.error,
+                                "a service the broker relies on failed; its logs say which",
+                            ))
+                        }
+                        _ => v1::RevokeTokenResponse::InternalServerError(Error::new(
+                            err.error,
+                            "the broker failed; its logs say why",
+                        )),
                     }
                 }
             }
@@ -423,8 +408,11 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
             url("/oauth/token"),
             url("/oauth/revoke"),
         ) else {
-            let err = misconfigured(format!("issuer {issuer} makes no URLs"));
-            return v1::DiscoveryResponse::InternalServerError(public(err));
+            console_error!("issuer {issuer} makes no URLs");
+            return v1::DiscoveryResponse::InternalServerError(Error::new(
+                ErrorCode::Misconfigured,
+                "the broker is misconfigured; its logs say why",
+            ));
         };
         v1::DiscoveryResponse::Ok(Discovery {
             issuer: issuer.clone(),
@@ -447,13 +435,20 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                 let Some(key) = self.signing_key().await? else {
                     return Ok(Jwks { keys: vec![] });
                 };
-                let jwk = serde_json::from_value(key.public_jwk())
-                    .map_err(|err| misconfigured(format!("the public key: {err}")))?;
+                let jwk = serde_json::from_value(key.public_jwk()).map_err(|err| {
+                    Error::new(ErrorCode::Misconfigured, format!("the public key: {err}"))
+                })?;
                 Ok::<_, Error>(Jwks { keys: vec![jwk] })
             };
             match keys.await {
                 Ok(jwks) => v1::JwksResponse::Ok(jwks),
-                Err(err) => v1::JwksResponse::InternalServerError(public(err)),
+                Err(err) => {
+                    console_error!("{err}");
+                    v1::JwksResponse::InternalServerError(Error::new(
+                        err.error,
+                        "the broker failed; its logs say why",
+                    ))
+                }
             }
         })
         .await
@@ -575,73 +570,77 @@ impl<'p> Caller<'p> {
     }
 }
 
-/// Picks the profile to issue with, among those for the caller's provider and
-/// `audience` only, or refuses with a `403` that says why. The token must
-/// match one of the profile's claim sets; the layer held it to its provider's.
-fn select_profile<'a>(
-    policy: &'a PolicyConfig,
-    caller: &Caller,
-    requested: Option<&str>,
-    audience: &str,
-) -> Result<&'a ProfileConfig, Error> {
-    let forbidden = |message: String| Err(Error::new(ErrorCode::Forbidden, message));
-    let provider = &caller.provider.name;
-    let matches = |p: &ProfileConfig| {
-        p.enabled
-            && p.claims
-                .iter()
-                .any(|set| set.matches(&caller.identity.claims))
-    };
-    let mut profiles = policy
-        .profiles
-        .iter()
-        .filter(|p| p.provider == *provider && p.audience == audience);
+impl PolicyConfig {
+    /// The profile to issue with, among those for the caller's provider and
+    /// `audience` only, or a `403` that says why not. The token must match one
+    /// of the profile's claim sets; the layer held it to its provider's.
+    fn profile_for(
+        &self,
+        caller: &Caller,
+        requested: Option<&str>,
+        audience: &str,
+    ) -> Result<&ProfileConfig, Error> {
+        let forbidden = |message: String| Err(Error::new(ErrorCode::Forbidden, message));
+        let provider = &caller.provider.name;
+        let matches = |p: &ProfileConfig| {
+            p.enabled
+                && p.claims
+                    .iter()
+                    .any(|set| set.matches(&caller.identity.claims))
+        };
+        let mut profiles = self
+            .profiles
+            .iter()
+            .filter(|p| p.provider == *provider && p.audience == audience);
 
-    if let Some(requested) = requested {
-        if let Some(profile) = profiles.find(|p| p.name == requested)
-            && matches(profile)
-        {
-            return Ok(profile);
+        if let Some(requested) = requested {
+            if let Some(profile) = profiles.find(|p| p.name == requested)
+                && matches(profile)
+            {
+                return Ok(profile);
+            }
+            return forbidden(match self.profiles.iter().find(|p| p.name == requested) {
+                None => format!("unknown profile {requested}"),
+                Some(named) if named.provider != *provider => {
+                    format!("profile {requested} isn't for provider {provider}")
+                }
+                Some(named) if named.audience != audience => {
+                    format!("profile {requested} isn't for {audience}")
+                }
+                Some(named) if !named.enabled => format!("profile {requested} is disabled"),
+                Some(_) => format!("profile {requested} doesn't match the token"),
+            });
         }
-        return forbidden(match policy.profiles.iter().find(|p| p.name == requested) {
-            None => format!("unknown profile {requested}"),
-            Some(named) if named.provider != *provider => {
-                format!("profile {requested} isn't for provider {provider}")
-            }
-            Some(named) if named.audience != audience => {
-                format!("profile {requested} isn't for {audience}")
-            }
-            Some(named) if !named.enabled => format!("profile {requested} is disabled"),
-            Some(_) => format!("profile {requested} doesn't match the token"),
-        });
-    }
 
-    let candidates: Vec<&ProfileConfig> = profiles.filter(|p| matches(p)).collect();
-    match candidates.as_slice() {
-        [] => forbidden("no profile matches the token".into()),
-        [profile] => Ok(profile),
-        several => {
-            let names: Vec<&str> = several.iter().map(|p| p.name.as_str()).collect();
-            forbidden(format!(
-                "profiles {} all match the token: name one",
-                names.join(", ")
-            ))
+        let candidates: Vec<&ProfileConfig> = profiles.filter(|p| matches(p)).collect();
+        match candidates.as_slice() {
+            [] => forbidden("no profile matches the token".into()),
+            [profile] => Ok(profile),
+            several => {
+                let names: Vec<&str> = several.iter().map(|p| p.name.as_str()).collect();
+                forbidden(format!(
+                    "profiles {} all match the token: name one",
+                    names.join(", ")
+                ))
+            }
         }
     }
 }
 
-/// The requested TTL, against the profile's, in milliseconds. Requests above
-/// `max_ttl` are clamped, not refused.
-fn clamp_ttl(requested: Option<&str>, profile: &ProfileConfig) -> Result<u64, Error> {
-    let Some(requested) = requested else {
-        return Ok(profile.ttl);
-    };
-    match parse_duration(requested) {
-        Some(ttl) if ttl >= MIN_TTL => Ok(ttl.min(profile.max_ttl)),
-        _ => Err(Error::new(
-            ErrorCode::BadRequest,
-            format!("ttl {requested} isn't a duration of at least 1m"),
-        )),
+impl ProfileConfig {
+    /// The TTL to issue with, in milliseconds: the requested one, clamped to
+    /// `max_ttl` rather than refused, or the profile's.
+    fn ttl_for(&self, requested: Option<&str>) -> Result<u64, Error> {
+        let Some(requested) = requested else {
+            return Ok(self.ttl);
+        };
+        match parse_duration(requested) {
+            Some(ttl) if ttl >= MIN_TTL => Ok(ttl.min(self.max_ttl)),
+            _ => Err(Error::new(
+                ErrorCode::BadRequest,
+                format!("ttl {requested} isn't a duration of at least 1m"),
+            )),
+        }
     }
 }
 
@@ -750,9 +749,7 @@ struct Cloudflare {
 struct MintedToken {
     token: String,
     token_id: String,
-    expires_on: String,
-    /// `expires_on`, in seconds since the epoch.
-    expires_at: i64,
+    expires_on: DateTime<Utc>,
 }
 
 /// R2 temporary credentials for a bucket.
@@ -783,11 +780,9 @@ impl Cloudflare {
         &self,
         policies: &[TokenPolicy],
         name: String,
-        ttl: u64,
-        now_ms: u64,
+        expires_on: DateTime<Utc>,
     ) -> Result<MintedToken, Error> {
         let policies = self.resolve(policies).await?;
-        let expires_on = datetime(now_ms + ttl);
         let payload = IamCreatePayload {
             condition: None,
             expires_on: Some(expires_on),
@@ -805,12 +800,10 @@ impl Cloudflare {
         let (Some(token_id), Some(token)) = (created.id, created.value) else {
             return Err(missing("tokens.create"));
         };
-        let expires_on = created.expires_on.unwrap_or(expires_on);
         Ok(MintedToken {
             token,
             token_id,
-            expires_on: expires_on.to_rfc3339_opts(SecondsFormat::Secs, true),
-            expires_at: expires_on.timestamp(),
+            expires_on: created.expires_on.unwrap_or(expires_on),
         })
     }
 
@@ -925,11 +918,10 @@ impl Cloudflare {
             {
                 Ok(_) => {
                     deleted += 1;
-                    let expires_on = expires_on.to_rfc3339_opts(SecondsFormat::Secs, true);
                     Audit::new("token.cleanup")
                         .with("token_id", id)
                         .with("name", name)
-                        .with("expires_on", expires_on)
+                        .with("expires_on", json!(expires_on))
                         .emit();
                 }
                 Err(err) if status(&err) == Some(404) => {}
@@ -1017,7 +1009,7 @@ impl Cloudflare {
         policies
             .iter()
             .map(|policy| {
-                let scope = scope_for(policy);
+                let scope = policy.scope();
                 let permission_groups = policy
                     .permissions
                     .iter()
@@ -1036,65 +1028,67 @@ impl Cloudflare {
                     },
                     id: None,
                     permission_groups,
-                    resources: resources(policy),
+                    resources: policy.iam_resources(),
                 })
             })
             .collect()
     }
 }
 
-/// A policy's resources in the API's shape: all `"*"`-style values, or all
-/// nested maps, as the policy's checks made sure.
-fn resources(policy: &TokenPolicy) -> IamResources {
-    let flat: Option<_> = policy
-        .resources
-        .iter()
-        .map(|(key, value)| match value {
-            ResourceValue::Scope(scope) => Some((key.clone(), scope.clone())),
-            ResourceValue::Nested(_) => None,
-        })
-        .collect();
-    if let Some(additional_properties) = flat {
-        return IamResources::IamResourcesTypeObjectString(IamResourcesTypeObjectString {
+impl TokenPolicy {
+    /// The resources in the API's shape: all `"*"`-style values, or all nested
+    /// maps, as the policy's checks made sure.
+    fn iam_resources(&self) -> IamResources {
+        let flat: Option<_> = self
+            .resources
+            .iter()
+            .map(|(key, value)| match value {
+                ResourceValue::Scope(scope) => Some((key.clone(), scope.clone())),
+                ResourceValue::Nested(_) => None,
+            })
+            .collect();
+        if let Some(additional_properties) = flat {
+            return IamResources::IamResourcesTypeObjectString(IamResourcesTypeObjectString {
+                additional_properties,
+            });
+        }
+        let additional_properties = self
+            .resources
+            .iter()
+            .filter_map(|(key, value)| match value {
+                ResourceValue::Nested(nested) => Some((
+                    key.clone(),
+                    IamResourcesTypeObjectNestedAdditionalProperty {
+                        additional_properties: nested.clone(),
+                    },
+                )),
+                ResourceValue::Scope(_) => None,
+            })
+            .collect();
+        IamResources::IamResourcesTypeObjectNested(IamResourcesTypeObjectNested {
             additional_properties,
-        });
-    }
-    let additional_properties = policy
-        .resources
-        .iter()
-        .filter_map(|(key, value)| match value {
-            ResourceValue::Nested(nested) => Some((
-                key.clone(),
-                IamResourcesTypeObjectNestedAdditionalProperty {
-                    additional_properties: nested.clone(),
-                },
-            )),
-            ResourceValue::Scope(_) => None,
         })
-        .collect();
-    IamResources::IamResourcesTypeObjectNested(IamResourcesTypeObjectNested {
-        additional_properties,
-    })
-}
+    }
 
-/// The scope a permission group needs for these resources, used to pick
-/// between same-named groups.
-fn scope_for(policy: &TokenPolicy) -> &'static str {
-    let zone = format!("{ZONE_SCOPE}.");
-    let keys = || policy.resources.keys();
-    if keys().any(|k| k.starts_with(R2_SCOPE)) {
-        return R2_SCOPE;
+    /// The scope a permission group needs for the resources, used to pick
+    /// between same-named groups.
+    fn scope(&self) -> &'static str {
+        let zone = format!("{ZONE_SCOPE}.");
+        let keys = || self.resources.keys();
+        if keys().any(|k| k.starts_with(R2_SCOPE)) {
+            return R2_SCOPE;
+        }
+        if keys().any(|k| k.starts_with(&zone)) {
+            return ZONE_SCOPE;
+        }
+        // Nested form: `account.<id>: { "account.zone.*": "*" }` grants every zone
+        // in the account.
+        let nested = self.resources.values().any(|value| match value {
+            ResourceValue::Nested(nested) => nested.keys().any(|k| k.starts_with(&zone)),
+            ResourceValue::Scope(_) => false,
+        });
+        if nested { ZONE_SCOPE } else { ACCOUNT_SCOPE }
     }
-    if keys().any(|k| k.starts_with(&zone)) {
-        return ZONE_SCOPE;
-    }
-    // Nested form: `account.<id>: { "account.zone.*": "*" }` grants every zone
-    // in the account.
-    let nested = policy.resources.values().any(|value| match value {
-        ResourceValue::Nested(nested) => nested.keys().any(|k| k.starts_with(&zone)),
-        ResourceValue::Scope(_) => false,
-    });
-    if nested { ZONE_SCOPE } else { ACCOUNT_SCOPE }
 }
 
 fn pick_group<'g>(groups: &'g [Group], name: &str, scope: &str) -> Result<&'g Group, Error> {
@@ -1110,11 +1104,14 @@ fn pick_group<'g>(groups: &'g [Group], name: &str, scope: &str) -> Result<&'g Gr
     if let [group] = scoped.as_slice() {
         return Ok(group);
     }
-    Err(misconfigured(if named.is_empty() {
-        format!("no permission group is named {name}")
-    } else {
-        format!("several permission groups are named {name}, at no one scope of the resources")
-    }))
+    Err(Error::new(
+        ErrorCode::Misconfigured,
+        if named.is_empty() {
+            format!("no permission group is named {name}")
+        } else {
+            format!("several permission groups are named {name}, at no one scope of the resources")
+        },
+    ))
 }
 
 /// The RSA key the broker signs its own tokens with, imported into WebCrypto,
@@ -1175,7 +1172,8 @@ fn pkcs8_der(pem: &str) -> Option<Vec<u8>> {
 impl SigningKey {
     /// The RSA key in `pem`, a PKCS#8 PEM.
     async fn import(pem: &str) -> Result<Self, Error> {
-        let unusable = |why: &str| misconfigured(format!("the signing key: {why}"));
+        let unusable =
+            |why: &str| Error::new(ErrorCode::Misconfigured, format!("the signing key: {why}"));
         let not_rsa = || unusable("not an RSA private key in PKCS#8 PEM");
         let der = pkcs8_der(pem).ok_or_else(not_rsa)?;
 
@@ -1411,7 +1409,8 @@ mod tests {
     ) -> Result<String, String> {
         let policy = parse(policy);
         let caller = caller(&policy, claims);
-        select_profile(&policy, &caller, requested, audience)
+        policy
+            .profile_for(&caller, requested, audience)
             .map(|profile| profile.name.clone())
             .map_err(|err| err.message)
     }
@@ -1516,11 +1515,11 @@ mod tests {
     fn clamps_the_ttl_to_max_ttl_and_rejects_nonsense() {
         let policy = parse(&policy());
         let profile = &policy.profiles[0];
-        assert_eq!(clamp_ttl(None, profile).ok(), Some(15 * 60_000));
-        assert_eq!(clamp_ttl(Some("5m"), profile).ok(), Some(5 * 60_000));
-        assert_eq!(clamp_ttl(Some("12h"), profile).ok(), Some(60 * 60_000));
+        assert_eq!(profile.ttl_for(None).ok(), Some(15 * 60_000));
+        assert_eq!(profile.ttl_for(Some("5m")).ok(), Some(5 * 60_000));
+        assert_eq!(profile.ttl_for(Some("12h")).ok(), Some(60 * 60_000));
         for ttl in ["30s", "forever", "600"] {
-            assert!(clamp_ttl(Some(ttl), profile).is_err(), "{ttl}");
+            assert!(profile.ttl_for(Some(ttl)).is_err(), "{ttl}");
         }
     }
 
@@ -1625,30 +1624,6 @@ mod tests {
         assert_eq!(pkcs8_der("not a pem"), None);
     }
 
-    #[test]
-    fn tells_callers_their_mistakes_but_not_the_brokers_faults() {
-        for code in [
-            ErrorCode::BadRequest,
-            ErrorCode::Unauthorized,
-            ErrorCode::Forbidden,
-            ErrorCode::NotFound,
-        ] {
-            assert_eq!(generic(&code), None, "{code}");
-        }
-        for code in [
-            ErrorCode::Misconfigured,
-            ErrorCode::InternalError,
-            ErrorCode::UpstreamError,
-        ] {
-            assert!(generic(&code).is_some(), "{code}");
-        }
-    }
-
-    #[test]
-    fn writes_rfc3339_without_fractions() {
-        assert_eq!(rfc3339(1_800_000_000_123), "2027-01-15T08:00:00Z");
-    }
-
     fn token_policy(resources: Value) -> TokenPolicy {
         serde_json::from_value(json!({ "permissions": ["x"], "resources": resources })).unwrap()
     }
@@ -1657,21 +1632,15 @@ mod tests {
     fn picks_the_scope_from_the_resources() {
         let zone = "com.cloudflare.api.account.zone.fedcba9876543210fedcba9876543210";
         let account = "com.cloudflare.api.account.0123456789abcdef0123456789abcdef";
-        assert_eq!(scope_for(&token_policy(json!({ zone: "*" }))), ZONE_SCOPE);
+        let scope = |resources: Value| token_policy(resources).scope();
+        assert_eq!(scope(json!({ zone: "*" })), ZONE_SCOPE);
+        assert_eq!(scope(json!({ account: "*" })), ACCOUNT_SCOPE);
         assert_eq!(
-            scope_for(&token_policy(json!({ account: "*" }))),
-            ACCOUNT_SCOPE
-        );
-        assert_eq!(
-            scope_for(&token_policy(
-                json!({ account: { "com.cloudflare.api.account.zone.*": "*" } })
-            )),
+            scope(json!({ account: { "com.cloudflare.api.account.zone.*": "*" } })),
             ZONE_SCOPE
         );
         assert_eq!(
-            scope_for(&token_policy(
-                json!({ "com.cloudflare.edge.r2.bucket.x_default_y": "*" })
-            )),
+            scope(json!({ "com.cloudflare.edge.r2.bucket.x_default_y": "*" })),
             R2_SCOPE
         );
     }
@@ -1714,10 +1683,9 @@ mod tests {
 
     #[test]
     fn passes_resources_through_in_either_form() {
-        let json = |resources: Value| serde_json::to_value(resources_of(resources)).unwrap();
-        fn resources_of(value: Value) -> IamResources {
-            resources(&token_policy(value))
-        }
+        let json = |resources: Value| {
+            serde_json::to_value(token_policy(resources).iam_resources()).unwrap()
+        };
         let flat = json!({ "com.cloudflare.api.account.zone.z": "*" });
         let nested =
             json!({ "com.cloudflare.api.account.a": { "com.cloudflare.api.account.zone.*": "*" } });
