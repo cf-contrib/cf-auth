@@ -25,7 +25,7 @@ tower-service = "0.3"
 serde_urlencoded = "0.7"
 
 # The Cloudflare API: account tokens and R2 temporary credentials.
-cloudflare = { git = "https://github.com/cf-contrib/cloudflare-rs", rev = "68bef2d94dfc2e827c34a1a78037f1ae54532f5f", features = ["accounts", "r2", "client"] }
+cloudflare = { git = "https://github.com/cf-contrib/cloudflare-rs", rev = "ad55f44cd43f87d73c25672a1d7b15199a6c08f0", features = ["accounts", "r2", "client"] }
 
 # The policy, and the claims of the broker's own tokens.
 serde = { version = "1", features = ["derive"] }
