@@ -1,5 +1,5 @@
 # The broker's OAuth contract. crates/cf-oidc-exchange-sdk generates the Rust
-# types, server and client from it; keep packages/cf-oidc-action/src/api.ts, which
+# types, server and client from it; keep action/src/api.ts, which
 # the action type-checks against, in step.
 openapi: 3.1.0
 info:

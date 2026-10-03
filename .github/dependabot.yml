@@ -18,7 +18,7 @@ updates:
   - package-ecosystem: "npm"
     directories:
       - "/"
-      - "/packages/*"
+      - "/action"
     schedule:
       interval: "weekly"
     # Matches pnpm's minimumReleaseAge gate, so updates don't fail install.

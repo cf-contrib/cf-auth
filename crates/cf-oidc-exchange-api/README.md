@@ -398,7 +398,7 @@ curl -sS https://cf-oidc-exchange.example.com/oauth/revoke -d token="$CLOUDFLARE
 
 For the caller's own mistakes (400) the description says what was wrong, for example `no profile matches the token` or `profile workers-deploy isn't for provider gitlab`. That tells a caller with a valid token which profile names exist. For the broker's faults (500, 503) the description is generic, and the logs say why.
 
-**Contract:** [`exchangev1.yaml`](../cf-oidc-exchange-sdk/openapi/oidc/exchange/v1/exchangev1.yaml). The Worker's types, server and router are generated from it, and requests that don't fit it are refused (`400`) before any handler runs. The action's [`api.ts`](../../packages/cf-oidc-action/src/api.ts) mirrors it.
+**Contract:** [`exchangev1.yaml`](../cf-oidc-exchange-sdk/openapi/oidc/exchange/v1/exchangev1.yaml). The Worker's types, server and router are generated from it, and requests that don't fit it are refused (`400`) before any handler runs. The action's [`api.ts`](../../action/src/api.ts) mirrors it.
 
 ## Security
 

@@ -47,7 +47,7 @@ jobs:
 
   # Runs the action from a fresh checkout with nothing installed, against a stub
   # broker that also stands in for the runner's OIDC endpoint. Catches runtime
-  # imports from outside packages/cf-oidc-action and broken action.yml paths.
+  # imports from outside action/ and broken action.yml paths.
   smoke:
     runs-on: ubuntu-latest
     permissions:
@@ -58,7 +58,7 @@ jobs:
         uses: actions/checkout@v7
       - name: Start Stub Broker
         run: |
-          node packages/cf-oidc-action/test/stub.js > "$RUNNER_TEMP/stub.log" 2>&1 &
+          node action/test/stub.js > "$RUNNER_TEMP/stub.log" 2>&1 &
           for _ in $(seq 20); do grep -q listening "$RUNNER_TEMP/stub.log" && exit 0; sleep 0.5; done
           cat "$RUNNER_TEMP/stub.log"; exit 1
       - name: Leave Stale AWS Credentials
