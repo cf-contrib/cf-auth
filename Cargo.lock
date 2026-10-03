@@ -338,7 +338,7 @@ dependencies = [
 [[package]]
 name = "cloudflare"
 version = "0.1.0"
-source = "git+https://github.com/cf-contrib/cloudflare-rs?rev=68bef2d94dfc2e827c34a1a78037f1ae54532f5f#68bef2d94dfc2e827c34a1a78037f1ae54532f5f"
+source = "git+https://github.com/cf-contrib/cloudflare-rs?rev=ad55f44cd43f87d73c25672a1d7b15199a6c08f0#ad55f44cd43f87d73c25672a1d7b15199a6c08f0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
