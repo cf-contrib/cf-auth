@@ -54,9 +54,9 @@ pub const CLOUDFLARE_AUDIENCE: &str = "https://api.cloudflare.com";
 
 /// The scopes of Cloudflare's permission groups, which a token policy's
 /// resources fall under.
-const ACCOUNT_SCOPE: &str = "com.cloudflare.api.account";
-const ZONE_SCOPE: &str = "com.cloudflare.api.account.zone";
-const R2_SCOPE: &str = "com.cloudflare.edge.r2.bucket";
+const CLOUDFLARE_ACCOUNT_SCOPE: &str = "com.cloudflare.api.account";
+const CLOUDFLARE_ZONE_SCOPE: &str = "com.cloudflare.api.account.zone";
+const CLOUDFLARE_R2_SCOPE: &str = "com.cloudflare.edge.r2.bucket";
 
 const SECOND: u64 = 1000;
 const MINUTE: u64 = 60 * SECOND;
@@ -702,13 +702,13 @@ impl TokenPolicyConfig {
     /// The scope a permission group needs for the resources, used to pick
     /// between same-named groups.
     fn permission_scope(&self) -> &'static str {
-        let zone = format!("{ZONE_SCOPE}.");
+        let zone = format!("{CLOUDFLARE_ZONE_SCOPE}.");
         let keys = || self.resources.keys();
-        if keys().any(|k| k.starts_with(R2_SCOPE)) {
-            return R2_SCOPE;
+        if keys().any(|k| k.starts_with(CLOUDFLARE_R2_SCOPE)) {
+            return CLOUDFLARE_R2_SCOPE;
         }
         if keys().any(|k| k.starts_with(&zone)) {
-            return ZONE_SCOPE;
+            return CLOUDFLARE_ZONE_SCOPE;
         }
         // Nested form: `account.<id>: { "account.zone.*": "*" }` grants every zone
         // in the account.
@@ -716,7 +716,11 @@ impl TokenPolicyConfig {
             ResourceValue::Nested(nested) => nested.keys().any(|k| k.starts_with(&zone)),
             ResourceValue::Flat(_) => false,
         });
-        if nested { ZONE_SCOPE } else { ACCOUNT_SCOPE }
+        if nested {
+            CLOUDFLARE_ZONE_SCOPE
+        } else {
+            CLOUDFLARE_ACCOUNT_SCOPE
+        }
     }
 
     fn check(&self, at: &str, account_id: &str) -> Result<(), String> {
@@ -1620,15 +1624,15 @@ pub(super) mod tests {
         let zone = "com.cloudflare.api.account.zone.fedcba9876543210fedcba9876543210";
         let account = "com.cloudflare.api.account.0123456789abcdef0123456789abcdef";
         let scope = |resources: Value| token_policy(resources).permission_scope();
-        assert_eq!(scope(json!({ zone: "*" })), ZONE_SCOPE);
-        assert_eq!(scope(json!({ account: "*" })), ACCOUNT_SCOPE);
+        assert_eq!(scope(json!({ zone: "*" })), CLOUDFLARE_ZONE_SCOPE);
+        assert_eq!(scope(json!({ account: "*" })), CLOUDFLARE_ACCOUNT_SCOPE);
         assert_eq!(
             scope(json!({ account: { "com.cloudflare.api.account.zone.*": "*" } })),
-            ZONE_SCOPE
+            CLOUDFLARE_ZONE_SCOPE
         );
         assert_eq!(
             scope(json!({ "com.cloudflare.edge.r2.bucket.x_default_y": "*" })),
-            R2_SCOPE
+            CLOUDFLARE_R2_SCOPE
         );
     }
 
@@ -1667,30 +1671,30 @@ pub(super) mod tests {
     #[test]
     fn picks_permission_groups_by_name_then_scope() {
         let groups: Vec<PermissionGroup> = serde_json::from_value(json!([
-            { "id": "pg-dns-write", "name": "DNS Write", "scopes": [ZONE_SCOPE] },
-            { "id": "pg-lb-write-account", "name": "Load Balancers Write", "scopes": [ACCOUNT_SCOPE] },
-            { "id": "pg-lb-write-zone", "name": "Load Balancers Write", "scopes": [ZONE_SCOPE] },
+            { "id": "pg-dns-write", "name": "DNS Write", "scopes": [CLOUDFLARE_ZONE_SCOPE] },
+            { "id": "pg-lb-write-account", "name": "Load Balancers Write", "scopes": [CLOUDFLARE_ACCOUNT_SCOPE] },
+            { "id": "pg-lb-write-zone", "name": "Load Balancers Write", "scopes": [CLOUDFLARE_ZONE_SCOPE] },
         ]))
         .unwrap();
         let pick = |name, scope| TokenPolicyConfig::group_id(&groups, name, scope);
         assert_eq!(
-            pick("DNS Write", ACCOUNT_SCOPE).as_deref(),
+            pick("DNS Write", CLOUDFLARE_ACCOUNT_SCOPE).as_deref(),
             Ok("pg-dns-write")
         );
         assert_eq!(
-            pick("Load Balancers Write", ZONE_SCOPE).as_deref(),
+            pick("Load Balancers Write", CLOUDFLARE_ZONE_SCOPE).as_deref(),
             Ok("pg-lb-write-zone")
         );
         assert_eq!(
-            pick("Load Balancers Write", ACCOUNT_SCOPE).as_deref(),
+            pick("Load Balancers Write", CLOUDFLARE_ACCOUNT_SCOPE).as_deref(),
             Ok("pg-lb-write-account")
         );
         assert_eq!(
-            pick("Load Balancers Write", R2_SCOPE),
+            pick("Load Balancers Write", CLOUDFLARE_R2_SCOPE),
             Err("several permission groups are named Load Balancers Write, at no one scope of the resources".into())
         );
         assert_eq!(
-            pick("Nope", ACCOUNT_SCOPE),
+            pick("Nope", CLOUDFLARE_ACCOUNT_SCOPE),
             Err("no permission group is named Nope".into())
         );
     }
