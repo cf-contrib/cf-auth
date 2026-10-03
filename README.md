@@ -46,21 +46,22 @@ Other services can trust the broker too. A profile with an `audience` gets the c
 ```mermaid
 sequenceDiagram
     participant Job as GitHub Actions job
-    participant OIDC as GitHub OIDC
-    participant Broker as cf-oidc-exchange broker (Worker)
+    participant OIDC as GitHub's OIDC issuer
+    participant Broker as cf-oidc-exchange (Worker)
     participant CF as Cloudflare API
 
-    Job->>OIDC: 1. request JWT (aud = broker URL)
+    Job->>OIDC: 1. request an OIDC token (aud = the action's url)
     OIDC-->>Job: JWT
-    Job->>Broker: POST /oauth/token (token exchange, JWT as subject_token)
-    Broker->>Broker: 2. verify JWT, pick the matching profile
-    Broker->>CF: 3. tokens.create (profile's permissions, expires_on)
+    Job->>Broker: 2. POST /oauth/token (RFC 8693, the JWT as subject_token)
+    Broker->>OIDC: metadata and keys (cached)
+    Broker->>Broker: 3. verify the JWT, match the policy's claim sets, pick the profile
+    Broker->>CF: 4. look up permission groups, create the token (expires_on)
     CF-->>Broker: token
-    Broker-->>Job: token
-    Note over Job: 4. mask and export CLOUDFLARE_API_TOKEN<br/>later steps use it
-    Job->>Broker: 5. POST /oauth/revoke (post step)
-    Broker->>CF: tokens.verify, tokens.get, tokens.delete
-    Note over Broker,CF: hourly cron deletes expired cf-oidc:* tokens
+    Broker-->>Job: access_token, token_id, account_id
+    Note over Job: 5. mask and export CLOUDFLARE_API_TOKEN<br/>and CLOUDFLARE_ACCOUNT_ID for later steps
+    Job->>Broker: 6. POST /oauth/revoke (RFC 7009, the post step)
+    Broker->>CF: verify it, check it's a cf-oidc token, delete it
+    Note over Broker,CF: an hourly cron deletes expired cf-oidc:* tokens
 ```
 
 The only long-lived credential is the broker's **Cloudflare token**: an account-owned token with **Account API Tokens Write**, plus R2 permissions if profiles hand out [prefix-limited R2 credentials](crates/cf-oidc-exchange-api#buckets) (e.g. one shared Terraform-state bucket, each repo limited to its own prefix). It lives in Cloudflare Secrets Store, bound to the Worker, so it never passes through Terraform or CI and never leaves the Worker.
