@@ -8,7 +8,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use worker::{AbortSignal, Fetch, Method, Request};
 
 use super::metadata;
-use crate::{ALGORITHM, Error, error::invalid, webcrypto};
+use crate::{ALGORITHM, Error, crypto, error::invalid};
 
 /// How long a fetched JWK Set is trusted before it's fetched again.
 const JWKS_TTL_MS: u64 = 10 * 60 * 1000;
@@ -155,7 +155,7 @@ impl RsaKey {
         signing_input: &[u8],
         signature: &[u8],
     ) -> Result<bool, Error> {
-        webcrypto::verify_rs256(&self.n, &self.e, signing_input, signature)
+        crypto::verify_rs256(&self.n, &self.e, signing_input, signature)
             .await
             .map_err(|err| Error::TemporarilyUnavailable(err.to_string()))
     }
