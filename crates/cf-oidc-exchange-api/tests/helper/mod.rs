@@ -195,13 +195,16 @@ pub fn assert_refused(line: &Value, error: &str, message: &str) {
     );
 }
 
-/// That a response is the error every error is: `error`, with a message.
+/// That a response is the OAuth error every error is (RFC 6749 §5.2):
+/// `error`, with an `error_description`.
 #[track_caller]
 pub fn assert_error(reply: &Reply, error: &str) {
     let body = reply.json();
     assert_eq!(body["error"], error, "{body}");
     assert!(
-        body["message"].as_str().is_some_and(|m| !m.is_empty()),
+        body["error_description"]
+            .as_str()
+            .is_some_and(|m| !m.is_empty()),
         "{body}"
     );
 }

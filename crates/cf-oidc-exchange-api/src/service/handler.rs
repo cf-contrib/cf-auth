@@ -1,7 +1,7 @@
 //! The broker's API: every operation of the SDK's `ExchangeServiceApi`, in
 //! [`ExchangeServiceHandler`], over the policy and secrets in the Worker's
-//! [`Config`]: the token exchange, revocation, and the discovery document and
-//! keys services verify the broker's own tokens with.
+//! [`Config`]: the token exchange, revocation, and the metadata and keys
+//! services verify the broker's own tokens with.
 //!
 //! # Send
 //!
@@ -13,10 +13,11 @@
 //! # Errors
 //!
 //! Each method returns its operation's response enum, one variant per status
-//! the spec declares, so a status the spec doesn't list can't be returned. A
-//! caller's mistake (400 to 404) says what it was. A fault of the broker's (500,
-//! 502) doesn't say why: that goes to the log. A refused exchange or revocation
-//! is audited with the whole message either way.
+//! the spec declares, so a status the spec doesn't list can't be returned.
+//! Errors are OAuth errors (RFC 6749 §5.2). A caller's mistake (400) says what
+//! it was. A fault of the broker's (500, 503) doesn't say why: that goes to the
+//! log. A refused exchange or revocation is audited with the whole description
+//! either way.
 //!
 //! # Exchanges
 //!
@@ -26,25 +27,26 @@
 
 use std::sync::Arc;
 
-use cf_oidc_core::{ALGORITHM, Jwt, SigningKey};
+use cf_oidc_core::{AccessTokenClaims, Jwt, SigningKey};
 use cf_oidc_exchange_sdk::v1::{
-    self, BucketCredentials, Discovery, Error, ErrorCode, ExchangeServiceApi, IssuedTokenType,
-    Jwks, TokenExchangeRequest, TokenExchangeRequestSubjectTokenType as SubjectTokenType,
-    TokenExchangeResponse, TokenExchangeResponseTokenType as TokenType, TokenRevocationRequest,
+    self, AuthorizationServerMetadata, BucketCredentials, Error, ErrorCode, ExchangeServiceApi,
+    IssuedTokenType, Jwks, TokenExchangeRequest,
+    TokenExchangeRequestSubjectTokenType as SubjectTokenType, TokenExchangeResponse,
+    TokenExchangeResponseTokenType as TokenType, TokenRevocationRequest,
 };
 use chrono::DateTime;
 use cloudflare::v4::{
     ApiOpError, HttpClient, IamCreatePayload, IamTokenStatus, R2TempAccessCredsRequest,
     R2TempAccessCredsRequestPermission,
 };
-use serde_json::{Map, Value, json};
+use serde_json::json;
 use tracing::{error, info, warn};
 use worker::{Date, send::SendFuture};
 
 use super::config::{BucketPermission, CLOUDFLARE_AUDIENCE, Config, ProfileConfig, ProviderConfig};
 
 /// The token exchange grant, RFC 8693's.
-const TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+pub(super) const TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 
 /// Every minted token's name starts with this. Revocation and the cleanup
 /// never touch anything else.
@@ -71,12 +73,12 @@ impl ExchangeServiceHandler {
     /// Cloudflare's API, as the Cloudflare token, read now.
     async fn cloudflare(&self) -> Result<HttpClient, Error> {
         let client = self.config.cloudflare().await;
-        client.map_err(|err| Error::new(ErrorCode::Misconfigured, err.to_string()))
+        client.map_err(|err| Error::new(ErrorCode::ServerError, err.to_string()))
     }
 
     /// The signing key, read now, or `None` if none is bound.
     async fn signing_key(&self) -> Result<Option<SigningKey>, Error> {
-        let misconfigured = |why: String| Error::new(ErrorCode::Misconfigured, why);
+        let misconfigured = |why: String| Error::new(ErrorCode::ServerError, why);
         match self.config.signing_key().await {
             Ok(Some(pem)) => SigningKey::import(&pem)
                 .await
@@ -156,10 +158,11 @@ impl ExchangeServiceHandler {
         provider: &ProviderConfig,
         profile: &ProfileConfig,
         ttl: u64,
+        issued_token_type: IssuedTokenType,
     ) -> Result<TokenExchangeResponse, Error> {
         let Some(key) = self.signing_key().await? else {
             return Err(Error::new(
-                ErrorCode::Misconfigured,
+                ErrorCode::ServerError,
                 format!(
                     "a token for {} needs a signing key, and none is bound",
                     profile.audience
@@ -169,9 +172,10 @@ impl ExchangeServiceHandler {
         let now = Date::now().as_millis() / 1000;
         let issuer = &self.config.policy().issuer;
         let (claims, expires_at) = payload(issuer, identity, provider, profile, ttl, now)?;
-        let signed = key.sign(claims.into()).await.map_err(|err| {
-            Error::new(ErrorCode::InternalError, format!("signing a token: {err}"))
-        })?;
+        let signed = key
+            .sign_access_token(claims)
+            .await
+            .map_err(|err| Error::new(ErrorCode::ServerError, format!("signing a token: {err}")))?;
         info!(
             event = "token.issue",
             provider = %provider.name,
@@ -188,7 +192,7 @@ impl ExchangeServiceHandler {
             buckets: None,
             expires_at: expires_at as i64,
             expires_in: expires_at.saturating_sub(now) as i64,
-            issued_token_type: IssuedTokenType::UrnIetfParamsOauthTokenTypeJwt,
+            issued_token_type,
             profile: profile.name.clone(),
             token_id: None,
             token_type: TokenType::Bearer,
@@ -220,7 +224,7 @@ impl ExchangeServiceHandler {
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|why| {
                         Error::new(
-                            ErrorCode::Forbidden,
+                            ErrorCode::InvalidRequest,
                             format!("bucket {}: {why}", bucket.name),
                         )
                     })
@@ -245,7 +249,7 @@ impl ExchangeServiceHandler {
                 .unwrap_or_default();
             let policies = config
                 .iam_policies(&groups)
-                .map_err(|why| Error::new(ErrorCode::Misconfigured, why))?;
+                .map_err(|why| Error::new(ErrorCode::ServerError, why))?;
             let payload = IamCreatePayload {
                 condition: None,
                 expires_on: Some(expires_on),
@@ -408,10 +412,13 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                 // and whether what's asked for can be issued for it.
                 // Cloudflare's gets Cloudflare credentials; any other, a
                 // JWT.
-                let bad_request = |message: String| Err(Error::new(ErrorCode::BadRequest, message));
+                let invalid = |code, description: String| Err(Error::new(code, description));
                 let audience = request.audience.as_deref().unwrap_or(CLOUDFLARE_AUDIENCE);
                 if audience.is_empty() {
-                    return bad_request("audience must not be empty".into());
+                    return invalid(
+                        ErrorCode::InvalidRequest,
+                        "audience must not be empty".into(),
+                    );
                 }
                 let shown: String = audience.chars().take(200).collect();
                 let issuable = match (
@@ -430,25 +437,35 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                             | IssuedTokenType::UrnIetfParamsOauthTokenTypeAccessToken
                     ),
                 };
+                // What the broker won't issue for the audience is RFC 8693's
+                // invalid_target.
                 if let (false, Some(requested)) = (issuable, &request.requested_token_type) {
-                    return bad_request(format!("{requested} can't be issued for {shown}"));
+                    return invalid(
+                        ErrorCode::InvalidTarget,
+                        format!("{requested} can't be issued for {shown}"),
+                    );
                 }
                 if audience != CLOUDFLARE_AUDIENCE
                     && !policy.profiles.iter().any(|p| p.audience == audience)
                 {
-                    return bad_request(format!("no profile is for audience {shown}"));
+                    return invalid(
+                        ErrorCode::InvalidTarget,
+                        format!("no profile is for audience {shown}"),
+                    );
                 }
                 // `id_token` and `jwt` alike: an OIDC token is a JWT.
                 let (SubjectTokenType::UrnIetfParamsOauthTokenTypeIdToken
                 | SubjectTokenType::UrnIetfParamsOauthTokenTypeJwt) = request.subject_token_type;
 
-                // Who the layer verified the caller is.
-                let unauthorized = |why: &str| Error::new(ErrorCode::Unauthorized, why);
+                // Who the layer verified the caller is. A subject token that
+                // isn't valid, or that the policy doesn't take, is
+                // invalid_request (RFC 8693 §2.2.2).
+                let invalid_request = |why: &str| Error::new(ErrorCode::InvalidRequest, why);
                 let identity = cf_oidc_core::verified(&request.subject_token)
-                    .ok_or_else(|| unauthorized("the subject token wasn't verified"))?;
+                    .ok_or_else(|| invalid_request("the subject token wasn't verified"))?;
                 let provider = policy
                     .provider_for(&identity.claims)
-                    .map_err(|why| unauthorized(&why))?;
+                    .map_err(|why| invalid_request(&why))?;
                 let (identity, provider) = &*caller.insert((identity, provider));
 
                 let profile = policy
@@ -458,16 +475,24 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                         request.profile.as_deref(),
                         audience,
                     )
-                    .map_err(|why| Error::new(ErrorCode::Forbidden, why))?;
+                    .map_err(|why| invalid_request(&why))?;
                 named = Some(profile);
                 let ttl = profile
                     .ttl_for(request.ttl.as_deref())
-                    .map_err(|why| Error::new(ErrorCode::BadRequest, why))?;
+                    .map_err(|why| invalid_request(&why))?;
                 if profile.audience == CLOUDFLARE_AUDIENCE {
                     self.cloudflare_credentials(identity, provider, profile, ttl)
                         .await
                 } else {
-                    self.service_token(identity, provider, profile, ttl).await
+                    // An access token is a JWT: named as asked for.
+                    let issued_token_type = match request.requested_token_type {
+                        Some(IssuedTokenType::UrnIetfParamsOauthTokenTypeJwt) => {
+                            IssuedTokenType::UrnIetfParamsOauthTokenTypeJwt
+                        }
+                        _ => IssuedTokenType::UrnIetfParamsOauthTokenTypeAccessToken,
+                    };
+                    self.service_token(identity, provider, profile, ttl, issued_token_type)
+                        .await
                 }
             };
 
@@ -486,24 +511,23 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                             display(serde_json::Value::Object(provider.matched(named, &identity.claims)))
                         }),
                         error = err.error.as_str(),
-                        message = %err.message,
+                        message = %err.error_description,
                     );
                     // A caller's mistake says what it was. A fault of the
                     // broker's doesn't: the log line does.
                     match err.error {
-                        ErrorCode::BadRequest => v1::ExchangeTokenResponse::BadRequest(err),
-                        ErrorCode::Unauthorized => v1::ExchangeTokenResponse::Unauthorized(err),
-                        ErrorCode::Forbidden => v1::ExchangeTokenResponse::Forbidden(err),
-                        ErrorCode::UpstreamError => {
-                            v1::ExchangeTokenResponse::BadGateway(Error::new(
+                        ErrorCode::InvalidRequest
+                        | ErrorCode::InvalidTarget
+                        | ErrorCode::UnsupportedGrantType => {
+                            v1::ExchangeTokenResponse::BadRequest(err)
+                        }
+                        ErrorCode::TemporarilyUnavailable => {
+                            v1::ExchangeTokenResponse::ServiceUnavailable(Error::new(
                                 err.error,
                                 "a service the broker relies on failed; its logs say which",
                             ))
                         }
-                        // Nothing in an exchange is a 404.
-                        ErrorCode::NotFound
-                        | ErrorCode::Misconfigured
-                        | ErrorCode::InternalError => {
+                        ErrorCode::ServerError => {
                             v1::ExchangeTokenResponse::InternalServerError(Error::new(
                                 err.error,
                                 "the broker failed; its logs say why",
@@ -518,7 +542,9 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
 
     /// `POST /oauth/revoke`: an RFC 7009 revocation of a token the broker
     /// minted. Holding the token is the proof. Answers `Ok` whether the token
-    /// was revoked or already gone.
+    /// was revoked, already gone, or not the broker's: to the broker, a token
+    /// it didn't mint is an invalid one, which RFC 7009 §2.2 answers with
+    /// `200` too. It's never deleted.
     async fn revoke_token(&self, request: TokenRevocationRequest) -> v1::RevokeTokenResponse {
         SendFuture::new(async move {
             // Holding the token is the proof: Cloudflare says which it is,
@@ -533,10 +559,10 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                 let id = match presenter.account_api_tokens_verify_token(account_id).await {
                     Ok(verified) => match verified.result {
                         Some(result) => result.id,
-                        None => return Ok(None),
+                        None => return Ok(Revoked::Gone),
                     },
                     Err(err) if matches!(status(&err), Some(400 | 401 | 403 | 404)) => {
-                        return Ok(None);
+                        return Ok(Revoked::Gone);
                     }
                     Err(err) => return Err(upstream("tokens.verify", err)),
                 };
@@ -547,55 +573,62 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                     .await
                 {
                     Ok(details) => details.result.and_then(|token| token.name),
-                    Err(err) if err.api().is_some_and(|api| api.status == 404) => return Ok(None),
+                    Err(err) if err.api().is_some_and(|api| api.status == 404) => {
+                        return Ok(Revoked::Gone);
+                    }
                     Err(err) => return Err(upstream("tokens.get", err)),
                 };
                 if !name.is_some_and(|name| name.starts_with(TOKEN_PREFIX)) {
-                    return Err(Error::new(
-                        ErrorCode::Forbidden,
-                        format!("token {id} wasn't minted by the broker, so it isn't revoked here"),
-                    ));
+                    return Ok(Revoked::NotMinted(id));
                 }
 
                 match cloudflare
                     .account_api_tokens_delete_token(account_id, &id)
                     .await
                 {
-                    Ok(_) => Ok(Some(id)),
-                    Err(err) if err.api().is_some_and(|api| api.status == 404) => Ok(Some(id)),
+                    Ok(_) => Ok(Revoked::Deleted(id)),
+                    Err(err) if err.api().is_some_and(|api| api.status == 404) => {
+                        Ok(Revoked::Deleted(id))
+                    }
                     Err(err) => Err(upstream("tokens.delete", err)),
                 }
             };
             match revoked.await {
-                Ok(Some(token_id)) => {
+                Ok(Revoked::Deleted(token_id)) => {
                     info!(event = "token.revoke", token_id);
                     v1::RevokeTokenResponse::Ok
                 }
-                Ok(None) => {
+                Ok(Revoked::Gone) => {
                     info!(event = "token.revoke", reason = "already_gone");
+                    v1::RevokeTokenResponse::Ok
+                }
+                Ok(Revoked::NotMinted(token_id)) => {
+                    warn!(event = "token.revoke", token_id, reason = "not_minted");
                     v1::RevokeTokenResponse::Ok
                 }
                 Err(err) => {
                     warn!(
                         event = "token.revoke",
                         error = err.error.as_str(),
-                        message = %err.message,
+                        message = %err.error_description,
                     );
                     // As for an exchange: the broker's faults say why only in
                     // the log line.
                     match err.error {
-                        ErrorCode::BadRequest => v1::RevokeTokenResponse::BadRequest(err),
-                        ErrorCode::Forbidden => v1::RevokeTokenResponse::Forbidden(err),
-                        ErrorCode::UpstreamError => {
-                            v1::RevokeTokenResponse::BadGateway(Error::new(
+                        ErrorCode::InvalidRequest
+                        | ErrorCode::InvalidTarget
+                        | ErrorCode::UnsupportedGrantType => {
+                            v1::RevokeTokenResponse::BadRequest(err)
+                        }
+                        ErrorCode::TemporarilyUnavailable => {
+                            v1::RevokeTokenResponse::ServiceUnavailable(Error::new(
                                 err.error,
                                 "a service the broker relies on failed; its logs say which",
                             ))
                         }
-                        _ => v1::RevokeTokenResponse::InternalServerError(Error::new(
-                            err.error,
-                            "the broker failed; its logs say why",
-                        )),
+                        ErrorCode::ServerError => v1::RevokeTokenResponse::InternalServerError(
+                            Error::new(err.error, "the broker failed; its logs say why"),
+                        ),
                     }
                 }
             }
@@ -603,11 +636,11 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
         .await
     }
 
-    /// `GET /.well-known/openid-configuration`: the broker's discovery
-    /// document, so services can find its keys and endpoints. It issues tokens
-    /// by exchange only, so there's no authorization endpoint: it isn't a
-    /// login provider.
-    async fn discovery(&self) -> v1::DiscoveryResponse {
+    /// `GET /.well-known/oauth-authorization-server`: the broker's
+    /// Authorization Server Metadata (RFC 8414), so services can find its keys
+    /// and endpoints. It issues tokens by exchange only, so there's no
+    /// authorization endpoint, and no ID tokens: it isn't an OpenID Provider.
+    async fn metadata(&self) -> v1::MetadataResponse {
         let issuer = &self.config.policy().issuer;
         let url = |path: &str| format!("{issuer}{path}").parse();
         let (Ok(jwks_uri), Ok(token_endpoint), Ok(revocation_endpoint)) = (
@@ -616,21 +649,20 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
             url("/oauth/revoke"),
         ) else {
             error!(%issuer, "the issuer makes no URLs");
-            return v1::DiscoveryResponse::InternalServerError(Error::new(
-                ErrorCode::Misconfigured,
+            return v1::MetadataResponse::InternalServerError(Error::new(
+                ErrorCode::ServerError,
                 "the broker is misconfigured; its logs say why",
             ));
         };
-        v1::DiscoveryResponse::Ok(Discovery {
+        v1::MetadataResponse::Ok(AuthorizationServerMetadata {
             issuer: issuer.clone(),
             jwks_uri,
             token_endpoint,
             revocation_endpoint,
+            response_types_supported: vec![],
             grant_types_supported: vec![TOKEN_EXCHANGE.into()],
             token_endpoint_auth_methods_supported: Some(vec!["none".into()]),
             revocation_endpoint_auth_methods_supported: Some(vec!["none".into()]),
-            subject_types_supported: Some(vec!["public".into()]),
-            id_token_signing_alg_values_supported: Some(vec![ALGORITHM.into()]),
         })
     }
 
@@ -643,14 +675,14 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                     return Ok(Jwks { keys: vec![] });
                 };
                 let jwk = serde_json::from_value(key.public_jwk()).map_err(|err| {
-                    Error::new(ErrorCode::Misconfigured, format!("the public key: {err}"))
+                    Error::new(ErrorCode::ServerError, format!("the public key: {err}"))
                 })?;
                 Ok::<_, Error>(Jwks { keys: vec![jwk] })
             };
             match keys.await {
                 Ok(jwks) => v1::JwksResponse::Ok(jwks),
                 Err(err) => {
-                    error!(error = err.error.as_str(), message = %err.message);
+                    error!(error = err.error.as_str(), message = %err.error_description);
                     v1::JwksResponse::InternalServerError(Error::new(
                         err.error,
                         "the broker failed; its logs say why",
@@ -660,6 +692,17 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
         })
         .await
     }
+}
+
+/// What revoking a token did.
+enum Revoked {
+    /// The broker minted it, and it's deleted: its ID.
+    Deleted(String),
+    /// Cloudflare doesn't know it: invalid, expired, deleted, or another
+    /// account's.
+    Gone,
+    /// The broker didn't mint it, so it's left alone: its ID.
+    NotMinted(String),
 }
 
 /// `cf-oidc:<provider>:<sub>`, whatever the issuer, cut to fit: what a token
@@ -677,7 +720,7 @@ fn upstream<E: std::fmt::Debug>(what: &str, err: ApiOpError<E>) -> Error {
         ApiOpError::Transport(err) => err.to_string(),
     };
     Error::new(
-        ErrorCode::UpstreamError,
+        ErrorCode::TemporarilyUnavailable,
         format!("Cloudflare: {what}: {why}"),
     )
 }
@@ -685,14 +728,16 @@ fn upstream<E: std::fmt::Debug>(what: &str, err: ApiOpError<E>) -> Error {
 /// A Cloudflare API answer without what it should have had.
 fn missing(what: &str) -> Error {
     Error::new(
-        ErrorCode::UpstreamError,
+        ErrorCode::TemporarilyUnavailable,
         format!("Cloudflare: {what} returned nothing"),
     )
 }
 
-/// The claims of a token for another service, issued at `now` (seconds since
-/// the epoch), and when it expires. It never outlives the token the caller
-/// presented.
+/// The claims of an access token for another service (RFC 9068), issued at
+/// `now` (seconds since the epoch), and when it expires. It never outlives the
+/// token the caller presented. Its `client_id` is the provider's name: the
+/// caller doesn't authenticate as a client, and it's the provider that says
+/// who it is.
 ///
 /// It has the claims the policy matched on, under the issuer's names, so the
 /// service can match on the same ones. Nothing else: an issuer's other claims,
@@ -704,7 +749,7 @@ fn payload(
     profile: &ProfileConfig,
     ttl: u64,
     now: u64,
-) -> Result<(Map<String, Value>, u64), Error> {
+) -> Result<(AccessTokenClaims, u64), Error> {
     let claims = &identity.claims;
     let not_after = claims.exp().unwrap_or(u64::MAX);
     let expires_at = (now + ttl / 1000).min(not_after);
@@ -712,33 +757,39 @@ fn payload(
     // live at all isn't issued.
     if expires_at <= now {
         return Err(Error::new(
-            ErrorCode::Unauthorized,
+            ErrorCode::InvalidRequest,
             "the subject token has expired",
         ));
     }
 
-    let mut payload = provider.matched(Some(profile), claims);
-    let subject = match identity.claims.sub() {
-        Some(sub) => sub.to_string(),
-        None => format!("{}:unknown", provider.name),
-    };
+    let mut other = provider.matched(Some(profile), claims);
     for (name, value) in [
         ("provider", json!(provider.name)),
         ("profile", json!(profile.name)),
-        ("iss", json!(issuer)),
-        ("aud", json!(profile.audience)),
-        ("sub", json!(subject)),
-        ("iat", json!(now)),
         ("nbf", json!(now)),
-        ("exp", json!(expires_at)),
     ] {
-        payload.insert(name.into(), value);
+        other.insert(name.into(), value);
     }
+    let sub = match identity.claims.sub() {
+        Some(sub) => sub.to_string(),
+        None => format!("{}:unknown", provider.name),
+    };
+    let payload = AccessTokenClaims {
+        iss: issuer.to_string(),
+        sub,
+        aud: profile.audience.clone(),
+        client_id: provider.name.clone(),
+        iat: now,
+        exp: expires_at,
+        other,
+    };
     Ok((payload, expires_at))
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Map, Value};
+
     use super::*;
     use crate::service::config::tests::{CACHE, NOW, claims, parse, policy};
 
@@ -786,7 +837,7 @@ mod tests {
         .unwrap();
         assert_eq!(expires_at, NOW + 300, "never past the caller's own token");
         assert_eq!(
-            Value::Object(issued),
+            Value::Object(cf_oidc_core::Claims::from(issued).into_inner()),
             json!({
                 "ref": "refs/heads/main",
                 "repository_owner_id": "100000001",
@@ -795,6 +846,7 @@ mod tests {
                 "iss": "https://cf-oidc-exchange.example.com",
                 "aud": CACHE,
                 "sub": "repo:example-org/app:ref:refs/heads/main",
+                "client_id": "github",
                 "iat": NOW,
                 "nbf": NOW,
                 "exp": NOW + 300,
@@ -812,6 +864,6 @@ mod tests {
             NOW,
         )
         .unwrap_err();
-        assert_eq!(err.message, "the subject token has expired");
+        assert_eq!(err.error_description, "the subject token has expired");
     }
 }

@@ -6,19 +6,19 @@ use std::fmt;
 use crate::v1::{Error, ErrorCode};
 
 impl Error {
-    /// An error in the shape shared with cf-nix-cache:
-    /// `{ "error": "<code>", "message": "<what went wrong>" }`.
-    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+    /// An OAuth error response (RFC 6749 §5.2):
+    /// `{ "error": "<code>", "error_description": "<what went wrong>" }`.
+    pub fn new(code: ErrorCode, description: impl Into<String>) -> Self {
         Self {
             error: code,
-            message: message.into(),
+            error_description: description.into(),
         }
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.error, self.message)
+        write!(f, "{}: {}", self.error, self.error_description)
     }
 }
 
@@ -30,7 +30,10 @@ mod tests {
 
     #[test]
     fn displays_its_code_and_message() {
-        let err = Error::new(ErrorCode::Forbidden, "no profile matches the token");
-        assert_eq!(err.to_string(), "forbidden: no profile matches the token");
+        let err = Error::new(ErrorCode::InvalidRequest, "no profile matches the token");
+        assert_eq!(
+            err.to_string(),
+            "invalid_request: no profile matches the token"
+        );
     }
 }

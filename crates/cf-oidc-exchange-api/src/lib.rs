@@ -66,7 +66,7 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<HttpResponse
             let msg = err.to_string();
             axum::Router::new().fallback(move || async move {
                 error!(event = "misconfigured", message = %msg);
-                let body = v1::Error::new(ErrorCode::Misconfigured, "the broker is misconfigured");
+                let body = v1::Error::new(ErrorCode::ServerError, "the broker is misconfigured");
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
             })
         }
@@ -83,14 +83,14 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
                 .cleanup()
                 .await
         }
-        Err(err) => Err(v1::Error::new(ErrorCode::Misconfigured, err.to_string())),
+        Err(err) => Err(v1::Error::new(ErrorCode::ServerError, err.to_string())),
     };
     match deleted {
         Ok(deleted) => info!(event = "cleanup.done", deleted),
         Err(err) => error!(
             event = "cleanup.failed",
             error = err.error.as_str(),
-            message = %err.message,
+            message = %err.error_description,
         ),
     }
 }

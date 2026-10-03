@@ -39,7 +39,7 @@ profiles:
             com.cloudflare.api.account.0123456789abcdef0123456789abcdef: "*"
 ```
 
-A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minute token that can deploy Workers in the account. Any other job gets a `403`.
+A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minute token that can deploy Workers in the account. Any other job is refused with `400` (`invalid_request`).
 
 ## Deploy
 
@@ -56,7 +56,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
    ```sh
    worker-build --release   # then worker_dir = ".../crates/cf-oidc-exchange-api/build"
    ```
-4. **Check** that `<broker-url>/.well-known/openid-configuration` returns `200` (`https://cf-oidc-exchange.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or a binding is wrong; the reasons are in Workers Logs.
+4. **Check** that `<broker-url>/.well-known/oauth-authorization-server` returns `200` (`https://cf-oidc-exchange.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or a binding is wrong; the reasons are in Workers Logs.
 
 ## Bindings
 
@@ -171,7 +171,7 @@ profiles:
 
 A profile has a `token`, `buckets`, or both, for callers with a token from its `provider`. A profile with an `audience` instead issues the broker's own token for that service: see [Tokens for other services](#tokens-for-other-services).
 
-To switch a profile off, for example during an incident, set `enabled: false`. It stays in the policy but never matches, and a request naming it is a `403`.
+To switch a profile off, for example during an incident, set `enabled: false`. It stays in the policy but never matches, and a request naming it is refused (`invalid_request`).
 
 The broker checks the policy on every request. If it's invalid, the broker fails closed and every request gets `500`.
 
@@ -184,10 +184,10 @@ A provider is an OIDC issuer you trust to vouch for a caller. `providers` is a l
 | `name` | Required, unique. Profiles name it in `provider`. |
 | `issuer` | Required. The tokens' `iss`, exactly. `https://`, or plain `http://` on `127.0.0.1`, `localhost` or `[::1]` for local development. One provider per issuer. |
 | `audience` | Required. The tokens' `aud` must contain it. Use one only the broker accepts, such as its URL: for GitHub Actions, not GitHub's default `https://github.com/<owner>`, so a token requested for AWS or GCP can't be replayed here. |
-| `jwks_uri` | Optional. Otherwise the keys come from the issuer's `/.well-known/openid-configuration`, which must name the same issuer. They never come from a URL in the token. |
+| `jwks_uri` | Optional. Otherwise the keys come from the issuer's metadata: its `/.well-known/openid-configuration`, or, if it has none, its RFC 8414 `/.well-known/oauth-authorization-server`, which must name the same issuer. They never come from a URL in the token. |
 | `claims` | Required: at least one [claim set](#claim-sets). Every token from this provider must match one, whichever profile it gets. |
 
-`audience` is a field, not one of the `claims`, because it says whether the token is meant for the broker at all: it's checked with the signature, `iss` and expiry (`401` if wrong), before `claims` pick a profile (`403` if none does).
+`audience` is a field, not one of the `claims`, because it says whether the token is meant for the broker at all: it's checked with the signature, `iss` and expiry, before `claims` pick a profile. Either failing is `400` (`invalid_request`), as RFC 8693 has it for a subject token that's invalid or that the policy doesn't take.
 
 **Pin the tenant.** GitHub Actions, gitlab.com and HCP Terraform issue tokens to anyone's projects, and the broker URL is public. A provider's claim sets must pin yours, by ID: `repository_owner_id` for GitHub Actions, `namespace_id` or `project_id` for gitlab.com, `terraform_organization_id` for HCP Terraform. The broker requires a claim set on every provider, but it can't tell which claims pin a tenant: that's yours to get right.
 
@@ -202,8 +202,8 @@ A profile's `provider` can be left out when the policy has exactly one provider.
 - A pattern can end in one `*` after a prefix, such as `example-org/*` or `refs/heads/release/*`, and then matches any value starting with that prefix, including across `/`. A `*` anywhere else, or on its own, is refused when the policy loads. ID claims (`*_id`) must be exact.
 - A claim that's a list in the token (`groups`, `amr`) matches if any of its entries does. A claim missing from the token never matches.
 - Any claim the issuer puts in its tokens can be matched. GitHub Actions: `repository`, `repository_id`, `ref`, `environment`, `job_workflow_ref`, `runner_environment`, and so on. GitLab CI: `project_path`, `namespace_id`, `ref_protected`, and so on.
-- If the request names a `profile`, that profile must match. Otherwise exactly one profile must match. Both failures are a `403`, and the message says which.
-- A token only matches profiles for the provider whose issuer it names. Naming another provider's profile is a `403`.
+- If the request names a `profile`, that profile must match. Otherwise exactly one profile must match. Both failures are `invalid_request`, and the description says which.
+- A token only matches profiles for the provider whose issuer it names. Naming another provider's profile is refused (`invalid_request`).
 
 ### People
 
@@ -232,7 +232,7 @@ curl -H "Authorization: Bearer <token>" \
   "https://api.cloudflare.com/client/v4/accounts/<account_id>/tokens/permission_groups"
 ```
 
-- An unknown name fails the mint with `500` (`misconfigured`). It's never silently dropped.
+- An unknown name fails the mint with `500` (`server_error`). It's never silently dropped.
 - If a name exists at several scopes, the broker uses the one matching the resources' scope (account, zone or R2 bucket).
 
 ### Resources
@@ -262,11 +262,11 @@ Each entry in `buckets` gets the job [temporary R2 credentials](https://develope
 
 - **Placeholders** are `{claim}`, not `${claim}`, so Terraform's `templatefile` leaves them alone. Any claim can fill one: `{repository}` from GitHub Actions, `{project_path}` from GitLab, `{email}`… They're filled in from the verified token, never from the request.
 - **Prefixes** must end in `/`, so `github.com/org/site/` doesn't also cover `github.com/org/site-old/`. They can't start with `/` or contain `*`, `..`, empty or `.` segments, or control characters, and each placeholder must be a whole path segment (`tfstate/{repository_id}/`, not `tfstate-{repository_id}/`), so two repos can never end up with the same prefix. These are checked when the policy loads.
-- **Claims** filling a placeholder must be a string or a number made of path segments of `A-Z`, `a-z`, `0-9`, `.`, `_` and `-`. A value can span several segments (`example-org/app`) only when it's the template's one placeholder; with several, each must fill exactly one, so two callers can never fill a template to the same prefix. The filled-in prefix is checked again. Otherwise the request is a `403`, before anything is minted.
+- **Claims** filling a placeholder must be a string or a number made of path segments of `A-Z`, `a-z`, `0-9`, `.`, `_` and `-`. A value can span several segments (`example-org/app`) only when it's the template's one placeholder; with several, each must fill exactly one, so two callers can never fill a template to the same prefix. The filled-in prefix is checked again. Otherwise the request is refused (`invalid_request`), before anything is minted.
 - **Without `prefixes`** the credentials cover the whole bucket.
 - **Lifetime:** the profile's `ttl`, capped at its `max_ttl`, with the request's `ttl` still honoured. That's the same as the token's, in a profile with both. The credentials **can't be revoked early**, so keep TTLs short.
-- **Parent token:** the broker token calls `temp-access-credentials` with its own ID as the parent, as in [Cloudflare's example](https://developers.cloudflare.com/r2/examples/authenticate-r2-temp-credentials/), and the credentials can't exceed its permissions. Give it **Workers R2 Storage Write** (R2's "Admin Read & Write"), which is known to work. Cloudflare asks for "at least the permissions you plan to delegate", so an R2 permission limited to the profiles' buckets may be enough, but that hasn't been tried. Without an R2 permission the endpoint refuses the token with code `10000`, which the broker reports as `502` (`Cloudflare: temporaryCredentials.create: returned 403` in the audit log). Admin Read & Write is account-wide, but it doesn't widen what a leaked broker token can do: with Account API Tokens Write it could already mint itself a token with any R2 permission. The policy still only hands out `object-*` permissions. Revoking or rolling the broker token cuts off every credential issued from it within seconds, including those of jobs running at that moment. That's the emergency switch.
-- **With both** `token` and `buckets`, the broker mints the token first. If the credentials then can't be created, it deletes the token and replies `502`.
+- **Parent token:** the broker token calls `temp-access-credentials` with its own ID as the parent, as in [Cloudflare's example](https://developers.cloudflare.com/r2/examples/authenticate-r2-temp-credentials/), and the credentials can't exceed its permissions. Give it **Workers R2 Storage Write** (R2's "Admin Read & Write"), which is known to work. Cloudflare asks for "at least the permissions you plan to delegate", so an R2 permission limited to the profiles' buckets may be enough, but that hasn't been tried. Without an R2 permission the endpoint refuses the token with code `10000`, which the broker reports as `503` (`temporarily_unavailable`; `Cloudflare: temporaryCredentials.create: returned 403` in the audit log). Admin Read & Write is account-wide, but it doesn't widen what a leaked broker token can do: with Account API Tokens Write it could already mint itself a token with any R2 permission. The policy still only hands out `object-*` permissions. Revoking or rolling the broker token cuts off every credential issued from it within seconds, including those of jobs running at that moment. That's the emergency switch.
+- **With both** `token` and `buckets`, the broker mints the token first. If the credentials then can't be created, it deletes the token and replies `503`.
 
 > [!WARNING]
 > **The policy decides when a job's `AWS_*` variables are replaced.** The action exports the credentials, and replaces or clears `AWS_*`, whenever the matched profile has `buckets`, including for workflows that don't set `profile`. Set `profile` for R2 in every workflow, and give a job that also talks to AWS its R2 access in a separate job.
@@ -289,14 +289,14 @@ A profile with `audience: <service URL>` gives the caller a token the broker sig
     ttl: 15m
 ```
 
-The caller asks for it with [`audience`](#token-exchange) set to the service's URL, and gets a JWT the broker signed (`alg: RS256`, which OIDC verifiers support by default):
+The caller asks for it with [`audience`](#token-exchange) set to the service's URL, and gets a JWT access token the broker signed, as RFC 9068 has it: `typ: at+jwt`, so a service can tell it from any other JWT, and `alg: RS256`, which verifiers support by default.
 
-- `iss` is the broker's URL (the policy's `issuer`), `aud` the service, and `sub` the caller's `sub` from its issuer.
+- `iss` is the broker's URL (the policy's `issuer`), `aud` the service, `sub` the caller's `sub` from its issuer, and `client_id` the provider's name: the caller doesn't authenticate as a client, so the provider that vouched for it stands in.
 - `provider` and `profile` name where the caller came from and what allowed it, and `jti` is unique.
 - Verified claims are copied under their issuer's names, so a service can match on them: every claim the profile's or its provider's claim sets name. Nothing else, so an issuer's other claims (such as GitLab's `user_email`) stay behind.
 - It lasts the profile's `ttl`, but never past the caller's OIDC token, which lasts minutes. Exchange again for a fresh one: there are no refresh tokens.
 
-Services find the public key at [`/.well-known/jwks`](#http-api), or through [`/.well-known/openid-configuration`](#http-api), and should check `iss`, `aud`, `exp` and the `RS256` algorithm.
+Services find the public key at [`/.well-known/jwks`](#http-api), or through the broker's RFC 8414 metadata at [`/.well-known/oauth-authorization-server`](#http-api), and should check `typ` (`at+jwt`), `iss`, `aud`, `exp` and the `RS256` algorithm, as RFC 9068 §4 says. The broker is an OAuth authorization server, not an OpenID Provider: it issues no ID tokens, so it publishes no `/.well-known/openid-configuration`. With cf-oidc-core, a service names the broker as a provider with `typ` `at+jwt`.
 
 The key is an RSA private key, at least 2048 bits, in Secrets Store, bound as `CF_OIDC_EXCHANGE_API_SIGNING_KEY` (`signing_key_secret` in the [Terraform module](../../deployment/terraform)):
 
@@ -331,7 +331,7 @@ These are enforced when the policy loads, so an unsafe policy never serves a req
 |---|---|---|---|
 | `POST` | `/oauth/token` | `subject_token` in the body | [Token exchange](#token-exchange) (RFC 8693) of an OIDC token. What the action uses. |
 | `POST` | `/oauth/revoke` | `token` in the body | [Revoke](#revocation) (RFC 7009) a token the broker minted. What the action's post step uses. |
-| `GET` | `/.well-known/openid-configuration` | public | The broker's issuer, key and endpoint URLs, for services that verify [its tokens](#tokens-for-other-services). |
+| `GET` | `/.well-known/oauth-authorization-server` | public | The broker's Authorization Server Metadata (RFC 8414): its issuer, key and endpoint URLs, for services that verify [its tokens](#tokens-for-other-services). |
 | `GET` | `/.well-known/jwks` | public | The public key the broker signs its own tokens with. Empty without `CF_OIDC_EXCHANGE_API_SIGNING_KEY`. |
 | `GET` | `/health/live` | public | `200` whenever the Worker's bindings are valid. |
 | `GET` | `/health/ready` | public | `200` whenever the Worker's bindings are valid. It doesn't read the secrets: a route that needs them fails closed with `500`, with why in Workers Logs. |
@@ -376,27 +376,27 @@ The response has the standard fields plus the broker's own:
 }
 ```
 
-`buckets` is there when the profile has buckets. A profile with only buckets has no single bearer token, so it returns no `access_token` or `token_id`, with `issued_token_type` `urn:cf-oidc-auth:params:oauth:token-type:r2-credentials` and `token_type` `N_A`. For a service's audience, `access_token` is the broker's JWT, `issued_token_type` is `urn:ietf:params:oauth:token-type:jwt`, and there's no `token_id`, `account_id` or `buckets`.
+`buckets` is there when the profile has buckets. A profile with only buckets has no single bearer token, so it returns no `access_token` or `token_id`, with `issued_token_type` `urn:cf-oidc-auth:params:oauth:token-type:r2-credentials` and `token_type` `N_A`. For a service's audience, `access_token` is the broker's JWT access token, `issued_token_type` is `urn:ietf:params:oauth:token-type:access_token` (or `…:jwt`, if that's what `requested_token_type` asked for), and there's no `token_id`, `account_id` or `buckets`.
 
 Errors are the same as on every route.
 
 ### Revocation
 
-`POST /oauth/revoke` is an [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) revocation, form-encoded, with the token in `token` (`token_type_hint` is ignored). Holding the token is the proof. It answers `200` with no body whether the token was revoked, was already gone or was never valid, and `403` for a token the broker didn't mint (one not named `cf-oidc:*`, including the broker token), which it never deletes.
+`POST /oauth/revoke` is an [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) revocation, form-encoded, with the token in `token` (`token_type_hint` is ignored). Holding the token is the proof. It answers `200` with no body whether the token was revoked, was already gone, was never valid, or isn't one the broker minted (one not named `cf-oidc:*`, including the broker token), which it never deletes: to the broker that's an invalid token, which RFC 7009 answers with `200` too. The audit log says which (`token.revoke`, `reason: not_minted`).
 
 ```sh
 curl -sS https://cf-oidc-exchange.example.com/oauth/revoke -d token="$CLOUDFLARE_API_TOKEN"
 ```
 
-**Errors:** `{ "error": "<code>", "message": "<what went wrong>" }`, the shape cf-nix-cache uses, with one of these statuses:
+**Errors:** OAuth errors (RFC 6749 §5.2), `{ "error": "<code>", "error_description": "<what went wrong>" }`, as RFC 8693 and RFC 7009 have them:
 
-- `400 bad_request`
-- `401 unauthorized`
-- `403 forbidden`
-- `500 misconfigured` or `internal_error`
-- `502 upstream_error`
+- `400 invalid_request`: a malformed request, a subject token that's invalid, or one the policy doesn't take (RFC 8693 §2.2.2)
+- `400 invalid_target`: an `audience` the broker issues nothing for, or can't issue the requested token type for (RFC 8693)
+- `400 unsupported_grant_type`: a `grant_type` other than token exchange
+- `500 server_error`: the broker is misconfigured or failed
+- `503 temporarily_unavailable`: Cloudflare or the subject token's issuer failed
 
-For the caller's own mistakes (400 to 403) the message says what was wrong, for example `no profile matches the token` or `profile workers-deploy isn't for provider gitlab`. That tells a caller with a valid token which profile names exist. For the broker's faults (500, 502) the message is generic, and the logs say why.
+For the caller's own mistakes (400) the description says what was wrong, for example `no profile matches the token` or `profile workers-deploy isn't for provider gitlab`. That tells a caller with a valid token which profile names exist. For the broker's faults (500, 503) the description is generic, and the logs say why.
 
 **Contract:** [`exchangev1.yaml`](../cf-oidc-exchange-sdk/openapi/oidc/exchange/v1/exchangev1.yaml). The Worker's types, server and router are generated from it, and requests that don't fit it are refused (`400`) before any handler runs. The action's [`api.ts`](../../packages/cf-oidc-action/src/api.ts) mirrors it.
 
@@ -441,15 +441,15 @@ A token for another service is `token.issue`, with the audience and the token's 
 {"level":"INFO","event":"token.issue","provider":"github","profile":"nix-push","sub":"repo:example-org/api:ref:refs/heads/main","claims":"{\"ref\":\"refs/heads/main\",\"repository_owner_id\":\"100000001\"}","audience":"https://cf-nix-cache.example.com","jti":"<uuid>","expires_at":1790960440}
 ```
 
-Denials are `token.deny`, a warning, with the `error` and `message` of the response. For the broker's own faults, the message is the full one the caller doesn't get:
+Denials are `token.deny`, a warning, with the response's `error`, and its `error_description` as `message`. For the broker's own faults, the message is the full one the caller doesn't get:
 
 ```json
-{"level":"WARN","event":"token.deny","provider":"github","profile":"workers-deploy","sub":"repo:example-org/api:environment:prod","claims":"{\"repository\":\"example-org/api\",\"repository_owner_id\":\"100000001\"}","error":"upstream_error","message":"Cloudflare: tokens.create: returned 500"}
+{"level":"WARN","event":"token.deny","provider":"github","profile":"workers-deploy","sub":"repo:example-org/api:environment:prod","claims":"{\"repository\":\"example-org/api\",\"repository_owner_id\":\"100000001\"}","error":"temporarily_unavailable","message":"Cloudflare: tokens.create: returned 500"}
 ```
 
-- **Request problems** (`bad_request`, `unauthorized`): what the contract refuses, such as another `grant_type`, `actor_token`, a missing field or a JSON body; an invalid subject token, or one from an issuer no provider is for; a `ttl` or `audience` that doesn't fit.
-- **The policy didn't allow it** (`forbidden`): the token matches none of its provider's claim sets, no profile matches, several do, the named one doesn't, a claim can't fill a bucket prefix.
-- **Configuration or upstream faults** (`misconfigured`, `internal_error`, `upstream_error`): a secret that can't be read, an unknown permission name, an issuer's keys, Cloudflare failing.
+- **Request problems** (`invalid_request`, `invalid_target`, `unsupported_grant_type`): what the contract refuses, such as another `grant_type`, `actor_token`, a missing field or a JSON body; an invalid subject token, or one from an issuer no provider is for; a `ttl` or `audience` that doesn't fit.
+- **The policy didn't allow it** (`invalid_request` too): the token matches none of its provider's claim sets, no profile matches, several do, the named one doesn't, a claim can't fill a bucket prefix.
+- **Configuration or upstream faults** (`server_error`, `temporarily_unavailable`): a secret that can't be read, an unknown permission name, an issuer's keys, Cloudflare failing.
 
 ## Limitations
 
@@ -459,7 +459,7 @@ Denials are `token.deny`, a warning, with the `error` and `message` of the respo
 - **The tenant pin is yours to get right.** The broker requires every provider to have claim sets, but knows no issuer's tenant claim by name.
 - **One signing key at a time.** Rotating it can't publish the old and new keys side by side, so a token signed just before the rotation fails at a service that has already refetched the JWKS. They're short-lived, and the caller can exchange again.
 - **No JWT replay cache.** A stolen JWT can be exchanged again until it expires. The custom audience and its short lifetime limit this.
-- **Resource IDs aren't checked up front.** Apart from the account check, a wrong zone ID is only caught when Cloudflare rejects the mint (`502`).
+- **Resource IDs aren't checked up front.** Apart from the account check, a wrong zone ID is only caught when Cloudflare rejects the mint (`503`).
 - **Permission names can change.** Cloudflare can rename a permission group. Profiles using the old name fail closed (`500`) until the policy is updated.
 - **Secrets Store is required, and in open beta.** The broker token is only accepted from Secrets Store, so a plain Worker secret can't end up in Terraform state or deploy tooling. Accounts without Secrets Store can't run the broker yet.
 - **R2 credentials can't be revoked early.** They last their TTL; only rolling the broker token cuts them all off. One bucket per grant, and only buckets outside a jurisdiction.

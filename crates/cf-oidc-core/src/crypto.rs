@@ -16,10 +16,17 @@ use worker::{
     wasm_bindgen_futures::JsFuture,
 };
 
-use crate::Claims;
+use crate::{AccessTokenClaims, Claims};
 
 /// What tokens are signed with, and what OIDC verifiers support by default.
 pub const ALGORITHM: &str = "RS256";
+
+/// The `typ` of a JWT (RFC 7519 §5.1).
+pub const JWT: &str = "JWT";
+
+/// The `typ` of a JWT access token (RFC 9068 §2.1): what a resource server
+/// names as its [`Provider::typ`](crate::Provider::typ) to take nothing else.
+pub const AT_JWT: &str = "at+jwt";
 
 /// The smallest RSA key accepted, as NIST requires.
 const MIN_MODULUS_BITS: usize = 2048;
@@ -122,18 +129,36 @@ impl SigningKey {
         json!({ "kty": "RSA", "n": self.n, "e": self.e, "kid": self.kid, "alg": ALGORITHM, "use": "sig" })
     }
 
-    /// Signs `claims` as a JWT, with a fresh random `jti`.
+    /// Signs `claims` as a JWT (`typ` `JWT`), with a fresh random `jti`.
     ///
     /// # Errors
     ///
     /// When WebCrypto fails.
     pub async fn sign(&self, claims: Claims) -> Result<SignedToken, KeyError> {
+        self.sign_typed(JWT, claims).await
+    }
+
+    /// Signs `claims` as a JWT access token (RFC 9068): `typ` `at+jwt`, so a
+    /// resource server can tell it from any other JWT, with a fresh random
+    /// `jti`.
+    ///
+    /// # Errors
+    ///
+    /// When WebCrypto fails.
+    pub async fn sign_access_token(
+        &self,
+        claims: AccessTokenClaims,
+    ) -> Result<SignedToken, KeyError> {
+        self.sign_typed(AT_JWT, claims.into()).await
+    }
+
+    async fn sign_typed(&self, typ: &str, claims: Claims) -> Result<SignedToken, KeyError> {
         let scope = js_sys::global().unchecked_into::<WorkerGlobalScope>();
         let jti = scope.crypto().map_err(webcrypto)?.random_uuid();
         let mut claims: Map<String, Value> = claims.into();
         claims.insert("jti".to_string(), json!(jti));
 
-        let header = json!({ "alg": ALGORITHM, "kid": self.kid, "typ": "JWT" });
+        let header = json!({ "alg": ALGORITHM, "kid": self.kid, "typ": typ });
         let signing_input = format!(
             "{}.{}",
             URL_SAFE_NO_PAD.encode(header.to_string()),

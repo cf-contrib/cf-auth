@@ -148,8 +148,8 @@ mod token_exchange_for_jobs {
         )
         .await;
         assert_eq!(res.status, 400);
-        assert_error(&res, "bad_request");
-        assert_refused(&t.deny().await, "bad_request", "");
+        assert_error(&res, "invalid_request");
+        assert_refused(&t.deny().await, "invalid_request", "");
     }
 
     #[tokio::test]
@@ -161,7 +161,7 @@ mod token_exchange_for_jobs {
             "sts.amazonaws.com",
             300,
         );
-        assert_eq!(job_token(&jwt, &[]).await.status, 401);
+        assert_eq!(job_token(&jwt, &[]).await.status, 400);
     }
 
     #[tokio::test]
@@ -169,11 +169,11 @@ mod token_exchange_for_jobs {
         let t = start().await;
         let claims = github_claims(json!({ "repository_owner_id": "999999" }));
         let res = job_token(&sign(claims), &[]).await;
-        assert_eq!(res.status, 403);
-        assert_error(&res, "forbidden");
+        assert_eq!(res.status, 400);
+        assert_error(&res, "invalid_request");
         assert_refused(
             &t.deny().await,
-            "forbidden",
+            "invalid_request",
             "the token matches none of provider github's claim sets",
         );
         assert_eq!(token_count(), 1); // only the broker token
@@ -185,8 +185,8 @@ mod token_exchange_for_jobs {
         let claims = github_claims(
             json!({ "repository": "example-org/infra", "repository_id": "200000002" }),
         );
-        assert_eq!(job_token(&sign(claims), &[]).await.status, 403);
-        assert_refused(&t.deny().await, "forbidden", "all match the token");
+        assert_eq!(job_token(&sign(claims), &[]).await.status, 400);
+        assert_refused(&t.deny().await, "invalid_request", "all match the token");
     }
 
     #[tokio::test]
@@ -197,10 +197,10 @@ mod token_exchange_for_jobs {
             &[("profile", "infra-cloudflare")],
         )
         .await;
-        assert_eq!(res.status, 403);
+        assert_eq!(res.status, 400);
         let deny = t.deny().await;
         assert_matches(&deny, json!({ "profile": "infra-cloudflare" }));
-        assert_refused(&deny, "forbidden", "profile ");
+        assert_refused(&deny, "invalid_request", "profile ");
     }
 
     #[tokio::test]
@@ -227,7 +227,7 @@ mod token_exchange_for_jobs {
         assert_eq!(res.status, 500);
         assert_refused(
             &t.deny().await,
-            "misconfigured",
+            "server_error",
             "no permission group is named Workers Scrpts Write",
         );
     }
@@ -261,11 +261,11 @@ mod token_exchange_for_jobs {
         let t = start().await;
         world().cloudflare.fail_create = true;
         let res = job_token(&sign(github_claims(json!({}))), &[]).await;
-        assert_eq!(res.status, 502);
+        assert_eq!(res.status, 503);
         // The caller is told it's upstream, not what failed; the audit log says.
-        assert_error(&res, "upstream_error");
+        assert_error(&res, "temporarily_unavailable");
         assert!(
-            !res.json()["message"]
+            !res.json()["error_description"]
                 .as_str()
                 .unwrap()
                 .contains("tokens.create"),
@@ -274,7 +274,7 @@ mod token_exchange_for_jobs {
         );
         assert_refused(
             &t.deny().await,
-            "upstream_error",
+            "temporarily_unavailable",
             "Cloudflare: tokens.create: returned 500",
         );
         let creates = world()
@@ -423,7 +423,7 @@ mod token_exchange_for_jobs_with_buckets {
             job_token(&state_repo("deploy-and-artifacts", json!({})), &[])
                 .await
                 .status,
-            502
+            503
         );
         assert_eq!(token_count(), 1); // only the broker token
         let issued: Vec<Value> = t
@@ -440,8 +440,8 @@ mod token_exchange_for_jobs_with_buckets {
         let t = start().await;
         world().cloudflare.fail_r2 = true;
         let res = job_token(&state_repo("state-and-deploy", json!({})), &[]).await;
-        assert_eq!(res.status, 502);
-        assert_error(&res, "upstream_error");
+        assert_eq!(res.status, 503);
+        assert_error(&res, "temporarily_unavailable");
         assert_eq!(token_count(), 1); // the minted token was deleted
         assert_matches(
             &t.audit("token.revoke").await.unwrap(),
@@ -461,11 +461,11 @@ mod token_exchange_for_jobs_with_buckets {
             &[],
         )
         .await;
-        assert_eq!(res.status, 403);
-        assert_error(&res, "forbidden");
+        assert_eq!(res.status, 400);
+        assert_error(&res, "invalid_request");
         let deny = t.deny().await;
         assert_matches(&deny, json!({ "profile": "owner-state" }));
-        assert_refused(&deny, "forbidden", "bucket org-terraform-state: ");
+        assert_refused(&deny, "invalid_request", "bucket org-terraform-state: ");
         assert!(world().cloudflare.calls().is_empty());
     }
 
@@ -546,14 +546,22 @@ mod revocation {
         let foreign = world()
             .cloudflare
             .add(None, "ci deploy (manual)", None, None, "active");
-        assert_eq!(revoke(Some(&foreign.value)).await.status, 403);
+        // Not the broker's, so an invalid token to it: 200, as RFC 7009 has it.
+        assert_eq!(revoke(Some(&foreign.value)).await.status, 200);
         assert!(world().cloudflare.tokens.contains_key(&foreign.id));
     }
 
     #[tokio::test]
     async fn refuses_to_delete_the_cloudflare_token() {
         let _t = start().await;
-        assert_eq!(revoke(Some(CLOUDFLARE_TOKEN)).await.status, 403);
+        assert_eq!(revoke(Some(CLOUDFLARE_TOKEN)).await.status, 200);
+        assert!(
+            world()
+                .cloudflare
+                .calls()
+                .iter()
+                .all(|call| call.method != "DELETE")
+        );
     }
 
     #[tokio::test]
@@ -652,20 +660,27 @@ mod exchange_requests {
 
     #[tokio::test]
     async fn rejects_what_it_doesnt_support_without_calling_anyone() {
-        type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str);
+        type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str, &'a str);
         let cases: [Case; 9] = [
             (
                 "another grant type",
                 &[("grant_type", "client_credentials")],
+                "unsupported_grant_type",
                 "",
             ),
-            ("no subject token", &[("subject_token", "")], ""),
+            (
+                "no subject token",
+                &[("subject_token", "")],
+                "invalid_request",
+                "",
+            ),
             (
                 "an unsupported subject token type",
                 &[(
                     "subject_token_type",
                     "urn:ietf:params:oauth:token-type:saml2",
                 )],
+                "invalid_request",
                 "",
             ),
             // Only OIDC tokens: a GitHub user token isn't one.
@@ -675,36 +690,46 @@ mod exchange_requests {
                     "subject_token_type",
                     "urn:ietf:params:oauth:token-type:access_token",
                 )],
+                "invalid_request",
                 "",
             ),
             (
                 "another audience",
                 &[("audience", "https://cache.example.com")],
+                "invalid_target",
                 "no profile is for audience",
             ),
             (
                 "an actor token",
                 &[("actor_token", "x"), ("actor_token_type", ID_TOKEN)],
+                "invalid_request",
                 "",
             ),
             (
                 "a JWT for Cloudflare",
                 &[("requested_token_type", JWT_TYPE)],
+                "invalid_target",
                 "can't be issued for https://api.cloudflare.com",
             ),
-            ("an empty audience", &[("audience", "")], ""),
+            (
+                "an empty audience",
+                &[("audience", "")],
+                "invalid_request",
+                "",
+            ),
             (
                 "an unsupported requested token type",
                 &[(
                     "requested_token_type",
                     "urn:ietf:params:oauth:token-type:refresh_token",
                 )],
+                "invalid_request",
                 "",
             ),
         ];
         // A valid token: the layer verifies it before anything else is looked at.
         let jwt = sign(github_claims(json!({})));
-        for (case, overrides, says) in cases {
+        for (case, overrides, code, says) in cases {
             let t = start().await;
             let mut form: Vec<(&str, &str)> = vec![
                 ("grant_type", GRANT),
@@ -717,9 +742,9 @@ mod exchange_requests {
             }
             let res = post_form("/oauth/token", &form).await;
             assert_eq!(res.status, 400, "{case}");
-            assert_error(&res, "bad_request");
+            assert_error(&res, code);
             let deny = t.deny().await;
-            assert_eq!(deny["error"], "bad_request", "{case}: {deny}");
+            assert_eq!(deny["error"], code, "{case}: {deny}");
             assert!(
                 deny["message"].as_str().unwrap_or_default().contains(says),
                 "{case}: {deny}"
@@ -742,7 +767,7 @@ mod exchange_requests {
             assert_eq!(res.status, 400, "{content_type}");
             assert_refused(
                 &t.deny().await,
-                "bad_request",
+                "invalid_request",
                 "the body must be form-encoded",
             );
             drop(t);
@@ -753,8 +778,12 @@ mod exchange_requests {
     async fn refuses_a_token_that_isnt_a_valid_oidc_token() {
         let t = start().await;
         let res = job_token("not-a-jwt", &[]).await;
-        assert_eq!(res.status, 401);
-        assert_refused(&t.deny().await, "unauthorized", "invalid token: not a JWT");
+        assert_eq!(res.status, 400);
+        assert_refused(
+            &t.deny().await,
+            "invalid_request",
+            "invalid token: not a JWT",
+        );
         assert!(world().cloudflare.calls().is_empty());
     }
 }
@@ -811,12 +840,12 @@ mod providers {
             &[],
         )
         .await;
-        assert_eq!(res.status, 403);
+        assert_eq!(res.status, 400);
         let deny = t.deny().await;
         assert_matches(&deny, json!({ "provider": "gitlab" }));
         assert_refused(
             &deny,
-            "forbidden",
+            "invalid_request",
             "the token matches none of provider gitlab's claim sets",
         );
     }
@@ -829,10 +858,10 @@ mod providers {
             &[("profile", "workers-deploy")],
         )
         .await;
-        assert_eq!(res.status, 403);
+        assert_eq!(res.status, 400);
         assert_refused(
             &t.deny().await,
-            "forbidden",
+            "invalid_request",
             "profile workers-deploy isn't for provider gitlab",
         );
     }
@@ -846,10 +875,10 @@ mod providers {
             AUDIENCE,
             300,
         );
-        assert_eq!(job_token(&jwt, &[]).await.status, 401);
+        assert_eq!(job_token(&jwt, &[]).await.status, 400);
         assert_refused(
             &t.deny().await,
-            "unauthorized",
+            "invalid_request",
             "no provider is for issuer https://other.example.com",
         );
     }
@@ -862,12 +891,12 @@ mod providers {
             job_token(&gitlab_token(&mismatched, gitlab_claims(json!({}))), &[])
                 .await
                 .status,
-            502
+            503
         );
         let deny = t.deny().await;
         assert_refused(
             &deny,
-            "upstream_error",
+            "temporarily_unavailable",
             "is for issuer https://evil.example.com",
         );
     }
@@ -958,7 +987,7 @@ mod tokens_for_other_services {
             body,
             json!({
                 "access_token": body["access_token"],
-                "issued_token_type": JWT_TYPE,
+                "issued_token_type": ACCESS_TOKEN,
                 "token_type": "Bearer",
                 "expires_in": body["expires_in"],
                 "expires_at": body["expires_at"],
@@ -966,13 +995,15 @@ mod tokens_for_other_services {
             })
         );
         let (header, claims) = verify_broker_token(body["access_token"].as_str().unwrap()).await;
-        assert_matches(&header, json!({ "alg": "RS256", "typ": "JWT" }));
+        // An RFC 9068 access token.
+        assert_matches(&header, json!({ "alg": "RS256", "typ": "at+jwt" }));
         assert_matches(
             &claims,
             json!({
                 "iss": AUDIENCE,
                 "aud": CACHE,
                 "sub": sub,
+                "client_id": "github",
                 "provider": "github",
                 "profile": "nix-push",
                 // What the profile and its provider match on, so the service can too.
@@ -985,7 +1016,7 @@ mod tokens_for_other_services {
             claims.get("repository").is_none() && claims.get("run_id").is_none(),
             "{claims}"
         );
-        assert!(claims["jti"].is_string());
+        assert!(claims["jti"].is_string() && claims["iat"].is_u64());
         // Only the identity: no API token, no R2 credentials.
         assert!(world().cloudflare.calls().is_empty());
         assert_matches(
@@ -1006,9 +1037,16 @@ mod tokens_for_other_services {
     }
 
     #[tokio::test]
-    async fn publishes_a_discovery_document_and_only_the_public_key() {
+    async fn publishes_its_metadata_and_only_the_public_key() {
         let _t = setup().await;
-        let res = call(Method::GET, "/.well-known/openid-configuration").await;
+        // An OAuth authorization server, not an OpenID Provider.
+        assert_eq!(
+            call(Method::GET, "/.well-known/openid-configuration")
+                .await
+                .status,
+            404
+        );
+        let res = call(Method::GET, "/.well-known/oauth-authorization-server").await;
         assert_eq!(res.status, 200);
         assert_eq!(res.cache_control.as_deref(), Some("public, max-age=300"));
         assert_matches(
@@ -1018,8 +1056,8 @@ mod tokens_for_other_services {
                 "jwks_uri": format!("{AUDIENCE}/.well-known/jwks"),
                 "token_endpoint": format!("{AUDIENCE}/oauth/token"),
                 "revocation_endpoint": format!("{AUDIENCE}/oauth/revoke"),
+                "response_types_supported": [],
                 "grant_types_supported": [GRANT],
-                "id_token_signing_alg_values_supported": ["RS256"],
             }),
         );
 
@@ -1050,7 +1088,11 @@ mod tokens_for_other_services {
         )
         .await;
         assert_eq!(res.status, 400);
-        assert_refused(&t.deny().await, "bad_request", "no profile is for audience");
+        assert_refused(
+            &t.deny().await,
+            "invalid_target",
+            "no profile is for audience",
+        );
     }
 
     #[tokio::test]
@@ -1062,10 +1104,10 @@ mod tokens_for_other_services {
             &[("profile", "workers-deploy")],
         )
         .await;
-        assert_eq!(res.status, 403);
+        assert_eq!(res.status, 400);
         assert_refused(
             &t.deny().await,
-            "forbidden",
+            "invalid_request",
             &format!("profile workers-deploy isn't for {CACHE}"),
         );
     }

@@ -106,6 +106,22 @@ impl Claims {
         self.0.get("jti").and_then(Value::as_str)
     }
 
+    /// `client_id`: the OAuth client it was issued to (RFC 8693 §4.3, RFC
+    /// 9068 §2.2).
+    pub fn client_id(&self) -> Option<&str> {
+        self.0.get("client_id").and_then(Value::as_str)
+    }
+
+    /// `scope`: the scopes it grants, which the claim lists space-separated
+    /// (RFC 8693 §4.2).
+    pub fn scope(&self) -> impl Iterator<Item = &str> {
+        let scope = self.0.get("scope").and_then(Value::as_str);
+        scope
+            .unwrap_or_default()
+            .split(' ')
+            .filter(|s| !s.is_empty())
+    }
+
     /// The claims' JSON object.
     pub fn into_inner(self) -> Map<String, Value> {
         self.0
@@ -156,12 +172,13 @@ impl Claims {
         Ok(())
     }
 
-    /// That each registered claim it has is of its registered type: a token
-    /// with an `nbf` that isn't a NumericDate must not pass for one without.
+    /// That each registered claim it has (RFC 7519 §4.1, RFC 8693 §4) is of
+    /// its registered type: a token with an `nbf` that isn't a NumericDate
+    /// must not pass for one without.
     fn check_types(&self) -> Result<(), Error> {
         for (name, value) in &self.0 {
             let ok = match name.as_str() {
-                "iss" | "sub" | "jti" => value.is_string(),
+                "iss" | "sub" | "jti" | "client_id" | "scope" => value.is_string(),
                 "aud" => match value {
                     Value::Array(auds) => auds.iter().all(Value::is_string),
                     aud => aud.is_string(),
@@ -194,6 +211,46 @@ impl From<Map<String, Value>> for Claims {
 impl From<Claims> for Map<String, Value> {
     fn from(claims: Claims) -> Self {
         claims.0
+    }
+}
+
+/// The claims of a JWT access token (RFC 9068 §2.2): the ones it requires,
+/// so a token without them can't be signed, and any others.
+/// [`SigningKey::sign_access_token`](crate::SigningKey::sign_access_token)
+/// signs them, and gives them their `jti`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AccessTokenClaims {
+    /// `iss`: the issuer signing it.
+    pub iss: String,
+    /// `sub`: whom it's about.
+    pub sub: String,
+    /// `aud`: the resource it's for.
+    pub aud: String,
+    /// `client_id`: the client it's issued to.
+    pub client_id: String,
+    /// `iat`: when it's issued, in seconds since the epoch.
+    pub iat: u64,
+    /// `exp`: when it expires, in seconds since the epoch.
+    pub exp: u64,
+    /// Any other claims. The ones above take their place if they're here
+    /// too, as does the `jti` signing gives it.
+    pub other: Map<String, Value>,
+}
+
+impl From<AccessTokenClaims> for Claims {
+    fn from(token: AccessTokenClaims) -> Self {
+        let mut claims = token.other;
+        for (name, value) in [
+            ("iss", Value::from(token.iss)),
+            ("sub", Value::from(token.sub)),
+            ("aud", Value::from(token.aud)),
+            ("client_id", Value::from(token.client_id)),
+            ("iat", Value::from(token.iat)),
+            ("exp", Value::from(token.exp)),
+        ] {
+            claims.insert(name.to_string(), value);
+        }
+        Self(claims)
     }
 }
 
@@ -292,9 +349,53 @@ mod tests {
         assert_eq!(claims.jti(), Some("id-1"));
         assert_eq!(claims.get("ref"), Some(&json!("refs/heads/main")));
 
+        assert_eq!(claims.client_id(), None);
+        assert_eq!(claims.scope().count(), 0);
+
         let mut empty = claims.into_inner();
         empty.insert("sub".into(), json!(""));
         assert_eq!(Claims::from(empty).sub(), None);
+    }
+
+    #[test]
+    fn reads_the_claims_rfc_8693_registers() {
+        let mut map = claims();
+        map.insert("client_id".into(), json!("github"));
+        map.insert("scope".into(), json!("cache:read  cache:write"));
+        let claims = Claims::from(map);
+        assert_eq!(claims.client_id(), Some("github"));
+        assert_eq!(
+            claims.scope().collect::<Vec<_>>(),
+            ["cache:read", "cache:write"]
+        );
+    }
+
+    #[test]
+    fn access_token_claims_hold_what_rfc_9068_requires() {
+        let mut other = Map::new();
+        other.insert("iss".into(), json!("https://forged.example.com"));
+        other.insert("profile".into(), json!("nix-push"));
+        let claims = Claims::from(AccessTokenClaims {
+            iss: ISSUER.into(),
+            sub: "repo:example-org/app".into(),
+            aud: AUDIENCE.into(),
+            client_id: "github".into(),
+            iat: NOW,
+            exp: NOW + 300,
+            other,
+        });
+        assert_eq!(
+            Value::Object(claims.into_inner()),
+            json!({
+                "iss": ISSUER,
+                "sub": "repo:example-org/app",
+                "aud": AUDIENCE,
+                "client_id": "github",
+                "iat": NOW,
+                "exp": NOW + 300,
+                "profile": "nix-push",
+            })
+        );
     }
 
     #[test]
@@ -360,6 +461,8 @@ mod tests {
             ("aud", json!([AUDIENCE, 1])),
             ("sub", json!(1)),
             ("jti", json!({})),
+            ("client_id", json!(1)),
+            ("scope", json!(["cache:read"])),
         ] {
             let mut claims = claims();
             claims.insert(claim.into(), value.clone());

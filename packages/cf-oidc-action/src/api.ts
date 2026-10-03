@@ -7,7 +7,8 @@ export type SubjectTokenType = "urn:ietf:params:oauth:token-type:id_token" | "ur
 
 /**
  * What comes back: a Cloudflare API token, only R2 credentials for a profile without a
- * `token`, or, for another service's audience, a JWT the broker signed.
+ * `token`, or, for another service's audience, a JWT access token (RFC 9068) the broker
+ * signed: `access_token`, or `jwt` if that's what was requested.
  */
 export type IssuedTokenType =
   | "urn:ietf:params:oauth:token-type:access_token"
@@ -35,8 +36,9 @@ export interface TokenExchangeRequest {
 /**
  * `200` response of `POST /oauth/token`. A profile with only `buckets` has no single bearer
  * token, so it returns no `access_token` and `token_type: "N_A"`, with the credentials in `buckets`.
- * For another service's audience, `access_token` is a JWT the broker signed, verifiable with
- * the keys at `/.well-known/jwks`.
+ * For another service's audience, `access_token` is a JWT access token (RFC 9068, `typ`
+ * `at+jwt`) the broker signed, verifiable with the keys its metadata
+ * (`/.well-known/oauth-authorization-server`, RFC 8414) names.
  */
 export interface TokenExchangeResponse {
   access_token?: string;
@@ -56,7 +58,8 @@ export interface TokenExchangeResponse {
 
 /**
  * Body of `POST /oauth/revoke`, an RFC 7009 revocation, form-encoded. Answers `200`
- * whether the token was revoked, already gone or never valid; `403` for tokens the broker didn't mint.
+ * whether the token was revoked, already gone, never valid, or not one the broker minted,
+ * which it never deletes.
  */
 export interface TokenRevocationRequest {
   token: string;
@@ -79,20 +82,23 @@ export interface BucketCredentials {
   expires_on: string;
 }
 
+/**
+ * RFC 6749's error codes (§5.2, and §4.1.2.1 for the broker's own faults) and RFC 8693's
+ * `invalid_target`.
+ */
 export type ErrorCode =
-  | "bad_request"
-  | "unauthorized"
-  | "forbidden"
-  | "not_found"
-  | "misconfigured"
-  | "upstream_error"
-  | "internal_error";
+  | "invalid_request"
+  | "invalid_target"
+  | "unsupported_grant_type"
+  | "server_error"
+  | "temporarily_unavailable";
 
 /**
- * Body of every non-2xx response, in the shape cf-nix-cache uses. For the caller's own
- * mistakes the message says what was wrong; for the broker's faults it's generic.
+ * Body of every non-2xx response: an OAuth error (RFC 6749 §5.2). 400 for the caller's own
+ * mistakes, whose description says what was wrong; 500 or 503 for the broker's faults, whose
+ * description is generic.
  */
 export interface Error {
   error: ErrorCode;
-  message: string;
+  error_description: string;
 }
