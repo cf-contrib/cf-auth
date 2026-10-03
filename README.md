@@ -5,6 +5,7 @@
 > workflow stores a `CLOUDFLARE_API_TOKEN` secret.
 
 [![CI](https://github.com/cf-contrib/cf-oidc-exchange/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-exchange/actions/workflows/ci.yml)
+[![Rust (edition 2024)](https://img.shields.io/badge/Rust-2024-black?logo=rust)](https://www.rust-lang.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Nix Flake](https://img.shields.io/badge/Nix-Flake-5277C3?logo=nixos&logoColor=white)](https://nixos.wiki/wiki/Flakes)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -26,10 +27,13 @@ steps:
   - run: npx wrangler deploy # CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID are set
 ```
 
-| Component | Ships as | What it is |
+| Part | Ships as | What it is |
 |---|---|---|
-| [Action](action) | `uses: cf-contrib/cf-oidc-exchange@<version>` | Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. No runtime dependencies. |
-| [Broker](crates/cf-oidc-exchange-api) | A Rust Worker in [Releases](https://github.com/cf-contrib/cf-oidc-exchange/releases), deployed with the [Terraform module](deployment/terraform) | A Worker in your account that checks the OIDC token against your policy and mints the Cloudflare token. |
+| [Action](action) | `uses: cf-contrib/cf-oidc-exchange@<version>` | Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. JavaScript, with no runtime dependencies. |
+| [Broker](crates/cf-oidc-exchange-api) | A Rust Worker in [Releases](https://github.com/cf-contrib/cf-oidc-exchange/releases) | A Worker in your account that checks the OIDC token against your policy and mints the Cloudflare token. |
+| [Terraform module](deployment/terraform) | `//deployment/terraform?ref=<version>` | Deploys the broker from a release: your policy, its bindings, its URL and its cron. |
+| [SDK](crates/cf-oidc-exchange-sdk) | A Rust crate, from git | The broker's API, generated from its OpenAPI document: its types, the server the broker implements, and a client. |
+| [cf-oidc-core](crates/cf-oidc-core) | A Rust crate, from git | OIDC tokens in Workers, verified and signed, which the broker and cf-nix-cache share. |
 
 The action and the broker, with its Terraform module, are released together from one tag, so deploy the broker from the release whose action you use. The action talks only to the broker, never to the Cloudflare API.
 
@@ -59,7 +63,7 @@ sequenceDiagram
     Note over Broker,CF: hourly cron deletes expired cf-oidc:* tokens
 ```
 
-The only long-lived credential is the **broker token**: an account-owned token with **Account API Tokens Write**, plus R2 permissions if profiles hand out [prefix-limited R2 credentials](crates/cf-oidc-exchange-api#buckets) (e.g. one shared Terraform-state bucket, each repo limited to its own prefix). It lives in Cloudflare Secrets Store, bound to the Worker, so it never passes through Terraform or CI and never leaves the Worker.
+The only long-lived credential is the broker's **Cloudflare token**: an account-owned token with **Account API Tokens Write**, plus R2 permissions if profiles hand out [prefix-limited R2 credentials](crates/cf-oidc-exchange-api#buckets) (e.g. one shared Terraform-state bucket, each repo limited to its own prefix). It lives in Cloudflare Secrets Store, bound to the Worker, so it never passes through Terraform or CI and never leaves the Worker.
 
 ## Do you need it?
 
@@ -76,7 +80,7 @@ If a stored secret is acceptable to you, it's less to run.
 
 ## Quick start
 
-1. **Create the broker token.** In the Cloudflare dashboard, create an account-owned API token with **Account API Tokens Write** (plus R2 permissions for [buckets](crates/cf-oidc-exchange-api#buckets)), and store it in Secrets Store.
+1. **Create the Cloudflare token.** In the Cloudflare dashboard, create an account-owned API token with **Account API Tokens Write** (plus R2 permissions for [buckets](crates/cf-oidc-exchange-api#buckets)), and store it in Secrets Store.
 2. **Write a policy** that says which repos, branches and environments get which permissions. See the [broker's README](crates/cf-oidc-exchange-api#policy).
 3. **Deploy the broker** with the [Terraform module](deployment/terraform), on workers.dev (a custom domain is optional), then check that `<url>/.well-known/oauth-authorization-server` returns `200`.
 4. **Add the action** to a job with `permissions: id-token: write`. See the [action's README](action).
@@ -87,18 +91,10 @@ Everything runs inside the dev shell: `nix develop`, or the Dev Container.
 
 ```sh
 pnpm install && pnpm lint && pnpm typecheck && pnpm test   # the action
-cargo test                                                  # the broker's unit tests
+cargo test                                                  # the crates' unit tests
 crates/cf-oidc-exchange-api/tests/run.sh                    # the broker end to end, under wrangler dev
 (cd deployment/terraform && tofu test)                      # the Terraform module
 ```
-
-| Directory | |
-|---|---|
-| [`action`](action) | The action, in JavaScript with no runtime dependencies. |
-| [`crates/cf-oidc-exchange-api`](crates/cf-oidc-exchange-api) | The broker, a Rust Worker. |
-| [`crates/cf-oidc-exchange-sdk`](crates/cf-oidc-exchange-sdk) | The broker's API, generated from its OpenAPI document. |
-| [`crates/cf-oidc-core`](crates/cf-oidc-core) | OIDC tokens in Workers, verified and signed, which the broker and cf-nix-cache share. |
-| [`deployment/terraform`](deployment/terraform) | The Terraform module that deploys the broker. |
 
 Releases are cut by release-please from Conventional Commits. Each release is tagged `vX.Y.Z` and attaches the broker's `index.js`, `index_bg.wasm.base64` and their `SHA256SUMS`. Pin the action to a release tag or its commit SHA: before 1.0 there is no floating major tag, because minor releases may break.
 

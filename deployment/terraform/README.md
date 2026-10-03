@@ -26,7 +26,7 @@ by default deploys the broker of the release its `ref` points to.
 ## Prerequisites
 
 - Terraform or OpenTofu >= 1.9.
-- The **broker token**, an account-owned API token with
+- The **Cloudflare token**, an account-owned API token with
   **Account API Tokens Write** (see the [broker's README](../../crates/cf-oidc-exchange-api#deploy)),
   stored in [Secrets Store](https://developers.cloudflare.com/secrets-store/) (open beta).
   If any profile has `buckets`, the token also needs R2 permissions
@@ -34,7 +34,7 @@ by default deploys the broker of the release its `ref` points to.
   their parent (see [Buckets](../../crates/cf-oidc-exchange-api#buckets)).
 - A separate API token for *deploying*, exported as `CLOUDFLARE_API_TOKEN`, with:
   - **Account → Workers Scripts: Edit**
-  - **Account → Secrets Store: Edit**, to bind the broker token's secret
+  - **Account → Secrets Store: Edit**, to bind the Cloudflare token's secret
   - **Zone → Workers Routes: Edit** on the broker's zone, only for a custom domain (not tested yet)
 
   The first two were enough for a workers.dev deploy in testing.
@@ -43,13 +43,13 @@ by default deploys the broker of the release its `ref` points to.
 ## Usage
 
 ```sh
-# Store the broker token once. Wrangler prompts for the value.
+# Store the Cloudflare token once. Wrangler prompts for the value.
 wrangler secrets-store store list --remote     # note the store ID
 wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-cloudflare-token --scopes workers --remote
 
 $EDITOR policy.yaml                            # providers, profiles; see Policy below
 
-export CLOUDFLARE_API_TOKEN=...                # deploy token, not the broker token
+export CLOUDFLARE_API_TOKEN=...                # deploy token, not the broker's Cloudflare token
 tofu init
 tofu apply
 curl -fsS "$(tofu output -raw broker_url)/.well-known/oauth-authorization-server"   # 500 if the policy is wrong
@@ -152,7 +152,7 @@ worker-build --release   # worker_dir = ".../crates/cf-oidc-exchange-api/build"
 | `account_id` | yes | | Cloudflare account ID. The broker runs here and mints tokens for it. |
 | `hostname` | yes | | `<worker_name>.<subdomain>.workers.dev`, or a custom domain. |
 | `zone_id` | for a custom domain | `null` | Zone ID of the zone holding a custom-domain `hostname`. |
-| `cloudflare_token_secret` | yes | | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the broker token. With `buckets`, the token also needs R2 permissions covering what they delegate. |
+| `cloudflare_token_secret` | yes | | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the Cloudflare token. With `buckets`, the token also needs R2 permissions covering what they delegate. |
 | `signing_key_secret` | for profiles with an `audience` | `null` | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the RSA key the broker signs its own tokens with. See [Tokens for other services](../../crates/cf-oidc-exchange-api#tokens-for-other-services). |
 | `policy_file` | yes | | Policy YAML path, rendered as a template. |
 | `policy_vars` | no | `{}` | Extra template variables for the policy. |
@@ -169,5 +169,5 @@ worker-build --release   # worker_dir = ".../crates/cf-oidc-exchange-api/build"
 - Worker bindings are reset on every version upload, so every binding the broker
   needs is declared here.
 - `tofu test` plans the module with mocked providers (no credentials needed) and
-  checks the broker token binding, both URL modes, local artifacts, checksums, the
+  checks the Cloudflare token binding, both URL modes, local artifacts, checksums, the
   policy template (including bucket prefix placeholders) and its size.

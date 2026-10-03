@@ -43,7 +43,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 
 ## Deploy
 
-1. **Create the broker token.** In the Cloudflare dashboard, create an **account-owned** API token with **Account API Tokens Write**. If any profile has [`buckets`](#buckets), also give it R2 permissions covering what they delegate. It's the broker's only long-lived credential. This is the one manual step: automating it would need a token that can create tokens. Store it in [Secrets Store](https://developers.cloudflare.com/secrets-store/) so it never passes through your deploy tooling:
+1. **Create the Cloudflare token.** In the Cloudflare dashboard, create an **account-owned** API token with **Account API Tokens Write**. If any profile has [`buckets`](#buckets), also give it R2 permissions covering what they delegate. It's the broker's only long-lived credential. This is the one manual step: automating it would need a token that can create tokens. Store it in [Secrets Store](https://developers.cloudflare.com/secrets-store/) so it never passes through your deploy tooling:
    ```sh
    wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-cloudflare-token --scopes workers --remote
    ```
@@ -62,7 +62,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 
 | Binding | Type | Required | Description |
 |---|---|---|---|
-| `CF_OIDC_EXCHANGE_API_ACCOUNT_ID` | plain text | yes | Account the broker token belongs to and tokens are minted in. |
+| `CF_OIDC_EXCHANGE_API_ACCOUNT_ID` | plain text | yes | Account the Cloudflare token belongs to and tokens are minted in. |
 | `CF_OIDC_EXCHANGE_API_POLICY` | plain text | yes | The [policy](#policy), as JSON. A Worker variable holds at most 5 KB. |
 | `CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN` | Secrets Store secret | yes | Account-owned token with Account API Tokens Write, plus R2 permissions covering what profiles' `buckets` delegate. Read on every request, so rotating the secret takes effect without a redeploy. Anything else, such as a plain `wrangler secret`, is refused with `500`. |
 | `CF_OIDC_EXCHANGE_API_SIGNING_KEY` | Secrets Store secret | for profiles with an `audience` | RSA private key (at least 2048 bits), as a PKCS#8 PEM, the broker signs [its own tokens](#tokens-for-other-services) with. Without it the broker issues none, publishes no keys, and those profiles fail closed with `500`. |
@@ -225,7 +225,7 @@ Version 1 and 2 policies are refused (`500`, with `version must be 3` in the log
 
 ### Permissions
 
-`permissions` are permission-group names as the [permission groups API](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/subresources/permission_groups/) returns them, e.g. `"DNS Write"` or `"Workers Scripts Write"`. The broker looks up their IDs with the broker token when it mints a token. To see the full list:
+`permissions` are permission-group names as the [permission groups API](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/subresources/permission_groups/) returns them, e.g. `"DNS Write"` or `"Workers Scripts Write"`. The broker looks up their IDs with the Cloudflare token when it mints a token. To see the full list:
 
 ```sh
 curl -H "Authorization: Bearer <token>" \
@@ -265,7 +265,7 @@ Each entry in `buckets` gets the job [temporary R2 credentials](https://develope
 - **Claims** filling a placeholder must be a string or a number made of path segments of `A-Z`, `a-z`, `0-9`, `.`, `_` and `-`. A value can span several segments (`example-org/app`) only when it's the template's one placeholder; with several, each must fill exactly one, so two callers can never fill a template to the same prefix. The filled-in prefix is checked again. Otherwise the request is refused (`invalid_request`), before anything is minted.
 - **Without `prefixes`** the credentials cover the whole bucket.
 - **Lifetime:** the profile's `ttl`, capped at its `max_ttl`, with the request's `ttl` still honoured. That's the same as the token's, in a profile with both. The credentials **can't be revoked early**, so keep TTLs short.
-- **Parent token:** the broker token calls `temp-access-credentials` with its own ID as the parent, as in [Cloudflare's example](https://developers.cloudflare.com/r2/examples/authenticate-r2-temp-credentials/), and the credentials can't exceed its permissions. Give it **Workers R2 Storage Write** (R2's "Admin Read & Write"), which is known to work. Cloudflare asks for "at least the permissions you plan to delegate", so an R2 permission limited to the profiles' buckets may be enough, but that hasn't been tried. Without an R2 permission the endpoint refuses the token with code `10000`, which the broker reports as `503` (`temporarily_unavailable`; `Cloudflare: temporaryCredentials.create: returned 403` in the audit log). Admin Read & Write is account-wide, but it doesn't widen what a leaked broker token can do: with Account API Tokens Write it could already mint itself a token with any R2 permission. The policy still only hands out `object-*` permissions. Revoking or rolling the broker token cuts off every credential issued from it within seconds, including those of jobs running at that moment. That's the emergency switch.
+- **Parent token:** the Cloudflare token calls `temp-access-credentials` with its own ID as the parent, as in [Cloudflare's example](https://developers.cloudflare.com/r2/examples/authenticate-r2-temp-credentials/), and the credentials can't exceed its permissions. Give it **Workers R2 Storage Write** (R2's "Admin Read & Write"), which is known to work. Cloudflare asks for "at least the permissions you plan to delegate", so an R2 permission limited to the profiles' buckets may be enough, but that hasn't been tried. Without an R2 permission the endpoint refuses the token with code `10000`, which the broker reports as `503` (`temporarily_unavailable`; `Cloudflare: temporaryCredentials.create: returned 403` in the audit log). Admin Read & Write is account-wide, but it doesn't widen what a leaked Cloudflare token can do: with Account API Tokens Write it could already mint itself a token with any R2 permission. The policy still only hands out `object-*` permissions. Revoking or rolling the Cloudflare token cuts off every credential issued from it within seconds, including those of jobs running at that moment. That's the emergency switch.
 - **With both** `token` and `buckets`, the broker mints the token first. If the credentials then can't be created, it deletes the token and replies `503`.
 
 > [!WARNING]
@@ -382,7 +382,7 @@ Errors are the same as on every route.
 
 ### Revocation
 
-`POST /oauth/revoke` is an [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) revocation, form-encoded, with the token in `token` (`token_type_hint` is ignored). Holding the token is the proof. It answers `200` with no body whether the token was revoked, was already gone, was never valid, or isn't one the broker minted (one not named `cf-oidc:*`, including the broker token), which it never deletes: to the broker that's an invalid token, which RFC 7009 answers with `200` too. The audit log says which (`token.revoke`, `reason: not_minted`).
+`POST /oauth/revoke` is an [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) revocation, form-encoded, with the token in `token` (`token_type_hint` is ignored). Holding the token is the proof. It answers `200` with no body whether the token was revoked, was already gone, was never valid, or isn't one the broker minted (one not named `cf-oidc:*`, including the Cloudflare token), which it never deletes: to the broker that's an invalid token, which RFC 7009 answers with `200` too. The audit log says which (`token.revoke`, `reason: not_minted`).
 
 ```sh
 curl -sS https://cf-oidc-exchange.example.com/oauth/revoke -d token="$CLOUDFLARE_API_TOKEN"
@@ -406,17 +406,17 @@ For the caller's own mistakes (400) the description says what was wrong, for exa
 |---|---|
 | Forged or tampered JWT | Signature checked against the issuer's JWKS (RS256 only), plus `iss`, `aud`, `exp` and `nbf` with 60s tolerance |
 | A repo outside your org asks for a token | Every provider must list claim sets; pin your tenant's ID there |
-| A token from an issuer you don't trust | Only issuers listed as providers are accepted, by exact `iss`, with keys from that issuer's own discovery document or `jwks_uri` |
+| A token from an issuer you don't trust | Only issuers listed as providers are accepted, by exact `iss`, with keys from that issuer's own metadata or `jwks_uri` |
 | Deleted repo or org re-registered by an attacker | Pin numeric IDs, not names |
 | Malicious PR code gets a prod token | Match `ref: refs/heads/main` and `environment: prod`, with required reviewers on the environment. Fork PRs don't get `id-token: write` on `pull_request`. Don't write profiles that match `event_name: pull_request_target`. |
 | Stolen minted token | 15m default TTL, revoked at job end, expired tokens deleted hourly |
-| Stolen R2 credentials | Limited to one bucket and the repo's prefixes, and short-lived. They can't be revoked one by one; rolling the broker token revokes all of them |
+| Stolen R2 credentials | Limited to one bucket and the repo's prefixes, and short-lived. They can't be revoked one by one; rolling the Cloudflare token revokes all of them |
 | One repo reaches another's R2 keys | Prefixes must end in `/`, placeholders fill whole segments from verified claims with a fixed character set, and both the template and the result are checked. Prefer ID-based prefixes |
 | Stolen JWT replayed | Short JWT lifetime and a custom audience |
 | Stolen broker-issued token | Valid for one service (`aud`), and never longer than the job's OIDC token it came from |
-| Signing key exfiltrated | Kept in Secrets Store like the broker token. Replace the secret to rotate it: the new key gets a new `kid`, and services stop accepting the old one once they refetch the JWKS |
+| Signing key exfiltrated | Kept in Secrets Store like the Cloudflare token. Replace the secret to rotate it: the new key gets a new `kid`, and services stop accepting the old one once they refetch the JWKS |
 | One caller reaches another's R2 keys through a prefix claim | A value spans path segments only as a template's one placeholder, and every filled-in prefix is checked again |
-| Broker token exfiltrated | Kept in Secrets Store, so it isn't in Terraform state or CI. Only code running in the Worker can read it. Restrict who can deploy Workers in the broker's account, rotate the broker token, and consider a dedicated account per trust domain. |
+| Cloudflare token exfiltrated | Kept in Secrets Store, so it isn't in Terraform state or CI. Only code running in the Worker can read it. Restrict who can deploy Workers in the broker's account, rotate the Cloudflare token, and consider a dedicated account per trust domain. |
 | Token flooding | Only callers the policy allows can mint. Tokens are short-lived, revoked at job end, and cleaned up hourly. There's no rate limit yet (see [Limitations](#limitations)). |
 
 ### Audit log
@@ -461,8 +461,8 @@ Denials are `token.deny`, a warning, with the response's `error`, and its `error
 - **No JWT replay cache.** A stolen JWT can be exchanged again until it expires. The custom audience and its short lifetime limit this.
 - **Resource IDs aren't checked up front.** Apart from the account check, a wrong zone ID is only caught when Cloudflare rejects the mint (`503`).
 - **Permission names can change.** Cloudflare can rename a permission group. Profiles using the old name fail closed (`500`) until the policy is updated.
-- **Secrets Store is required, and in open beta.** The broker token is only accepted from Secrets Store, so a plain Worker secret can't end up in Terraform state or deploy tooling. Accounts without Secrets Store can't run the broker yet.
-- **R2 credentials can't be revoked early.** They last their TTL; only rolling the broker token cuts them all off. One bucket per grant, and only buckets outside a jurisdiction.
+- **Secrets Store is required, and in open beta.** The Cloudflare token is only accepted from Secrets Store, so a plain Worker secret can't end up in Terraform state or deploy tooling. Accounts without Secrets Store can't run the broker yet.
+- **R2 credentials can't be revoked early.** They last their TTL; only rolling the Cloudflare token cuts them all off. One bucket per grant, and only buckets outside a jurisdiction.
 - **No rate limit.** A workflow the policy allows can mint as often as it runs. Each token expires within minutes, is revoked at job end and cleaned up hourly, but a compromised workflow could still create many tokens at once. Cloudflare's rate-limit binding was tried and didn't enforce a 30-per-minute limit against ~85 requests a minute, so it was left out. An exact per-repository limit (e.g. a Durable Object) may come later.
 
 ## Code
@@ -471,10 +471,10 @@ The crate is laid out as cf-nix-cache's Worker is:
 
 | | |
 |---|---|
-| `src/lib.rs` | The start, fetch and scheduled events: the JSON logger, the configuration, then the SDK's router over it, with the auth layer and the health endpoints. |
+| `src/lib.rs` | The start, fetch and scheduled events: the JSON logger, the configuration, then the SDK's router over it, with the auth layer, the health endpoints and `OAuthResponseLayer`. |
 | `src/service/config.rs` | The bindings, read in `Config::from_env` only, and the policy's format: providers, profiles, claim sets, bucket prefixes, and the guardrails parsing checks. |
 | `src/service/layer.rs` | Exchange auth, as a tower layer over [`cf-oidc-core`](../cf-oidc-core): the subject token's provider by `iss`, RS256 against the issuer's keys with WebCrypto, the standard claims and the provider's claim sets. And `OAuthResponseLayer`, OAuth's rules for every response: the generated validation's refusals as `invalid_request`, and `Cache-Control`. |
-| `src/service/handler.rs` | The generated API's implementation: the exchange (profiles, Cloudflare tokens and R2 credentials through [cloudflare-rs](https://github.com/cf-contrib/cloudflare-rs), the broker's own tokens), revocation, discovery, the keys, and the cleanup the cron runs. |
+| `src/service/handler.rs` | The generated API's implementation: the exchange (profiles, Cloudflare tokens and R2 credentials through [cloudflare-rs](https://github.com/cf-contrib/cloudflare-rs), the broker's own tokens), revocation, the RFC 8414 metadata, the keys, and the cleanup the cron runs. |
 
 ## Development
 
