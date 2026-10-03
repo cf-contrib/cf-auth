@@ -391,6 +391,11 @@ pub struct ProviderConfig {
     /// Where its keys are. `None` means its metadata says.
     #[serde(default)]
     pub jwks_uri: Option<String>,
+    /// The `typ` its tokens must have (RFC 8725 §3.11), such as `at+jwt` for
+    /// another broker's access tokens, so another kind of token its issuer
+    /// signs can't pass for one. `None` takes any.
+    #[serde(default)]
+    pub typ: Option<String>,
     /// Every token from it must match one of these, whichever profile it gets.
     pub claims: ClaimRules,
 }
@@ -407,6 +412,10 @@ impl Provider for ProviderConfig {
 
     fn jwks_uri(&self) -> Option<&str> {
         self.jwks_uri.as_deref()
+    }
+
+    fn typ(&self) -> Option<&str> {
+        self.typ.as_deref()
     }
 }
 
@@ -444,6 +453,9 @@ impl ProviderConfig {
     fn check(&self, at: &str) -> Result<(), String> {
         // Its issuer, jwks_uri and audience are the providers' check.
         check_name(&self.name).map_err(|why| format!("{at}.name {why}"))?;
+        if self.typ.as_deref().is_some_and(str::is_empty) {
+            return Err(format!("{at}.typ must not be empty"));
+        }
         // Guardrail 1: the provider is pinned. An issuer that gives anyone's
         // projects a token, as GitHub Actions does, would otherwise let them
         // all in.
@@ -1722,5 +1734,14 @@ pub(super) mod tests {
             pick("Nope", CLOUDFLARE_ACCOUNT_SCOPE),
             Err("no permission group is named Nope".into())
         );
+    }
+
+    #[test]
+    fn a_provider_may_name_the_typ_its_tokens_must_have() {
+        let typed = parse(&with("/providers/0/typ", json!("at+jwt")));
+        assert_eq!(Provider::typ(&typed.providers[0]), Some("at+jwt"));
+        assert_eq!(Provider::typ(&parse(&policy()).providers[0]), None);
+        let err = parse_err(&with("/providers/0/typ", json!("")));
+        assert!(err.contains("providers[0].typ must not be empty"), "{err}");
     }
 }

@@ -911,6 +911,19 @@ mod providers {
         assert_eq!(res.json()["profile"], "pinned-cache");
     }
 
+    #[tokio::test]
+    async fn refuses_a_token_without_the_typ_its_provider_names() {
+        let t = start().await;
+        let typed = gitlab_token(&issuer("typed"), gitlab_claims(json!({})));
+        let res = job_token(&typed, &[("audience", CACHE)]).await;
+        assert_eq!(res.status, 400, "{}", res.text);
+        assert_refused(
+            &t.deny().await,
+            "invalid_request",
+            "invalid token: typ must be at+jwt",
+        );
+    }
+
     /// Any claim can fill a bucket prefix, not only GitHub's: GitLab's
     /// `project_path` spans segments, as the template's one placeholder.
     #[tokio::test]
