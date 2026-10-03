@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.9.0](https://github.com/cf-contrib/cf-oidc-exchange/compare/v0.8.0...v0.9.0) (2026-10-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* workflows pass the broker's URL as url, not broker-url, and a token exchange's requested_token_type and issued_token_type for R2 credentials are urn:cf-oidc-exchange:params:oauth:token-type:r2-credentials.
+* log lines have level, event and the event's fields; the matched claims are in claims, and expires_on is expires_at.
+* the Worker takes its policy from the CF_OIDC_EXCHANGE_API_POLICY variable, at most 5 KB, which the Terraform module binds; releases no longer have entry.js, and index.js is the main module. A bad policy is logged as its first problem. Unknown routes are a bare 404, and the wrong method a 405.
+* policies are version 3, with claims as lists of claim sets; versions 1 and 2 are refused. The access_token subject token type and the repository parameter are gone from /oauth/token, which no longer answers 404.
+* the Worker reads its Cloudflare token from CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN, and the Terraform module takes it as cloudflare_token_secret instead of broker_token_secret.
+* an invalid policy, an unset account or a broker token that isn't a Secrets Store binding now fails every request with 500 misconfigured, /health/live and /health/ready included, with why logged, rather than only the API's routes.
+* error bodies are { "error": code, "message": ... }, as in cf-nix-cache, and the internal code is internal_error. For a caller's own mistake the message says what was wrong; for a fault of the broker's it's generic, with why in the logs. Audit lines record error and message instead of reason and detail.
+* GET /healthz is gone. GET /health/live answers 200 while the Worker serves; GET /health/ready answers 200, or 503 with no body when the policy or a secret is wrong or the check takes over 2s.
+* the repository is cf-contrib/cf-oidc-exchange, so the action is uses: cf-contrib/cf-oidc-exchange@<version> and the Terraform module's source is .../cf-oidc-exchange.git//deployment/terraform. The Worker's bindings are CF_OIDC_EXCHANGE_API_ACCOUNT_ID, CF_OIDC_EXCHANGE_API_BROKER_TOKEN and CF_OIDC_EXCHANGE_API_SIGNING_KEY (the module sets them). The module's default worker_name is cf-oidc-exchange: set worker_name = "cf-auth" to keep an existing workers.dev hostname.
+* the broker is the Rust Worker. Its token exchange and revocation take form-encoded bodies only, as RFC 8693 and RFC 7009 have it; JSON is refused with 400. The Terraform module moved from //packages/cf-oidc-broker/terraform to //deployment/terraform; broker_file is now worker_dir (a worker-build directory) and broker_sha256 is now checksums_sha256 (the SHA-256 of the release's SHA256SUMS). Releases no longer attach broker.js.
+
+### Features
+
+* cf-oidc-jwt, OIDC token verification for Workers ([4b549e7](https://github.com/cf-contrib/cf-oidc-exchange/commit/4b549e7fcbe7615a07f63feb76bb3b276024d6be))
+* OIDC only, with cf-nix-cache's claim sets ([d7b0809](https://github.com/cf-contrib/cf-oidc-exchange/commit/d7b08097df1d568a11126cb92fa15d78c746585c))
+* port the policy to Rust ([c341106](https://github.com/cf-contrib/cf-oidc-exchange/commit/c341106f482108c04db5ac70d22adafe12a3419c))
+* release and deploy the Rust Worker, and remove the TypeScript broker ([9da105c](https://github.com/cf-contrib/cf-oidc-exchange/commit/9da105ccfa4bcc4214656752d4f60f910596236c))
+* rename cf-oidc-auth to cf-oidc-exchange ([085f5d9](https://github.com/cf-contrib/cf-oidc-exchange/commit/085f5d9159c4dd1c3140715aca60af0df966fee5))
+* the action's input is url, and R2 credentials' token type cf-oidc-exchange's ([bf33175](https://github.com/cf-contrib/cf-oidc-exchange/commit/bf331752364019088e1d87a3c93483f2476df87e))
+* the broker's flows in the Rust Worker ([a847ab9](https://github.com/cf-contrib/cf-oidc-exchange/commit/a847ab959e3c327ae4f2a8d6d55a9d45debf2372))
+
+
+### Code Refactoring
+
+* health endpoints from the SDK, like grpc-rust-template ([d38fdbd](https://github.com/cf-contrib/cf-oidc-exchange/commit/d38fdbde6aa9b96b13aab4b18e7321fd7624ee3b))
+* lay the Worker out as cf-nix-cache-api's ([3e816b1](https://github.com/cf-contrib/cf-oidc-exchange/commit/3e816b1bf8774c16ea95990c39c8e8f2ba266ecf))
+* log with tracing, as JSON lines ([96ee8c0](https://github.com/cf-contrib/cf-oidc-exchange/commit/96ee8c06ab4692a782e0db6fa082324b68a89e18))
+* name the broker token the Cloudflare token, and keep the policy in the config ([c9380eb](https://github.com/cf-contrib/cf-oidc-exchange/commit/c9380eb29207ccd41789212f2a3964b2e1d690b3))
+* read the bindings into a Config, as cf-nix-cache does ([c3ede99](https://github.com/cf-contrib/cf-oidc-exchange/commit/c3ede993b8e9406feca3f6fccc682388b2e2fa2e))
+* the handler as cf-nix-cache's, with the spec's errors ([3f97217](https://github.com/cf-contrib/cf-oidc-exchange/commit/3f9721744448570657067b3ae9c020b972bdc47a))
+
 ## [0.8.0](https://github.com/cf-contrib/cf-oidc-auth/compare/v0.7.0...v0.8.0) (2026-10-02)
 
 
