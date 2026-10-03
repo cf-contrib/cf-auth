@@ -100,13 +100,11 @@ impl ExchangeServiceHandler {
         let mut expired = Vec::new();
         for page in 1.. {
             let tokens = cloudflare
-                .account_api_tokens_list_tokens(
-                    account_id,
-                    Some(page as f64),
-                    Some(PAGE_SIZE as f64),
-                    None,
-                    Some(true),
-                )
+                .accounts_tokens_list_builder(account_id)
+                .page(page as f64)
+                .per_page(PAGE_SIZE as f64)
+                .include_expired(true)
+                .send()
                 .await
                 .map_err(|err| upstream("tokens.list", err))?
                 .result
@@ -131,10 +129,7 @@ impl ExchangeServiceHandler {
 
         let mut deleted = 0;
         for (id, name, expires_on) in expired {
-            match cloudflare
-                .account_api_tokens_delete_token(account_id, &id)
-                .await
-            {
+            match cloudflare.accounts_tokens_delete(account_id, &id).await {
                 Ok(_) => {
                     deleted += 1;
                     info!(
@@ -242,7 +237,7 @@ impl ExchangeServiceHandler {
         let mut token = None;
         if let Some(config) = &profile.token {
             let groups = cloudflare
-                .account_api_tokens_list_permission_groups(account_id, None::<&str>, None::<&str>)
+                .accounts_tokens_permission_groups_list(account_id, None::<&str>, None::<&str>)
                 .await
                 .map_err(|err| upstream("permissionGroups.list", err))?
                 .result
@@ -258,7 +253,7 @@ impl ExchangeServiceHandler {
                 policies,
             };
             let created = cloudflare
-                .account_api_tokens_create_token(account_id, payload)
+                .accounts_tokens_create(account_id, payload)
                 .await
                 .map_err(|err| upstream("tokens.create", err))?
                 .result;
@@ -288,7 +283,7 @@ impl ExchangeServiceHandler {
         if !buckets.is_empty() {
             let r2 = async {
                 let parent_access_key_id = cloudflare
-                    .account_api_tokens_verify_token(account_id)
+                    .accounts_tokens_verify(account_id)
                     .await
                     .map_err(|err| upstream("tokens.verify", err))?
                     .result
@@ -311,7 +306,7 @@ impl ExchangeServiceHandler {
                         ttl_seconds: (ttl / 1000) as f64,
                     };
                     let credentials = cloudflare
-                        .r2_create_temp_access_credentials(account_id, request)
+                        .r2_temporary_credentials_create(account_id, request)
                         .await
                         .map_err(|err| upstream("temporaryCredentials.create", err))?
                         .result;
@@ -349,7 +344,7 @@ impl ExchangeServiceHandler {
                 // Best effort: the cleanup is the fallback.
                 if let Some((token_id, _, _)) = &token {
                     match cloudflare
-                        .account_api_tokens_delete_token(account_id, token_id)
+                        .accounts_tokens_delete(account_id, token_id)
                         .await
                     {
                         Ok(_) => info!(event = "token.revoke", token_id, reason = "discarded"),
@@ -556,7 +551,7 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                     .with_base_url(self.config.cloudflare_url())
                     .with_api_key(&request.token);
                 let status = |err: &ApiOpError<_>| err.api().map(|api| api.status);
-                let id = match presenter.account_api_tokens_verify_token(account_id).await {
+                let id = match presenter.accounts_tokens_verify(account_id).await {
                     Ok(verified) => match verified.result {
                         Some(result) => result.id,
                         None => return Ok(Revoked::Gone),
@@ -568,10 +563,7 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                 };
 
                 let cloudflare = self.cloudflare().await?;
-                let name = match cloudflare
-                    .account_api_tokens_token_details(account_id, &id)
-                    .await
-                {
+                let name = match cloudflare.accounts_tokens_get(account_id, &id).await {
                     Ok(details) => details.result.and_then(|token| token.name),
                     Err(err) if err.api().is_some_and(|api| api.status == 404) => {
                         return Ok(Revoked::Gone);
@@ -582,10 +574,7 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                     return Ok(Revoked::NotMinted(id));
                 }
 
-                match cloudflare
-                    .account_api_tokens_delete_token(account_id, &id)
-                    .await
-                {
+                match cloudflare.accounts_tokens_delete(account_id, &id).await {
                     Ok(_) => Ok(Revoked::Deleted(id)),
                     Err(err) if err.api().is_some_and(|api| api.status == 404) => {
                         Ok(Revoked::Deleted(id))

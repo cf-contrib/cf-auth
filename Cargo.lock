@@ -287,7 +287,7 @@ dependencies = [
  "http-body-util",
  "jsonschema",
  "mime",
- "openapi-to-rust",
+ "openapi-to-rust 0.19.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "reqwest",
  "reqwest-middleware",
  "serde",
@@ -338,14 +338,14 @@ dependencies = [
 [[package]]
 name = "cloudflare"
 version = "0.1.0"
-source = "git+https://github.com/cf-contrib/cloudflare-rs?rev=bf8bd31bf2b456b6bc99d9e2171debf591d992e0#bf8bd31bf2b456b6bc99d9e2171debf591d992e0"
+source = "git+https://github.com/cf-contrib/cloudflare-rs?rev=68bef2d94dfc2e827c34a1a78037f1ae54532f5f#68bef2d94dfc2e827c34a1a78037f1ae54532f5f"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "futures-timer",
  "futures-util",
- "openapi-to-rust",
+ "openapi-to-rust 0.19.0 (git+https://github.com/gpu-cli/openapi-to-rust?rev=2e1f1db4ea41642845dc8c122d1dcf34d2159351)",
  "reqwest",
  "reqwest-middleware",
  "serde",
@@ -1330,6 +1330,30 @@ name = "openapi-to-rust"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74cf927974e47ed51bfcac4623ef24c82a4fd67a2a26405f8ae12767aca96128"
+dependencies = [
+ "heck",
+ "jsonschema",
+ "once_cell",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_json_path",
+ "serde_path_to_error",
+ "serde_yaml",
+ "syn 2.0.119",
+ "thiserror",
+ "toml",
+ "toml_edit",
+ "url",
+]
+
+[[package]]
+name = "openapi-to-rust"
+version = "0.19.0"
+source = "git+https://github.com/gpu-cli/openapi-to-rust?rev=2e1f1db4ea41642845dc8c122d1dcf34d2159351#2e1f1db4ea41642845dc8c122d1dcf34d2159351"
 dependencies = [
  "heck",
  "jsonschema",
