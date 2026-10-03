@@ -1,11 +1,14 @@
-//! Claim sets: what a token's claims must be for a provider to take it.
+//! Claim rules: what a JWT's claims must be for a provider to take it. Our
+//! policy, not any RFC's: [`authorize`](crate::authorize) applies them to a
+//! token [`verify`](crate::verify) accepted.
 
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-/// Claim name to pattern. Matches when every claim matches.
+/// Claim name to pattern: a rule a JWT Claims Set matches when every claim
+/// it names does. Configurations call a list of them a provider's claim sets.
 ///
 /// Written as a JSON object: `{ "repository_owner_id": "100000001", "ref":
 /// "refs/heads/*" }`. Each value is a non-empty string, a number or a
@@ -13,9 +16,9 @@ use serde_json::{Map, Value};
 /// `*_id` claims must match exactly.
 #[derive(Debug, Deserialize)]
 #[serde(try_from = "Map<String, Value>")]
-pub struct ClaimSet(BTreeMap<String, Pattern>);
+pub struct ClaimRule(BTreeMap<String, Pattern>);
 
-impl TryFrom<Map<String, Value>> for ClaimSet {
+impl TryFrom<Map<String, Value>> for ClaimRule {
     type Error = String;
 
     fn try_from(raw: Map<String, Value>) -> Result<Self, String> {
@@ -52,8 +55,9 @@ impl TryFrom<Map<String, Value>> for ClaimSet {
     }
 }
 
-impl ClaimSet {
-    /// Whether `claims` match every claim in the set.
+impl ClaimRule {
+    /// Whether `claims` match every claim in the rule. A [`Claims`](crate::Claims)
+    /// derefs to the map this takes.
     pub fn matches(&self, claims: &Map<String, Value>) -> bool {
         self.0
             .iter()
@@ -122,7 +126,7 @@ mod tests {
 
     use super::*;
 
-    fn set(value: Value) -> Result<ClaimSet, String> {
+    fn rule(value: Value) -> Result<ClaimRule, String> {
         serde_json::from_value(value).map_err(|err| err.to_string())
     }
 
@@ -142,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad_claim_sets() {
+    fn rejects_bad_rules() {
         let cases = [
             (json!({}), "a claim set must match at least one claim"),
             (
@@ -158,7 +162,7 @@ mod tests {
             (json!({ "ref": "refs/**" }), "may only end a pattern"),
         ];
         for (value, expected) in cases {
-            let err = set(value.clone()).unwrap_err();
+            let err = rule(value.clone()).unwrap_err();
             assert!(err.contains(expected), "{value}: {err}");
         }
     }
@@ -181,19 +185,20 @@ mod tests {
 
     #[test]
     fn needs_every_claim_to_match() {
-        let set = set(json!({ "repository": "example-org/*", "ref": "refs/heads/main" })).unwrap();
-        assert!(set.matches(&claims()));
+        let rule =
+            rule(json!({ "repository": "example-org/*", "ref": "refs/heads/main" })).unwrap();
+        assert!(rule.matches(&claims()));
 
         let mut other_ref = claims();
         other_ref.insert("ref".into(), "refs/heads/dev".into());
-        assert!(!set.matches(&other_ref));
+        assert!(!rule.matches(&other_ref));
         other_ref.remove("ref");
-        assert!(!set.matches(&other_ref), "a missing claim never matches");
+        assert!(!rule.matches(&other_ref), "a missing claim never matches");
     }
 
     #[test]
     fn matches_lists_numbers_and_booleans() {
-        let matches = |value: Value| set(value).unwrap().matches(&claims());
+        let matches = |value: Value| rule(value).unwrap().matches(&claims());
         assert!(
             matches(json!({ "groups": "cache-uploaders" })),
             "a list matches if any entry does"

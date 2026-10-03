@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use cf_oidc_core::{ClaimSet, Provider, check_url};
+use cf_oidc_core::{ClaimRule, Provider, check_url};
 use cloudflare::v4::{
     HttpClient, IamEffect, IamPermissionGroup,
     IamPermissionsGroupResponseCollectionResultItem as PermissionGroup,
@@ -378,7 +378,7 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub jwks_uri: Option<String>,
     /// Every token from it must match one of these, whichever profile it gets.
-    pub claims: Vec<ClaimSet>,
+    pub claims: Vec<ClaimRule>,
 }
 
 /// What the auth layer verifies a token from it against.
@@ -393,10 +393,6 @@ impl Provider for ProviderConfig {
 
     fn jwks_uri(&self) -> Option<&str> {
         self.jwks_uri.as_deref()
-    }
-
-    fn claims(&self) -> &[ClaimSet] {
-        &self.claims
     }
 }
 
@@ -413,7 +409,7 @@ impl ProviderConfig {
         self.claims
             .iter()
             .chain(profile)
-            .flat_map(ClaimSet::names)
+            .flat_map(ClaimRule::names)
             .filter_map(|name| {
                 let value = claims.get(name).filter(|v| copyable(v))?;
                 Some((name.to_string(), value.clone()))
@@ -458,7 +454,7 @@ pub struct ProfileConfig {
     #[serde(default = "cloudflare_audience")]
     pub audience: String,
     /// A token must match one of these, as well as one of its provider's.
-    pub claims: Vec<ClaimSet>,
+    pub claims: Vec<ClaimRule>,
     /// For everything it hands out, the token and the buckets' credentials,
     /// in milliseconds. Taken from the defaults when unset.
     #[serde(default, deserialize_with = "duration")]
