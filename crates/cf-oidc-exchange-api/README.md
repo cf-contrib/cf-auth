@@ -70,8 +70,8 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 The hourly cron (`17 * * * *` in the examples) deletes expired `cf-oidc:*` tokens.
 
 The Terraform module renders your `policy.yaml` to JSON and binds it, so the
-policy changes with a deploy and rolls back with it. `wrangler dev` takes it from
-`wrangler.toml`.
+policy changes with a deploy and rolls back with it. Under `wrangler dev`, it's
+the integration tests' policy in `wrangler.toml`.
 
 The bindings are read on every request. An unset account, an invalid policy or a
 Cloudflare token outside Secrets Store is a `500` on every route, the health
@@ -478,21 +478,23 @@ The crate is laid out as cf-nix-cache's Worker is:
 
 ## Development
 
-`nix develop` at the repository root has the toolchain. `wrangler dev` serves the
-Worker with the policy in `wrangler.toml`.
+`nix develop` at the repository root has the toolchain.
 
 `cargo test` runs the unit tests. The integration tests run the Worker under
-`wrangler dev`, built with the `stand-ins` feature, against stand-ins for the
-OIDC issuers and Cloudflare that the tests serve and control:
+`wrangler dev` against stand-ins for the OIDC issuers and Cloudflare that the
+tests serve and control:
 
 ```sh
 tests/run.sh
 ```
 
-It creates made-up secrets in a local Secrets Store, starts `wrangler dev` with
-`wrangler.test.toml`, and its policy, on port 8790, serves the stand-ins on
-8791, and runs the tests one at a time. A `stand-ins` build takes Cloudflare's
-API from `CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL`; a release build never reads it.
+It creates made-up secrets in a local Secrets Store, starts `wrangler dev` on
+port 8790, serves the stand-ins on 8791, and runs the tests one at a time.
+`wrangler.toml` is that setup, as in cf-nix-cache: a build with the
+`stand-ins` feature, which takes Cloudflare's API from
+`CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL` (a release build never reads it), and a
+policy whose providers are the stand-ins' issuers. So a plain `wrangler dev`
+serves it too, against the stand-ins while the tests run.
 
 ## License
 
