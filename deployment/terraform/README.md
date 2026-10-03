@@ -7,7 +7,7 @@
 
 ```hcl
 module "cf_oidc_broker" {
-  source = "git::https://github.com/cf-contrib/cf-oidc-exchange.git//deployment/terraform?ref=v0.8.0" # x-release-please-version
+  source = "git::https://github.com/cf-contrib/cf-oidc-exchange.git//deployment/terraform?ref=v0.9.0" # x-release-please-version
 
   account_id          = var.account_id
   hostname            = "cf-oidc-exchange.example.workers.dev"
@@ -132,7 +132,7 @@ fails if a download doesn't match `SHA256SUMS`. To pin the artifacts too, set
 `checksums_sha256` to the SHA-256 of the release's `SHA256SUMS`:
 
 ```sh
-curl -fsSL https://github.com/cf-contrib/cf-oidc-exchange/releases/download/v0.8.0/SHA256SUMS | sha256sum # x-release-please-version
+curl -fsSL https://github.com/cf-contrib/cf-oidc-exchange/releases/download/v0.9.0/SHA256SUMS | sha256sum # x-release-please-version
 ```
 
 Set `release_tag = "latest"` to track the newest release instead.
