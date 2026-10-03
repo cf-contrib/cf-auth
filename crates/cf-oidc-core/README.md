@@ -91,8 +91,8 @@ cache doesn't know refetches them at most every 30 seconds. A token without a
 `kid` takes the issuer's only key. Verified tokens are cached per isolate by
 the token's SHA-256, at most 1024 of them.
 
-The source follows the RFCs' layers: `jwt` is the token format (RFC 7515,
-7519, 9068) and knows nothing of providers; `jwk` and `metadata` are an
-issuer's keys (RFC 7517) and where they are (OpenID Connect Discovery, RFC
-8414); `provider` verifies, with `cache` holding what's kept per isolate;
-`policy` is the claim rules; `signing` issues; `webcrypto` does RS256 for both.
+The source is split by role, then by the RFCs' layers within it: `jwt` is
+the token format both roles share (RFC 7515, 7519, 9068) and knows nothing of
+providers; `verify` is the resource server's side, with an issuer's `keys`
+(RFC 7517), its `metadata` (OpenID Connect Discovery, RFC 8414) and the claim
+rules' `policy`; `sign` is the issuer's side; `webcrypto` does RS256 for both.
