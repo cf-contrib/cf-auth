@@ -1,48 +1,22 @@
-//! RS256 through the runtime's WebCrypto: verifying an issuer's signatures,
-//! and signing tokens, for a Worker that issues its own. No RSA crate ends up
-//! in the wasm, and a signing key never leaves WebCrypto.
-
-use std::fmt;
+//! Issuing tokens: a [`SigningKey`], an RSA key imported into WebCrypto,
+//! signs JWTs and RFC 9068 access tokens with RS256, and publishes its public
+//! half for a JWK Set.
 
 use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use serde_json::{Map, Value, json};
-use web_sys::{CryptoKey, SubtleCrypto, WorkerGlobalScope};
+use web_sys::CryptoKey;
 use worker::{
     js_sys::{self, Uint8Array},
     wasm_bindgen::{JsCast, JsValue},
-    wasm_bindgen_futures::JsFuture,
 };
 
-use crate::{AccessTokenClaims, Claims};
-
-/// What tokens are signed with, and what OIDC verifiers support by default.
-pub const ALGORITHM: &str = "RS256";
-
-/// The `typ` of a JWT (RFC 7519 §5.1).
-pub const JWT: &str = "JWT";
-
-/// The `typ` of a JWT access token (RFC 9068 §2.1): what a resource server
-/// names as its [`Provider::typ`](crate::Provider::typ) to take nothing else.
-pub const AT_JWT: &str = "at+jwt";
+use crate::{ALGORITHM, AT_JWT, AccessTokenClaims, Claims, JWT, KeyError, webcrypto};
 
 /// The smallest RSA key accepted, as NIST requires.
 const MIN_MODULUS_BITS: usize = 2048;
-
-/// What WebCrypto refused: a key that can't be imported, or a signature it
-/// can't make or check.
-#[derive(Clone, Debug, PartialEq)]
-pub struct KeyError(String);
-
-impl fmt::Display for KeyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for KeyError {}
 
 /// An RSA private key, imported into WebCrypto to sign tokens with RS256.
 pub struct SigningKey {
@@ -75,22 +49,24 @@ impl SigningKey {
         let not_rsa = || KeyError("not an RSA private key in PKCS#8 PEM".to_string());
         let der = pkcs8_der(pem).ok_or_else(not_rsa)?;
 
-        let subtle = subtle()?;
+        let subtle = webcrypto::subtle()?;
         let usages = js_sys::Array::of1(&JsValue::from_str("sign"));
         // Extractable, so its public half can be exported to publish.
         let imported = subtle.import_key_with_object(
             "pkcs8",
             &Uint8Array::from(&der[..]),
-            &rs256()?,
+            &webcrypto::rs256()?,
             true,
             &usages,
         );
-        let key: CryptoKey = promised(imported)
+        let key: CryptoKey = webcrypto::promised(imported)
             .await
             .map_err(|_| not_rsa())?
             .unchecked_into();
-        let jwk = promised(subtle.export_key("jwk", &key)).await?;
-        let jwk: String = js_sys::JSON::stringify(&jwk).map_err(webcrypto)?.into();
+        let jwk = webcrypto::promised(subtle.export_key("jwk", &key)).await?;
+        let jwk: String = js_sys::JSON::stringify(&jwk)
+            .map_err(webcrypto::error)?
+            .into();
         let jwk: Value = serde_json::from_str(&jwk).unwrap_or_default();
         let (Some(n), Some(e)) = (jwk["n"].as_str(), jwk["e"].as_str()) else {
             return Err(not_rsa());
@@ -106,7 +82,7 @@ impl SigningKey {
         // whitespace.
         let canonical = format!(r#"{{"e":"{e}","kty":"RSA","n":"{n}"}}"#);
         let digest =
-            promised(subtle.digest_with_str_and_buffer_source(
+            webcrypto::promised(subtle.digest_with_str_and_buffer_source(
                 "SHA-256",
                 &Uint8Array::from(canonical.as_bytes()),
             ))
@@ -153,8 +129,7 @@ impl SigningKey {
     }
 
     async fn sign_typed(&self, typ: &str, claims: Claims) -> Result<SignedToken, KeyError> {
-        let scope = js_sys::global().unchecked_into::<WorkerGlobalScope>();
-        let jti = scope.crypto().map_err(webcrypto)?.random_uuid();
+        let jti = webcrypto::random_uuid()?;
         let mut claims: Map<String, Value> = claims.into();
         claims.insert("jti".to_string(), json!(jti));
 
@@ -164,78 +139,19 @@ impl SigningKey {
             URL_SAFE_NO_PAD.encode(header.to_string()),
             URL_SAFE_NO_PAD.encode(Value::Object(claims).to_string())
         );
-        let signature = promised(subtle()?.sign_with_object_and_buffer_source(
-            &rs256()?,
-            &self.key,
-            &Uint8Array::from(signing_input.as_bytes()),
-        ))
-        .await?;
+        let signature =
+            webcrypto::promised(webcrypto::subtle()?.sign_with_object_and_buffer_source(
+                &webcrypto::rs256()?,
+                &self.key,
+                &Uint8Array::from(signing_input.as_bytes()),
+            ))
+            .await?;
         let signature = URL_SAFE_NO_PAD.encode(Uint8Array::new(&signature).to_vec());
         Ok(SignedToken {
             jwt: format!("{signing_input}.{signature}"),
             jti,
         })
     }
-}
-
-/// Verifies an RS256 (RSASSA-PKCS1-v1_5 with SHA-256) signature with the RSA
-/// public key `n` and `e`, base64url. A signature WebCrypto refuses to check,
-/// such as one of the wrong length, doesn't verify.
-pub(crate) async fn verify_rs256(
-    n: &str,
-    e: &str,
-    signing_input: &[u8],
-    signature: &[u8],
-) -> Result<bool, KeyError> {
-    let subtle = subtle()?;
-    let algorithm = rs256()?;
-    let jwk = json!({ "kty": "RSA", "n": n, "e": e, "alg": ALGORITHM });
-    let jwk: js_sys::Object = js_sys::JSON::parse(&jwk.to_string())
-        .map(JsCast::unchecked_into)
-        .map_err(webcrypto)?;
-    let usages = js_sys::Array::of1(&JsValue::from_str("verify"));
-    let key: CryptoKey =
-        promised(subtle.import_key_with_object("jwk", &jwk, &algorithm, false, &usages))
-            .await?
-            .unchecked_into();
-
-    let verified = subtle.verify_with_object_and_buffer_source_and_buffer_source(
-        &algorithm,
-        &key,
-        &Uint8Array::from(signature),
-        &Uint8Array::from(signing_input),
-    );
-    match verified {
-        Ok(promise) => {
-            Ok(JsFuture::from(promise).await.ok().and_then(|v| v.as_bool()) == Some(true))
-        }
-        Err(_) => Ok(false),
-    }
-}
-
-fn webcrypto(err: JsValue) -> KeyError {
-    let why = err
-        .dyn_ref::<js_sys::Error>()
-        .map(|err| String::from(err.message()))
-        .unwrap_or_else(|| format!("{err:?}"));
-    KeyError(format!("WebCrypto: {why}"))
-}
-
-fn subtle() -> Result<SubtleCrypto, KeyError> {
-    let scope = js_sys::global().unchecked_into::<WorkerGlobalScope>();
-    Ok(scope.crypto().map_err(webcrypto)?.subtle())
-}
-
-async fn promised(promise: Result<js_sys::Promise, JsValue>) -> Result<JsValue, KeyError> {
-    JsFuture::from(promise.map_err(webcrypto)?)
-        .await
-        .map_err(webcrypto)
-}
-
-fn rs256() -> Result<js_sys::Object, KeyError> {
-    js_sys::JSON::parse(r#"{"name":"RSASSA-PKCS1-v1_5","hash":"SHA-256"}"#)
-        .map(JsCast::unchecked_into)
-        .map_err(webcrypto)
 }
 
 /// The DER inside a PKCS#8 PEM.

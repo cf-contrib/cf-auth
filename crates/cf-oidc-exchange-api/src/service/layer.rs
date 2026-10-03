@@ -142,8 +142,8 @@ where
             // it runs in a `SendFuture`.
             let policy = config.policy();
             let accepted = SendFuture::new(async {
-                let (provider, jwt) = cf_oidc_core::verify(&token, &policy.providers).await?;
-                cf_oidc_core::authorize(&jwt.claims, &provider.claims)
+                let (provider, jwt) = policy.providers.verify(&token).await?;
+                provider.claims.authorize(&jwt.claims)
             });
             match accepted.await {
                 Ok(_) => inner.call(req).await,
@@ -177,8 +177,7 @@ fn refuse(policy: &PolicyConfig, err: cf_oidc_core::Error) -> Response {
             // Named as the policy names it.
             let provider = policy
                 .providers
-                .iter()
-                .find(|provider| provider.issuer == issuer)
+                .find(&issuer)
                 .map_or(issuer.as_str(), |provider| provider.name.as_str());
             let message = format!("the token matches none of provider {provider}'s claim sets");
             warn!(
