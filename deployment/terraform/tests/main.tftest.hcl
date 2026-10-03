@@ -1,7 +1,7 @@
 # Plans the module with mocked providers: no credentials or network needed.
 # Covers the broker token binding, URL modes, the release and local artifacts, their
-# checksums, the policy template and its size,
-# and bucket prefix placeholders.
+# checksums, and the policy the module builds from its variables: what it fills
+# in, what it leaves out, and its size.
 mock_provider "cloudflare" {}
 mock_provider "github" {}
 mock_provider "http" {}
@@ -75,7 +75,19 @@ variables {
   cloudflare_token_secret = { secret_store_id = "00000000000000000000000000000000", secret_name = "cf-oidc-exchange-cloudflare-token" }
   account_id              = "0123456789abcdef0123456789abcdef"
   hostname                = "cf-oidc-exchange.example.workers.dev"
-  policy_file             = "tests/fixtures/policy.yaml"
+  oidc_providers = [
+    { name = "github", issuer = "https://token.actions.githubusercontent.com", claims = [{ repository_owner_id = "100000001" }] },
+  ]
+  profiles = [
+    {
+      name   = "workers-deploy"
+      claims = [{ repository_id = "200000002", ref = "refs/heads/main", environment = "prod" }]
+      token = { policies = [{
+        permissions = ["Workers Scripts Write"]
+        resources   = { "com.cloudflare.api.account.0123456789abcdef0123456789abcdef" = "*" }
+      }] }
+    },
+  ]
 }
 
 run "secrets_store_binding" {
@@ -121,23 +133,88 @@ run "signing_key_binding" {
   }
 }
 
-run "policy_is_templated" {
+run "policy_is_built_from_the_variables" {
   command = plan
 
   assert {
     condition = anytrue([
       for b in cloudflare_worker_version.this.bindings :
-      b.name == "CF_OIDC_EXCHANGE_API_POLICY" && b.type == "plain_text" && strcontains(b.text, "com.cloudflare.api.account.0123456789abcdef0123456789abcdef")
+      b.name == "CF_OIDC_EXCHANGE_API_POLICY" && b.type == "plain_text" && b.text == local.policy_json
     ])
-    error_message = "the policy should be a plain_text binding with account_id filled in"
+    error_message = "the policy should be a plain_text binding"
   }
+
+  assert {
+    condition     = jsondecode(local.policy_json).version == 3 && jsondecode(local.policy_json).profiles[0].name == "workers-deploy"
+    error_message = "the policy should be version 3, with the profiles as given"
+  }
+
+  assert {
+    condition     = !contains(keys(jsondecode(local.policy_json).providers[0]), "jwks_uri") && !contains(keys(jsondecode(local.policy_json).providers[0]), "typ") && !contains(keys(jsondecode(local.policy_json)), "defaults")
+    error_message = "unset fields should be left out, not null: the broker refuses a null"
+  }
+}
+
+run "takes_a_providers_own_audience_jwks_uri_typ_and_defaults" {
+  command = plan
+
+  variables {
+    oidc_providers = [
+      { name = "gitlab", issuer = "https://gitlab.com", audience = "https://cf-oidc-exchange.example.com/", jwks_uri = "https://gitlab.com/oauth/discovery/keys", typ = "at+jwt", claims = [{ namespace_id = "4000001" }] },
+    ]
+    defaults = { ttl = "10m" }
+  }
+
+  assert {
+    condition     = jsondecode(local.policy_json).providers[0].audience == "https://cf-oidc-exchange.example.com/" && jsondecode(local.policy_json).providers[0].jwks_uri == "https://gitlab.com/oauth/discovery/keys"
+    error_message = "a provider's own audience and jwks_uri should be kept"
+  }
+
+  assert {
+    condition     = jsondecode(local.policy_json).providers[0].typ == "at+jwt"
+    error_message = "a provider's typ should reach the policy"
+  }
+
+  assert {
+    condition     = jsondecode(local.policy_json).defaults == { ttl = "10m" }
+    error_message = "defaults should hold only what's set"
+  }
+}
+
+run "rejects_a_provider_without_claims" {
+  command = plan
+
+  variables {
+    oidc_providers = [{ name = "github", issuer = "https://token.actions.githubusercontent.com", claims = [] }]
+  }
+
+  expect_failures = [var.oidc_providers]
+}
+
+run "rejects_a_profile_without_claims" {
+  command = plan
+
+  variables {
+    profiles = [{ name = "deploy", claims = [] }]
+  }
+
+  expect_failures = [var.profiles]
 }
 
 run "rejects_a_policy_over_5_kb" {
   command = plan
 
   variables {
-    policy_file = "tests/fixtures/large-policy.yaml"
+    profiles = [
+      for i in range(40) : {
+        name   = "repo-${i}"
+        claims = [{ repository_id = "2000000${i}", ref = "refs/heads/main", environment = "prod" }]
+        token = { policies = [{
+          permissions = ["Workers Scripts Write"]
+          resources   = { "com.cloudflare.api.account.0123456789abcdef0123456789abcdef" = "*" }
+        }] }
+      }
+    ]
   }
 
   expect_failures = [cloudflare_worker_version.this]
@@ -158,7 +235,7 @@ run "workers_dev" {
 
   assert {
     condition     = jsondecode(local.policy_json).issuer == "https://cf-oidc-exchange.example.workers.dev" && jsondecode(local.policy_json).providers[0].audience == "https://cf-oidc-exchange.example.workers.dev"
-    error_message = "the policy audience should be filled in with broker_url"
+    error_message = "the policy's issuer and the provider's audience should be the broker's URL"
   }
 }
 
@@ -311,40 +388,59 @@ run "local_worker_dir" {
   }
 }
 
-run "policy_vars" {
+run "profiles_of_any_shape" {
   command = plan
 
+  # Buckets with the broker's {claim} placeholders, which HCL leaves alone, and
+  # token resources flat in one profile and nested in another.
   variables {
-    policy_file = "tests/fixtures/vars-policy.yaml"
-    policy_vars = { owner_id = "100000001", repository_id = "200000002" }
+    profiles = [
+      {
+        name   = "terraform-state"
+        claims = [{ ref = "refs/heads/main" }]
+        ttl    = "30m"
+        buckets = [{
+          name       = "org-terraform-state"
+          permission = "object-read-write"
+          prefixes   = ["github.com/{repository}/"]
+        }]
+      },
+      {
+        name   = "deploy-with-state"
+        claims = [{ repository_id = "200000002", environment = "prod" }]
+        token = { policies = [{
+          permissions = ["Workers Scripts Write"]
+          resources   = { "com.cloudflare.api.account.0123456789abcdef0123456789abcdef" = "*" }
+        }] }
+        buckets = [{
+          name       = "org-terraform-state"
+          permission = "object-read-write"
+          prefixes   = ["{repository_owner_id}/{repository_id}/"]
+        }]
+      },
+      {
+        name   = "every-zone"
+        claims = [{ environment = "dns" }]
+        token = { policies = [{
+          permissions = ["DNS Write"]
+          resources   = { "com.cloudflare.api.account.0123456789abcdef0123456789abcdef" = { "com.cloudflare.api.account.zone.*" = "*" } }
+        }] }
+      },
+    ]
   }
 
-  assert {
-    condition     = jsondecode(local.policy_json).profiles[0].claims[0].repository_id == "200000002" && jsondecode(local.policy_json).providers[0].claims[0].repository_owner_id == "100000001"
-    error_message = "policy_vars should be filled into the policy"
-  }
-}
-
-run "bucket_prefix_placeholders" {
-  command = plan
-
-  variables {
-    policy_file = "tests/fixtures/buckets-policy.yaml"
-  }
-
-  # templatefile fills in $${…} but must leave the broker's {claim} placeholders alone.
   assert {
     condition     = jsondecode(local.policy_json).profiles[0].buckets[0].prefixes == ["github.com/{repository}/"]
-    error_message = "{repository} should reach the broker unchanged"
+    error_message = "a single-claim placeholder should reach the policy unchanged"
   }
 
   assert {
     condition     = jsondecode(local.policy_json).profiles[1].buckets[0].prefixes == ["{repository_owner_id}/{repository_id}/"]
-    error_message = "{repository_owner_id} and {repository_id} should reach the broker unchanged"
+    error_message = "multi-claim placeholders should reach the policy unchanged"
   }
 
   assert {
-    condition     = jsondecode(local.policy_json).profiles[1].token.policies[0].resources["com.cloudflare.api.account.0123456789abcdef0123456789abcdef"] == "*"
-    error_message = "$${account_id} should still be filled in next to buckets"
+    condition     = jsondecode(local.policy_json).profiles[2].token.policies[0].resources["com.cloudflare.api.account.0123456789abcdef0123456789abcdef"]["com.cloudflare.api.account.zone.*"] == "*"
+    error_message = "nested resources should reach the policy beside flat ones"
   }
 }

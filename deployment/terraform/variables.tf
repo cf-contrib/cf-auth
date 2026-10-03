@@ -46,14 +46,46 @@ variable "signing_key_secret" {
   default     = null
 }
 
-variable "policy_file" {
-  type        = string
-  description = "Path to the policy YAML, rendered as a template with $${account_id}, $${broker_url} and policy_vars. Use an absolute path such as \"$${path.root}/policy.yaml\"."
+variable "oidc_providers" {
+  type = list(object({
+    name     = string
+    issuer   = string
+    audience = optional(string)
+    jwks_uri = optional(string)
+    typ      = optional(string)
+    claims   = list(map(string))
+  }))
+  description = "The OIDC issuers whose tokens the broker takes: the policy's providers. Each has a name for profiles to refer to, its issuer, the audience its tokens must have (the broker's URL by default, which is what the action asks for), optionally where its keys are and the typ its tokens must have (such as at+jwt), and the claim sets every token from it must match one of. See the broker's README."
+
+  validation {
+    condition     = length(var.oidc_providers) > 0
+    error_message = "Name at least one provider."
+  }
+
+  validation {
+    condition     = alltrue([for provider in var.oidc_providers : length(provider.claims) > 0 && alltrue([for set in provider.claims : length(set) > 0])])
+    error_message = "Every provider needs at least one claim set, pinning it to your organization, and no claim set may be empty."
+  }
 }
 
-variable "policy_vars" {
-  type        = map(string)
-  description = "Extra template variables for the policy, e.g. repository IDs looked up with the github provider."
+variable "profiles" {
+  # Untyped: a token policy's resources are flat or nested maps, as Cloudflare
+  # takes them, and no one Terraform type holds both. The broker checks them.
+  type        = any
+  description = "What callers may get: the policy's profiles. A list of objects, each with a name, claim sets, and a token, buckets or a service's audience, as the broker's README describes."
+
+  validation {
+    condition     = try(length(var.profiles) > 0 && alltrue([for profile in var.profiles : length(profile.name) > 0 && length(profile.claims) > 0]), false)
+    error_message = "profiles must be a list of objects, each with a name and at least one claim set."
+  }
+}
+
+variable "defaults" {
+  type = object({
+    ttl     = optional(string)
+    max_ttl = optional(string)
+  })
+  description = "The TTLs of profiles that don't set their own, as durations such as 15m or 1h. Otherwise the broker's own: 15m, and at most 1h."
   default     = {}
 }
 

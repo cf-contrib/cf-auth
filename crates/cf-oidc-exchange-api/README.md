@@ -69,8 +69,9 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
 
 The hourly cron (`17 * * * *` in the examples) deletes expired `cf-oidc:*` tokens.
 
-The Terraform module renders your `policy.yaml` to JSON and binds it, so the
-policy changes with a deploy and rolls back with it. Under `wrangler dev`, it's
+The Terraform module builds the policy from its `oidc_providers`, `profiles`
+and `defaults` variables and binds it, so the policy changes with a deploy and
+rolls back with it. Under `wrangler dev`, it's
 the integration tests' policy in `wrangler.toml`.
 
 The bindings are read on every request. An unset account, an invalid policy or a
@@ -185,6 +186,7 @@ A provider is an OIDC issuer you trust to vouch for a caller. `providers` is a l
 | `issuer` | Required. The tokens' `iss`, exactly. `https://`, or plain `http://` on `127.0.0.1`, `localhost` or `[::1]` for local development. One provider per issuer. |
 | `audience` | Required. The tokens' `aud` must contain it. Use one only the broker accepts, such as its URL: for GitHub Actions, not GitHub's default `https://github.com/<owner>`, so a token requested for AWS or GCP can't be replayed here. |
 | `jwks_uri` | Optional. Otherwise the keys come from the issuer's metadata: its `/.well-known/openid-configuration`, or, if it has none, its RFC 8414 `/.well-known/oauth-authorization-server`, which must name the same issuer. They never come from a URL in the token. |
+| `typ` | Optional. The `typ` its tokens must have ([RFC 8725 §3.11](https://www.rfc-editor.org/rfc/rfc8725#section-3.11)), such as `at+jwt` to take only another broker's access tokens, so another kind of token its issuer signs can't pass for one. Unset takes any. |
 | `claims` | Required: at least one [claim set](#claim-sets). Every token from this provider must match one, whichever profile it gets. |
 
 `audience` is a field, not one of the `claims`, because it says whether the token is meant for the broker at all: it's checked with the signature, `iss` and expiry, before `claims` pick a profile. Either failing is `400` (`invalid_request`), as RFC 8693 has it for a subject token that's invalid or that the policy doesn't take.
@@ -245,7 +247,7 @@ curl -H "Authorization: Bearer <token>" \
 | One zone | `com.cloudflare.api.account.zone.<zone_id>: "*"` |
 | Every zone in the account | `com.cloudflare.api.account.<account_id>: { com.cloudflare.api.account.zone.*: "*" }` |
 
-Keys must start with `com.cloudflare.`, and account keys must name `CF_OIDC_EXCHANGE_API_ACCOUNT_ID`. Add a comment with the zone's name next to each zone ID so reviewers can tell them apart. With the Terraform module, write `${account_id}` and it's filled in from `var.account_id`.
+Keys must start with `com.cloudflare.`, and account keys must name `CF_OIDC_EXCHANGE_API_ACCOUNT_ID`. Add a comment with the zone's name next to each zone ID so reviewers can tell them apart. With the Terraform module, write `"com.cloudflare.api.account.${var.account_id}"`.
 
 ### Buckets
 
@@ -260,7 +262,7 @@ Each entry in `buckets` gets the job [temporary R2 credentials](https://develope
 
 - **Several buckets** each get their own credentials, and the action exports each one as an AWS profile named after the bucket. A bucket can appear only once per profile.
 
-- **Placeholders** are `{claim}`, not `${claim}`, so Terraform's `templatefile` leaves them alone. Any claim can fill one: `{repository}` from GitHub Actions, `{project_path}` from GitLab, `{email}`… They're filled in from the verified token, never from the request.
+- **Placeholders** are `{claim}`, not `${claim}`, so HCL leaves them alone. Any claim can fill one: `{repository}` from GitHub Actions, `{project_path}` from GitLab, `{email}`… They're filled in from the verified token, never from the request.
 - **Prefixes** must end in `/`, so `github.com/org/site/` doesn't also cover `github.com/org/site-old/`. They can't start with `/` or contain `*`, `..`, empty or `.` segments, or control characters, and each placeholder must be a whole path segment (`tfstate/{repository_id}/`, not `tfstate-{repository_id}/`), so two repos can never end up with the same prefix. These are checked when the policy loads.
 - **Claims** filling a placeholder must be a string or a number made of path segments of `A-Z`, `a-z`, `0-9`, `.`, `_` and `-`. A value can span several segments (`example-org/app`) only when it's the template's one placeholder; with several, each must fill exactly one, so two callers can never fill a template to the same prefix. The filled-in prefix is checked again. Otherwise the request is refused (`invalid_request`), before anything is minted.
 - **Without `prefixes`** the credentials cover the whole bucket.
