@@ -55,6 +55,12 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # The integration tests seed rsa 0.9's key generation with rand_chacha,
+      # which must implement the rand_core rsa does: 0.6, so rand_chacha 0.3.
+      # Move both together, once rsa moves to a newer rand_core.
+      - dependency-name: "rand_chacha"
+        versions: [">= 0.4"]
     open-pull-requests-limit: 10
     groups:
       all-cargo:
