@@ -1,24 +1,37 @@
-//! Verifying tokens: the [`Provider`]s whose tokens are accepted, and
-//! [`Providers::verify`], which validates a token as RFC 7519 §7.2 and RFC
-//! 8725 say, against the one its `iss` names.
+//! Verifying tokens, the resource server's side: the [`Provider`]s whose
+//! tokens are accepted, and [`Providers::verify`], which validates a token as
+//! RFC 7519 §7.2 and RFC 8725 say, against the one its `iss` names. Then
+//! [`ClaimRules`] let it in, or not.
 //!
 //! What verifying does with a provider is [`ProviderExt`]'s: implemented for
 //! every [`Provider`], so an implementor can neither override it nor see it.
+//! Its keys are [`keys`]', found through its [`metadata`]. Verified tokens are
+//! cached per isolate until they expire, so [`verified`] can give one back.
 
-use std::ops::Deref;
+mod keys;
+mod metadata;
+mod policy;
+
+use std::{cell::RefCell, collections::HashMap, ops::Deref};
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use worker::Date;
 
-use crate::{
-    Claims, Error, Header, Jwt, cache,
-    cache::Lookup,
-    error::invalid,
-    fetch::{check_url, fetch_json},
-    jwk::{JwkSet, RsaKey},
-    jwt::{LEEWAY_SECS, Unverified},
-    metadata,
+use self::keys::RsaKey;
+pub use self::{
+    keys::check_url,
+    policy::{ClaimRule, ClaimRules},
 };
+use crate::{
+    Claims, Error, Header, Jwt,
+    error::invalid,
+    jwt::{LEEWAY_SECS, Unverified},
+};
+
+thread_local! {
+    static VERIFIED: RefCell<VerifiedCache> = RefCell::new(VerifiedCache::new());
+}
 
 /// An OpenID Provider whose tokens are accepted: the issuer, and what its
 /// tokens must be to be verified. Implement it on your configuration's type.
@@ -59,7 +72,7 @@ pub struct Providers<P>(Vec<P>);
 impl<P: Provider> Providers<P> {
     /// Verifies `token`, a JWT, against the provider its `iss` names: its
     /// header, its signature, then its registered claims. Returns that
-    /// provider and the token, which [`verified`](crate::verified) gives back
+    /// provider and the token, which [`verified`] gives back
     /// until it expires.
     ///
     /// # Errors
@@ -68,7 +81,7 @@ impl<P: Provider> Providers<P> {
     /// [`Error::TemporarilyUnavailable`] when its issuer's keys can't be had.
     pub async fn verify(&self, token: &str) -> Result<(&P, Jwt), Error> {
         let now_ms = Date::now().as_millis();
-        if let Some(jwt) = cache::jwt(token, now_ms) {
+        if let Some(jwt) = cached(token, now_ms) {
             // Its signature holds; its header and claims are checked again,
             // as cheap as that is, against the provider it's from now.
             let provider = self.for_claims(&jwt.claims)?;
@@ -92,7 +105,7 @@ impl<P: Provider> Providers<P> {
 
         if let Some(exp) = jwt.claims.exp() {
             let expires_at = (exp + LEEWAY_SECS) * 1000;
-            cache::store_jwt(token, jwt.clone(), expires_at, now_ms);
+            store(token, jwt.clone(), expires_at, now_ms);
         }
         Ok((provider, jwt))
     }
@@ -176,26 +189,71 @@ trait ProviderExt: Provider {
     }
 
     /// The provider's key that `kid` names, or its only one when there's no
-    /// `kid`: cached, or fetched from its `jwks_uri`.
+    /// `kid`.
     async fn key(&self, kid: Option<&str>, now_ms: u64) -> Result<RsaKey, Error> {
-        let unknown = || invalid("unknown signing key");
-        let issuer = self.issuer();
-        match cache::key(issuer, kid, now_ms) {
-            Lookup::Hit(key) => return Ok(key),
-            Lookup::Unknown => return Err(unknown()),
-            Lookup::Fetch => {}
-        }
-
-        let jwks_uri = match self.jwks_uri() {
-            Some(jwks_uri) => jwks_uri.to_string(),
-            None => metadata::jwks_uri(issuer).await?,
-        };
-        let jwks: JwkSet = fetch_json(&jwks_uri).await?;
-        cache::store_keys(issuer, jwks.rs256_keys(), kid, now_ms).ok_or_else(unknown)
+        keys::find(self.issuer(), self.jwks_uri(), kid, now_ms).await
     }
 }
 
 impl<P: Provider + ?Sized> ProviderExt for P {}
+
+/// `token`, verified, if it's cached and hasn't expired by `now_ms`.
+fn cached(token: &str, now_ms: u64) -> Option<Jwt> {
+    let key = VerifiedCache::key(token);
+    VERIFIED.with_borrow(|cache| cache.get(&key, now_ms))
+}
+
+/// Caches `jwt`, verified from `token`, until `expires_at`.
+fn store(token: &str, jwt: Jwt, expires_at: u64, now_ms: u64) {
+    let key = VerifiedCache::key(token);
+    VERIFIED.with_borrow_mut(|cache| cache.insert(key, jwt, expires_at, now_ms));
+}
+
+/// `token`, if [`Providers::verify`](crate::Providers::verify) accepted it in
+/// this isolate and it hasn't expired since.
+pub fn verified(token: &str) -> Option<Jwt> {
+    cached(token, Date::now().as_millis())
+}
+
+/// Per-isolate cache of verified tokens, keyed by the SHA-256 of the token
+/// so raw tokens are never stored.
+struct VerifiedCache {
+    entries: HashMap<[u8; 32], (u64, Jwt)>,
+}
+
+impl VerifiedCache {
+    /// Upper bound on entries, so a flood of distinct tokens can't grow the
+    /// isolate's memory without limit.
+    const MAX_ENTRIES: usize = 1024;
+
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    fn key(token: &str) -> [u8; 32] {
+        Sha256::digest(token.as_bytes()).into()
+    }
+
+    fn get(&self, key: &[u8; 32], now_ms: u64) -> Option<Jwt> {
+        self.entries
+            .get(key)
+            .filter(|(expires_at, _)| now_ms < *expires_at)
+            .map(|(_, jwt)| jwt.clone())
+    }
+
+    fn insert(&mut self, key: [u8; 32], jwt: Jwt, expires_at: u64, now_ms: u64) {
+        if self.entries.len() >= Self::MAX_ENTRIES {
+            self.entries
+                .retain(|_, (expires_at, _)| now_ms < *expires_at);
+        }
+        if self.entries.len() >= Self::MAX_ENTRIES {
+            self.entries.clear();
+        }
+        self.entries.insert(key, (expires_at, jwt));
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -309,5 +367,30 @@ mod tests {
         ] {
             assert_eq!(check(value.clone()), Err(expected.to_string()), "{value}");
         }
+    }
+
+    fn jwt() -> Jwt {
+        Jwt {
+            header: Header::default(),
+            claims: Claims::default(),
+        }
+    }
+
+    #[test]
+    fn verified_tokens_expire() {
+        let mut cache = VerifiedCache::new();
+        let key = VerifiedCache::key("token");
+        cache.insert(key, jwt(), 100, 0);
+        assert_eq!(cache.get(&key, 99), Some(jwt()));
+        assert_eq!(cache.get(&key, 100), None);
+    }
+
+    #[test]
+    fn verified_tokens_are_bounded() {
+        let mut cache = VerifiedCache::new();
+        for i in 0..=VerifiedCache::MAX_ENTRIES {
+            cache.insert(VerifiedCache::key(&i.to_string()), jwt(), 100, 0);
+        }
+        assert!(cache.entries.len() <= VerifiedCache::MAX_ENTRIES);
     }
 }

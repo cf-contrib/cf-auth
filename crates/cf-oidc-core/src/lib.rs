@@ -27,34 +27,26 @@
 //!
 //! # Modules
 //!
-//! Each holds one layer, as the RFCs draw them:
+//! By role, then by the layers the RFCs draw within it:
 //!
-//! - `jwt`: the token format (RFC 7515, RFC 7519, RFC 9068), which knows
-//!   nothing of providers;
-//! - `jwk` and `metadata`: an issuer's keys (RFC 7517) and where they are
-//!   (OpenID Connect Discovery, RFC 8414), fetched by `fetch`;
-//! - `provider`: verifying, with what's cached in `cache`;
-//! - `policy`: the claim rules;
-//! - `signing`: issuing, with `webcrypto` doing the RS256 for both sides;
+//! - `jwt`: the token format both roles share (RFC 7515, RFC 7519, RFC
+//!   9068), which knows nothing of providers;
+//! - `verify`: the resource server's side: providers and the tokens verified
+//!   from them, their `keys` (RFC 7517) and `metadata` (OpenID Connect
+//!   Discovery, RFC 8414), and the claim rules' `policy`;
+//! - `sign`: the issuer's side;
+//! - `webcrypto`: RS256 for both;
 //! - `error`: what goes wrong.
 
-mod cache;
 mod error;
-mod fetch;
-mod jwk;
 mod jwt;
-mod metadata;
-mod policy;
-mod provider;
-mod signing;
+mod sign;
+mod verify;
 mod webcrypto;
 
 pub use crate::{
-    cache::verified,
     error::{Error, KeyError},
-    fetch::check_url,
     jwt::{ALGORITHM, AT_JWT, AccessTokenClaims, Claims, Header, JWT, Jwt},
-    policy::{ClaimRule, ClaimRules},
-    provider::{Provider, Providers},
-    signing::{SignedToken, SigningKey},
+    sign::{SignedToken, SigningKey},
+    verify::{ClaimRule, ClaimRules, Provider, Providers, check_url, verified},
 };
