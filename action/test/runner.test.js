@@ -61,8 +61,8 @@ describe("idToken", () => {
 
 describe("input", () => {
   it("reads and trims INPUT_* like @actions/core", () => {
-    vi.stubEnv("INPUT_BROKER-URL", "  https://x.example.com \n");
-    expect(input("broker-url")).toBe("https://x.example.com");
+    vi.stubEnv("INPUT_URL", "  https://x.example.com \n");
+    expect(input("url")).toBe("https://x.example.com");
     expect(input("missing")).toBe("");
   });
 });

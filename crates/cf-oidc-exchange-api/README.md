@@ -56,7 +56,7 @@ A job in repo `200000002`, on `main`, in the `prod` environment, gets a 15-minut
    ```sh
    worker-build --release   # then worker_dir = ".../crates/cf-oidc-exchange-api/build"
    ```
-4. **Check** that `<broker-url>/.well-known/oauth-authorization-server` returns `200` (`https://cf-oidc-exchange.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or a binding is wrong; the reasons are in Workers Logs.
+4. **Check** that `<url>/.well-known/oauth-authorization-server` returns `200` (`https://cf-oidc-exchange.<subdomain>.workers.dev`, or your custom domain). A `500` means the policy was rejected or a binding is wrong; the reasons are in Workers Logs.
 
 ## Bindings
 
@@ -354,7 +354,7 @@ curl -sS https://cf-oidc-exchange.example.com/oauth/token \
 | `subject_token` | An OIDC token from a provider's issuer |
 | `subject_token_type` | `urn:ietf:params:oauth:token-type:id_token` or `urn:ietf:params:oauth:token-type:jwt` |
 | `audience` | Optional. `https://api.cloudflare.com`, the default, for Cloudflare credentials; or a service's URL for [the broker's own token](#tokens-for-other-services) |
-| `requested_token_type` | Optional. For Cloudflare, `urn:ietf:params:oauth:token-type:access_token` or `urn:cf-oidc-auth:params:oauth:token-type:r2-credentials`; for a service, `urn:ietf:params:oauth:token-type:jwt` or `…:access_token` |
+| `requested_token_type` | Optional. For Cloudflare, `urn:ietf:params:oauth:token-type:access_token` or `urn:cf-oidc-exchange:params:oauth:token-type:r2-credentials`; for a service, `urn:ietf:params:oauth:token-type:jwt` or `…:access_token` |
 | `profile` | Optional. Profile to use; if omitted, exactly one profile must match |
 | `ttl` | Optional. Requested lifetime such as `10m` or `1h`, clamped to the profile's `max_ttl` |
 
@@ -376,7 +376,7 @@ The response has the standard fields plus the broker's own:
 }
 ```
 
-`buckets` is there when the profile has buckets. A profile with only buckets has no single bearer token, so it returns no `access_token` or `token_id`, with `issued_token_type` `urn:cf-oidc-auth:params:oauth:token-type:r2-credentials` and `token_type` `N_A`. For a service's audience, `access_token` is the broker's JWT access token, `issued_token_type` is `urn:ietf:params:oauth:token-type:access_token` (or `…:jwt`, if that's what `requested_token_type` asked for), and there's no `token_id`, `account_id` or `buckets`.
+`buckets` is there when the profile has buckets. A profile with only buckets has no single bearer token, so it returns no `access_token` or `token_id`, with `issued_token_type` `urn:cf-oidc-exchange:params:oauth:token-type:r2-credentials` and `token_type` `N_A`. For a service's audience, `access_token` is the broker's JWT access token, `issued_token_type` is `urn:ietf:params:oauth:token-type:access_token` (or `…:jwt`, if that's what `requested_token_type` asked for), and there's no `token_id`, `account_id` or `buckets`.
 
 Errors are the same as on every route.
 

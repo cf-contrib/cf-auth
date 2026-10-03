@@ -25,7 +25,7 @@ if (r2ExpiresOn) {
 
 if (token) {
   try {
-    const broker = brokerURL(input("broker-url"));
+    const broker = brokerURL(input("url"));
     /** @satisfies {TokenRevocationRequest} */
     const body = { token, token_type_hint: "access_token" };
     // RFC 7009: form-encoded, and 200 whether revoked now or already gone.

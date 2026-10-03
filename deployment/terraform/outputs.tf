@@ -1,6 +1,6 @@
 output "url" {
   value       = local.broker_url
-  description = "Use as the action's broker-url. The policy gets it as $${broker_url}."
+  description = "Use as the action's url. The policy gets it as $${broker_url}."
 }
 
 output "worker_name" {

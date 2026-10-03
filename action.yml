@@ -5,7 +5,7 @@ branding:
   icon: cloud
   color: orange
 inputs:
-  broker-url:
+  url:
     required: true
     description: Broker base URL, e.g. https://cf-oidc-exchange.example.com. Its origin is the OIDC audience.
   profile:

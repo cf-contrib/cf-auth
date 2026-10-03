@@ -87,7 +87,7 @@ describe("main", () => {
     stub = await startStub();
     const r = await action("main.js", {
       ...oidcEnv(stub.url),
-      "INPUT_BROKER-URL": `${stub.url}/`,
+      INPUT_URL: `${stub.url}/`,
       INPUT_PROFILE: "workers-deploy",
       INPUT_TTL: " 10m ",
     });
@@ -125,7 +125,7 @@ describe("main", () => {
     stub = await startStub();
     const r = await action("main.js", {
       ...oidcEnv(stub.url),
-      "INPUT_BROKER-URL": stub.url,
+      INPUT_URL: stub.url,
       INPUT_PROFILE: "",
       INPUT_TTL: "",
     });
@@ -162,7 +162,7 @@ describe("main", () => {
     stub = await startStub();
     const r = await action("main.js", {
       ...oidcEnv(stub.url),
-      "INPUT_BROKER-URL": stub.url,
+      INPUT_URL: stub.url,
       INPUT_PROFILE: STUB_R2_PROFILE,
     });
 
@@ -188,7 +188,7 @@ describe("main", () => {
 
   it("also writes a single bucket's credentials as a named profile, readable only by the runner user", async () => {
     stub = await startStub({ tokenFields: { buckets: [STUB_BUCKET] } });
-    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    const r = await action("main.js", { ...oidcEnv(stub.url), INPUT_URL: stub.url });
     expect(r.code).toBe(0);
     expect(readFileSync(r.credentialsFile, "utf8")).toBe(profile(STUB_BUCKET));
     expect(statSync(r.credentialsFile).mode & 0o777).toBe(0o600);
@@ -196,7 +196,7 @@ describe("main", () => {
 
   it("exports both for a profile with a token and buckets", async () => {
     stub = await startStub({ tokenFields: { buckets: [STUB_BUCKET] } });
-    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    const r = await action("main.js", { ...oidcEnv(stub.url), INPUT_URL: stub.url });
     expect(r.code).toBe(0);
     expect(r.env).toMatchObject({
       CLOUDFLARE_API_TOKEN: STUB_TOKEN,
@@ -214,21 +214,21 @@ describe("main", () => {
 
   it.each([[[]], [["a/", "b/"]]])("exports an empty CLOUDFLARE_R2_PREFIX for prefixes %j", async (prefixes) => {
     stub = await startStub({ tokenFields: { buckets: [{ ...STUB_BUCKET, prefixes }] } });
-    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    const r = await action("main.js", { ...oidcEnv(stub.url), INPUT_URL: stub.url });
     expect(r.code).toBe(0);
     expect(r.env).toMatchObject({ ...SINGLE_ENV, CLOUDFLARE_R2_PREFIX: "" });
   });
 
   it("exports no AWS variables when the profile has no buckets", async () => {
     stub = await startStub();
-    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    const r = await action("main.js", { ...oidcEnv(stub.url), INPUT_URL: stub.url });
     expect(Object.keys(r.env).some((k) => k.startsWith("AWS_") || k.startsWith("CLOUDFLARE_R2_"))).toBe(false);
     expect(existsSync(r.credentialsFile)).toBe(false);
   });
 
   it("exports several buckets as named profiles, with no default credentials", async () => {
     stub = await startStub({ tokenFields: { buckets: [STUB_BUCKET, ARTIFACTS] } });
-    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    const r = await action("main.js", { ...oidcEnv(stub.url), INPUT_URL: stub.url });
     expect(r.code).toBe(0);
     expect(r.env).toEqual({
       CLOUDFLARE_API_TOKEN: STUB_TOKEN,
@@ -259,7 +259,7 @@ describe("main", () => {
     ["a newline in a secret", { ...STUB_BUCKET, secret_access_key: "secret\naws_access_key_id = x" }],
   ])("refuses %s, before writing the credentials file", async (_, bucket) => {
     stub = await startStub({ tokenFields: { buckets: [bucket] } });
-    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    const r = await action("main.js", { ...oidcEnv(stub.url), INPUT_URL: stub.url });
     expect(r.code).toBe(1);
     expect(r.stdout).toContain("::error::cf-oidc broker returned an invalid response: malformed buckets.0");
     expect(existsSync(r.credentialsFile)).toBe(false);
@@ -278,7 +278,7 @@ describe("main", () => {
     ["buckets.0.prefixes", { buckets: [{ ...STUB_BUCKET, prefixes: undefined }] }],
   ])("fails clearly when the broker response lacks %s", async (field, tokenFields) => {
     stub = await startStub({ tokenFields });
-    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    const r = await action("main.js", { ...oidcEnv(stub.url), INPUT_URL: stub.url });
     expect(r.code).toBe(1);
     expect(r.stdout).toContain(`::error::cf-oidc broker returned an invalid response: missing ${field}`);
     expect(r.env).toEqual({});
@@ -286,29 +286,29 @@ describe("main", () => {
   });
 
   it("explains a missing id-token permission", async () => {
-    const r = await action("main.js", { "INPUT_BROKER-URL": "https://cf-oidc-exchange.example.com" });
+    const r = await action("main.js", { INPUT_URL: "https://cf-oidc-exchange.example.com" });
     expect(r.code).toBe(1);
     expect(r.stdout).toContain("::error::OIDC unavailable: add `permissions: id-token: write` to the job");
   });
 
-  it("requires broker-url", async () => {
+  it("requires url", async () => {
     const r = await action("main.js", {});
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain("::error::Input required and not supplied: broker-url");
+    expect(r.stdout).toContain("::error::Input required and not supplied: url");
   });
 
   it("refuses plain-http brokers that aren't loopback", async () => {
-    const r = await action("main.js", { "INPUT_BROKER-URL": "http://cf-oidc-exchange.example.com" });
+    const r = await action("main.js", { INPUT_URL: "http://cf-oidc-exchange.example.com" });
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain("broker-url must use https");
+    expect(r.stdout).toContain("url must use https");
   });
 
   it("fails with a hint when the broker denies the request", async () => {
     stub = await startStub({ tokenStatus: 400 });
-    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    const r = await action("main.js", { ...oidcEnv(stub.url), INPUT_URL: stub.url });
     expect(r.code).toBe(1);
     expect(r.stdout).toContain(
-      "::error::cf-oidc broker returned 400 (invalid_request: no profile matches the token): check that broker-url matches",
+      "::error::cf-oidc broker returned 400 (invalid_request: no profile matches the token): check that url matches",
     );
     expect(r.env).toEqual({});
     expect(r.state).toEqual({});
@@ -316,14 +316,14 @@ describe("main", () => {
 
   it("fails with a hint when the broker is older than the action", async () => {
     stub = await startStub({ tokenStatus: 404 });
-    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    const r = await action("main.js", { ...oidcEnv(stub.url), INPUT_URL: stub.url });
     expect(r.code).toBe(1);
     expect(r.stdout).toContain("::error::cf-oidc broker returned 404: the broker doesn't serve /oauth/token");
   });
 
   it("retries a flaky OIDC endpoint", async () => {
     stub = await startStub({ oidcStatuses: [503] });
-    const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
+    const r = await action("main.js", { ...oidcEnv(stub.url), INPUT_URL: stub.url });
     expect(r.code).toBe(0);
     expect(stub.calls.filter((c) => c.path === "/oidc").length).toBe(2);
   });
@@ -333,7 +333,7 @@ describe("post", () => {
   it("revokes the minted token", async () => {
     stub = await startStub();
     const r = await action("post.js", {
-      "INPUT_BROKER-URL": stub.url,
+      INPUT_URL: stub.url,
       STATE_token: STUB_TOKEN,
       STATE_token_id: STUB_TOKEN_ID,
     });
@@ -355,7 +355,7 @@ describe("post", () => {
     const file = join(dir, "credentials");
     writeFileSync(file, "[org-terraform-state]\n");
     const r = await action("post.js", {
-      "INPUT_BROKER-URL": "https://cf-oidc-exchange.example.com",
+      INPUT_URL: "https://cf-oidc-exchange.example.com",
       STATE_credentials_file: file,
       STATE_r2_expires_on: STUB_BUCKET.expires_on,
     });
@@ -366,7 +366,7 @@ describe("post", () => {
 
   it("only logs when the R2 credentials expire for a profile with only buckets", async () => {
     stub = await startStub();
-    const r = await action("post.js", { "INPUT_BROKER-URL": stub.url, STATE_r2_expires_on: STUB_BUCKET.expires_on });
+    const r = await action("post.js", { INPUT_URL: stub.url, STATE_r2_expires_on: STUB_BUCKET.expires_on });
     expect(r.code).toBe(0);
     expect(r.stdout).toContain(
       "cf-oidc: R2 temporary credentials can't be revoked; they expire at 2026-09-28T12:15:00Z",
@@ -377,7 +377,7 @@ describe("post", () => {
   it("logs the R2 expiry and revokes the token for a profile with both", async () => {
     stub = await startStub();
     const r = await action("post.js", {
-      "INPUT_BROKER-URL": stub.url,
+      INPUT_URL: stub.url,
       STATE_token: STUB_TOKEN,
       STATE_token_id: STUB_TOKEN_ID,
       STATE_r2_expires_on: STUB_BUCKET.expires_on,
@@ -388,7 +388,7 @@ describe("post", () => {
 
   it("does nothing when main didn't mint", async () => {
     stub = await startStub();
-    const r = await action("post.js", { "INPUT_BROKER-URL": stub.url });
+    const r = await action("post.js", { INPUT_URL: stub.url });
     expect(r.code).toBe(0);
     expect(stub.calls).toEqual([]);
   });
@@ -396,7 +396,7 @@ describe("post", () => {
   it("warns instead of failing when revocation fails", async () => {
     stub = await startStub({ revokeStatus: 502 });
     const r = await action("post.js", {
-      "INPUT_BROKER-URL": stub.url,
+      INPUT_URL: stub.url,
       STATE_token: STUB_TOKEN,
       STATE_token_id: STUB_TOKEN_ID,
     });
@@ -405,7 +405,7 @@ describe("post", () => {
   });
 
   it("warns instead of failing when the broker is unreachable", async () => {
-    const r = await action("post.js", { "INPUT_BROKER-URL": "http://127.0.0.1:9", STATE_token: STUB_TOKEN });
+    const r = await action("post.js", { INPUT_URL: "http://127.0.0.1:9", STATE_token: STUB_TOKEN });
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("::warning::cf-oidc: revoking token");
   });

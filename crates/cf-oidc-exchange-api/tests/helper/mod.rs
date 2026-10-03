@@ -51,7 +51,7 @@ pub const GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 pub const ID_TOKEN: &str = "urn:ietf:params:oauth:token-type:id_token";
 pub const ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
 pub const JWT_TYPE: &str = "urn:ietf:params:oauth:token-type:jwt";
-pub const R2_CREDENTIALS: &str = "urn:cf-oidc-auth:params:oauth:token-type:r2-credentials";
+pub const R2_CREDENTIALS: &str = "urn:cf-oidc-exchange:params:oauth:token-type:r2-credentials";
 
 const KID: &str = "test-key";
 

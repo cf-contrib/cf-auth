@@ -36,21 +36,21 @@ export const write = (file, key, value) => {
 };
 
 /**
- * Parses the `broker-url` input. HTTPS is required, except for loopback hosts
+ * Parses the `url` input. HTTPS is required, except for loopback hosts
  * (used by the smoke test), because the OIDC token travels in the request.
  * @param {string} value
  */
 export function brokerURL(value) {
-  if (!value) throw new Error("Input required and not supplied: broker-url");
+  if (!value) throw new Error("Input required and not supplied: url");
   let url;
   try {
     url = new URL(value);
   } catch {
-    throw new Error(`broker-url is not a valid URL: ${value}`);
+    throw new Error(`url is not a valid URL: ${value}`);
   }
   const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
-    throw new Error(`broker-url must use https: ${value}`);
+    throw new Error(`url must use https: ${value}`);
   }
   return url;
 }

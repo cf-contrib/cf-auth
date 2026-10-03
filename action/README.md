@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: cf-contrib/cf-oidc-exchange@v0.8.0 # x-release-please-version
         with:
-          broker-url: https://cf-oidc-exchange.example.com
+          url: https://cf-oidc-exchange.example.com
           profile: workers-deploy
       - run: npx wrangler deploy
 ```
@@ -49,7 +49,7 @@ A floating `v1` tag will follow each release from 1.0 on.
 
 | Input | Required | Description |
 |---|---|---|
-| `broker-url` | yes | Broker base URL, e.g. `https://cf-oidc-exchange.example.com`. Its origin is the OIDC audience and must equal the GitHub provider's `audience` in the policy. |
+| `url` | yes | Broker base URL, e.g. `https://cf-oidc-exchange.example.com`. Its origin is the OIDC audience and must equal the GitHub provider's `audience` in the policy. |
 | `profile` | no | Policy profile to request (not an AWS profile). Recommended when more than one profile could match. |
 | `ttl` | no | Requested lifetime such as `5m` or `1h`. Defaults to the profile's `ttl`, capped at its `max_ttl`. |
 
@@ -79,7 +79,7 @@ None of this can be switched off: what's exported is decided by the profile. Exp
 ```yaml
       - uses: cf-contrib/cf-oidc-exchange@v0.8.0 # x-release-please-version
         with:
-          broker-url: https://cf-oidc-exchange.example.com
+          url: https://cf-oidc-exchange.example.com
           profile: workers-deploy
       - uses: cloudflare/wrangler-action@v3
         with:
@@ -92,7 +92,7 @@ None of this can be switched off: what's exported is decided by the profile. Exp
 ```yaml
       - uses: cf-contrib/cf-oidc-exchange@v0.8.0 # x-release-please-version
         with:
-          broker-url: https://cf-oidc-exchange.example.com
+          url: https://cf-oidc-exchange.example.com
           profile: infra-cloudflare
           ttl: 30m
       - run: tofu apply -auto-approve # the cloudflare provider reads CLOUDFLARE_API_TOKEN
@@ -130,7 +130,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: cf-contrib/cf-oidc-exchange@v0.8.0 # x-release-please-version
-        with: { broker-url: https://cf-oidc-exchange.example.com, profile: service-dns }
+        with: { url: https://cf-oidc-exchange.example.com, profile: service-dns }
       - run: ./scripts/update-dns.sh
 
   deploy:
@@ -141,7 +141,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: cf-contrib/cf-oidc-exchange@v0.8.0 # x-release-please-version
-        with: { broker-url: https://cf-oidc-exchange.example.com, profile: workers-deploy }
+        with: { url: https://cf-oidc-exchange.example.com, profile: workers-deploy }
       - run: npx wrangler deploy
 ```
 
@@ -150,10 +150,10 @@ jobs:
 | Error | Cause |
 |---|---|
 | `OIDC unavailable: add permissions: id-token: write to the job` | The job can't request an OIDC token. Add the permission. Fork PRs on `pull_request` never get it. |
-| `broker returned 400 (invalid_request: …)` | The broker rejected the OIDC token, usually because `broker-url` doesn't match the GitHub provider's `audience` in the policy; or no profile allows this workflow, or the named `profile` doesn't match. The description says which. |
+| `broker returned 400 (invalid_request: …)` | The broker rejected the OIDC token, usually because `url` doesn't match the GitHub provider's `audience` in the policy; or no profile allows this workflow, or the named `profile` doesn't match. The description says which. |
 | `broker returned 503 (temporarily_unavailable: …)` | The Cloudflare API, GitHub or the token's issuer failed; the broker's audit log (`token.deny`) says which. For a profile with `buckets`, it's usually a broker token without enough R2 permissions on the bucket. |
 | `broker returned 500 (server_error: …)` | The broker's policy or bindings are invalid. The broker's logs say why. |
-| `broker-url must use https` | Plain `http` is only accepted for `localhost` and `127.0.0.1`. |
+| `url must use https` | Plain `http` is only accepted for `localhost` and `127.0.0.1`. |
 | `AccessDenied` from S3 on some keys | The credentials only cover the bucket's prefixes: keep every key under `$CLOUDFLARE_R2_PREFIX`. |
 
 ## Limitations
