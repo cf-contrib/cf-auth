@@ -13,7 +13,7 @@ use worker::{
     wasm_bindgen::{JsCast, JsValue},
 };
 
-use crate::{ALGORITHM, AT_JWT, AccessTokenClaims, Claims, JWT, KeyError, webcrypto};
+use crate::{ALGORITHM, AT_JWT, AccessTokenClaims, Claims, JWT, KeyError, crypto};
 
 /// The smallest RSA key accepted, as NIST requires.
 const MIN_MODULUS_BITS: usize = 2048;
@@ -49,24 +49,22 @@ impl SigningKey {
         let not_rsa = || KeyError("not an RSA private key in PKCS#8 PEM".to_string());
         let der = pkcs8_der(pem).ok_or_else(not_rsa)?;
 
-        let subtle = webcrypto::subtle()?;
+        let subtle = crypto::subtle()?;
         let usages = js_sys::Array::of1(&JsValue::from_str("sign"));
         // Extractable, so its public half can be exported to publish.
         let imported = subtle.import_key_with_object(
             "pkcs8",
             &Uint8Array::from(&der[..]),
-            &webcrypto::rs256()?,
+            &crypto::rs256()?,
             true,
             &usages,
         );
-        let key: CryptoKey = webcrypto::promised(imported)
+        let key: CryptoKey = crypto::promised(imported)
             .await
             .map_err(|_| not_rsa())?
             .unchecked_into();
-        let jwk = webcrypto::promised(subtle.export_key("jwk", &key)).await?;
-        let jwk: String = js_sys::JSON::stringify(&jwk)
-            .map_err(webcrypto::error)?
-            .into();
+        let jwk = crypto::promised(subtle.export_key("jwk", &key)).await?;
+        let jwk: String = js_sys::JSON::stringify(&jwk).map_err(crypto::error)?.into();
         let jwk: Value = serde_json::from_str(&jwk).unwrap_or_default();
         let (Some(n), Some(e)) = (jwk["n"].as_str(), jwk["e"].as_str()) else {
             return Err(not_rsa());
@@ -82,7 +80,7 @@ impl SigningKey {
         // whitespace.
         let canonical = format!(r#"{{"e":"{e}","kty":"RSA","n":"{n}"}}"#);
         let digest =
-            webcrypto::promised(subtle.digest_with_str_and_buffer_source(
+            crypto::promised(subtle.digest_with_str_and_buffer_source(
                 "SHA-256",
                 &Uint8Array::from(canonical.as_bytes()),
             ))
@@ -129,7 +127,7 @@ impl SigningKey {
     }
 
     async fn sign_typed(&self, typ: &str, claims: Claims) -> Result<SignedToken, KeyError> {
-        let jti = webcrypto::random_uuid()?;
+        let jti = crypto::random_uuid()?;
         let mut claims: Map<String, Value> = claims.into();
         claims.insert("jti".to_string(), json!(jti));
 
@@ -139,13 +137,12 @@ impl SigningKey {
             URL_SAFE_NO_PAD.encode(header.to_string()),
             URL_SAFE_NO_PAD.encode(Value::Object(claims).to_string())
         );
-        let signature =
-            webcrypto::promised(webcrypto::subtle()?.sign_with_object_and_buffer_source(
-                &webcrypto::rs256()?,
-                &self.key,
-                &Uint8Array::from(signing_input.as_bytes()),
-            ))
-            .await?;
+        let signature = crypto::promised(crypto::subtle()?.sign_with_object_and_buffer_source(
+            &crypto::rs256()?,
+            &self.key,
+            &Uint8Array::from(signing_input.as_bytes()),
+        ))
+        .await?;
         let signature = URL_SAFE_NO_PAD.encode(Uint8Array::new(&signature).to_vec());
         Ok(SignedToken {
             jwt: format!("{signing_input}.{signature}"),

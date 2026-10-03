@@ -35,14 +35,14 @@
 //!   from them, their `keys` (RFC 7517) and `metadata` (OpenID Connect
 //!   Discovery, RFC 8414), and the claim rules' `policy`;
 //! - `sign`: the issuer's side;
-//! - `webcrypto`: RS256 for both;
+//! - `crypto`: RS256 through WebCrypto, for both;
 //! - `error`: what goes wrong.
 
+mod crypto;
 mod error;
 mod jwt;
 mod sign;
 mod verify;
-mod webcrypto;
 
 pub use crate::{
     error::{Error, KeyError},

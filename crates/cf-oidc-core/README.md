@@ -95,4 +95,5 @@ The source is split by role, then by the RFCs' layers within it: `jwt` is
 the token format both roles share (RFC 7515, 7519, 9068) and knows nothing of
 providers; `verify` is the resource server's side, with an issuer's `keys`
 (RFC 7517), its `metadata` (OpenID Connect Discovery, RFC 8414) and the claim
-rules' `policy`; `sign` is the issuer's side; `webcrypto` does RS256 for both.
+rules' `policy`; `sign` is the issuer's side; `crypto` does RS256 through
+WebCrypto for both.
