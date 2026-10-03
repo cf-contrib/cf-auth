@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use cf_oidc_core::{ALGORITHM, Identity, SigningKey};
+use cf_oidc_core::{ALGORITHM, Jwt, SigningKey};
 use cf_oidc_exchange_sdk::v1::{
     self, BucketCredentials, Discovery, Error, ErrorCode, ExchangeServiceApi, IssuedTokenType,
     Jwks, TokenExchangeRequest, TokenExchangeRequestSubjectTokenType as SubjectTokenType,
@@ -152,7 +152,7 @@ impl ExchangeServiceHandler {
     /// The broker's own token, for a profile with another service's `audience`.
     async fn service_token(
         &self,
-        identity: &Identity,
+        identity: &Jwt,
         provider: &ProviderConfig,
         profile: &ProfileConfig,
         ttl: u64,
@@ -169,14 +169,14 @@ impl ExchangeServiceHandler {
         let now = Date::now().as_millis() / 1000;
         let issuer = &self.config.policy().issuer;
         let (claims, expires_at) = payload(issuer, identity, provider, profile, ttl, now)?;
-        let signed = key.sign(claims).await.map_err(|err| {
+        let signed = key.sign(claims.into()).await.map_err(|err| {
             Error::new(ErrorCode::InternalError, format!("signing a token: {err}"))
         })?;
         info!(
             event = "token.issue",
             provider = %provider.name,
             profile = %profile.name,
-            sub = identity.subject(),
+            sub = identity.claims.sub(),
             claims = %serde_json::Value::Object(provider.matched(Some(profile), &identity.claims)),
             audience = %profile.audience,
             jti = %signed.jti,
@@ -199,7 +199,7 @@ impl ExchangeServiceHandler {
     /// them.
     async fn cloudflare_credentials(
         &self,
-        identity: &Identity,
+        identity: &Jwt,
         provider: &ProviderConfig,
         profile: &ProfileConfig,
         ttl: u64,
@@ -268,7 +268,7 @@ impl ExchangeServiceHandler {
                 event = "token.mint",
                 provider = %provider.name,
                 profile = %profile.name,
-                sub = identity.subject(),
+                sub = identity.claims.sub(),
                 claims = %claims,
                 token_id = %id,
                 expires_at = expires.timestamp(),
@@ -322,7 +322,7 @@ impl ExchangeServiceHandler {
                         event = "r2.issued",
                         provider = %provider.name,
                         profile = %profile.name,
-                        sub = identity.subject(),
+                        sub = identity.claims.sub(),
                         claims = %claims,
                         bucket = %bucket.name,
                         prefixes = ?prefixes,
@@ -401,7 +401,7 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
     async fn exchange_token(&self, request: TokenExchangeRequest) -> v1::ExchangeTokenResponse {
         SendFuture::new(async move {
             let policy = self.config.policy();
-            let mut caller: Option<(Identity, &ProviderConfig)> = None;
+            let mut caller: Option<(Jwt, &ProviderConfig)> = None;
             let mut named: Option<&ProfileConfig> = None;
             let exchanged = async {
                 // What the generated validation can't check: the audience,
@@ -481,7 +481,7 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                         event = "token.deny",
                         provider = caller.as_ref().map(|(_, provider)| provider.name.as_str()),
                         profile,
-                        sub = caller.as_ref().and_then(|(identity, _)| identity.subject()),
+                        sub = caller.as_ref().and_then(|(identity, _)| identity.claims.sub()),
                         claims = caller.as_ref().map(|(identity, provider)| {
                             display(serde_json::Value::Object(provider.matched(named, &identity.claims)))
                         }),
@@ -664,8 +664,8 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
 
 /// `cf-oidc:<provider>:<sub>`, whatever the issuer, cut to fit: what a token
 /// minted for `identity` is named.
-fn token_name(provider: &ProviderConfig, identity: &Identity) -> String {
-    let sub = identity.subject().unwrap_or("unknown");
+fn token_name(provider: &ProviderConfig, identity: &Jwt) -> String {
+    let sub = identity.claims.sub().unwrap_or("unknown");
     let name = format!("{TOKEN_PREFIX}{}:{sub}", provider.name);
     name.chars().take(NAME_MAX).collect()
 }
@@ -699,17 +699,14 @@ fn missing(what: &str) -> Error {
 /// such as an email, stay behind. Signing adds its `jti`.
 fn payload(
     issuer: &str,
-    identity: &Identity,
+    identity: &Jwt,
     provider: &ProviderConfig,
     profile: &ProfileConfig,
     ttl: u64,
     now: u64,
 ) -> Result<(Map<String, Value>, u64), Error> {
     let claims = &identity.claims;
-    let not_after = claims
-        .get("exp")
-        .and_then(Value::as_u64)
-        .unwrap_or(u64::MAX);
+    let not_after = claims.exp().unwrap_or(u64::MAX);
     let expires_at = (now + ttl / 1000).min(not_after);
     // The caller's token was accepted with clock tolerance; a token that can't
     // live at all isn't issued.
@@ -721,7 +718,7 @@ fn payload(
     }
 
     let mut payload = provider.matched(Some(profile), claims);
-    let subject = match identity.subject() {
+    let subject = match identity.claims.sub() {
         Some(sub) => sub.to_string(),
         None => format!("{}:unknown", provider.name),
     };
@@ -743,13 +740,12 @@ fn payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::config::tests::{CACHE, ISSUER, NOW, claims, parse, policy};
+    use crate::service::config::tests::{CACHE, NOW, claims, parse, policy};
 
-    fn identity(claims: Map<String, Value>) -> Identity {
-        Identity {
-            issuer: ISSUER.into(),
-            claims,
-            claim_set: 0,
+    fn identity(claims: Map<String, Value>) -> Jwt {
+        Jwt {
+            header: cf_oidc_core::Header::default(),
+            claims: claims.into(),
         }
     }
 

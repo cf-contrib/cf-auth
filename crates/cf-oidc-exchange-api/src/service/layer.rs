@@ -8,9 +8,9 @@
 //! valid, or none of its provider's claim sets matches. Everything else
 //! passes straight through.
 //!
-//! The handler takes the caller's identity from [`cf_oidc_core::verified`],
-//! by the token: never from the token itself, so a token the layer didn't
-//! verify gets nothing.
+//! The handler takes the caller's verified token from
+//! [`cf_oidc_core::verified`], by the token as sent: never by decoding it
+//! itself, so a token the layer didn't verify gets nothing.
 //!
 //! [`respond`] is layered over everything: it gives the generated validation's
 //! refusals the `Error` body every error has, and every response its
@@ -125,7 +125,11 @@ where
             // `Send`, which the router wants; a Worker is single-threaded, so
             // it runs in a `SendFuture`.
             let policy = config.policy();
-            match SendFuture::new(cf_oidc_core::verify(&token, &policy.providers)).await {
+            let accepted = SendFuture::new(async {
+                let (provider, jwt) = cf_oidc_core::verify(&token, &policy.providers).await?;
+                cf_oidc_core::authorize(&jwt.claims, &provider.claims)
+            });
+            match accepted.await {
                 Ok(_) => inner.call(req).await,
                 Err(err) => Ok(refuse(policy, err)),
             }
@@ -146,12 +150,12 @@ fn subject_token(body: &[u8]) -> Option<String> {
 /// logged, and returned unless it's an issuer's fault.
 fn refuse(policy: &PolicyConfig, err: cf_oidc_core::Error) -> Response {
     let (status, body) = match err {
-        cf_oidc_core::Error::Unauthorized(message) => {
+        cf_oidc_core::Error::InvalidToken(message) => {
             warn!(event = "token.deny", error = "unauthorized", %message);
             let body = v1::Error::new(ErrorCode::Unauthorized, message);
             (StatusCode::UNAUTHORIZED, body)
         }
-        cf_oidc_core::Error::Forbidden { issuer, subject } => {
+        cf_oidc_core::Error::InsufficientScope { issuer, subject } => {
             // Named as the policy names it.
             let provider = policy
                 .providers
@@ -169,7 +173,7 @@ fn refuse(policy: &PolicyConfig, err: cf_oidc_core::Error) -> Response {
             let body = v1::Error::new(ErrorCode::Forbidden, message);
             (StatusCode::FORBIDDEN, body)
         }
-        cf_oidc_core::Error::Upstream(message) => {
+        cf_oidc_core::Error::TemporarilyUnavailable(message) => {
             warn!(event = "token.deny", error = "upstream_error", %message);
             let body = v1::Error::new(
                 ErrorCode::UpstreamError,

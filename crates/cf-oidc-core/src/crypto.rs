@@ -16,6 +16,8 @@ use worker::{
     wasm_bindgen_futures::JsFuture,
 };
 
+use crate::Claims;
+
 /// What tokens are signed with, and what OIDC verifiers support by default.
 pub const ALGORITHM: &str = "RS256";
 
@@ -120,14 +122,15 @@ impl SigningKey {
         json!({ "kty": "RSA", "n": self.n, "e": self.e, "kid": self.kid, "alg": ALGORITHM, "use": "sig" })
     }
 
-    /// Signs `claims`, with a fresh random `jti`.
+    /// Signs `claims` as a JWT, with a fresh random `jti`.
     ///
     /// # Errors
     ///
     /// When WebCrypto fails.
-    pub async fn sign(&self, mut claims: Map<String, Value>) -> Result<SignedToken, KeyError> {
+    pub async fn sign(&self, claims: Claims) -> Result<SignedToken, KeyError> {
         let scope = js_sys::global().unchecked_into::<WorkerGlobalScope>();
         let jti = scope.crypto().map_err(webcrypto)?.random_uuid();
+        let mut claims: Map<String, Value> = claims.into();
         claims.insert("jti".to_string(), json!(jti));
 
         let header = json!({ "alg": ALGORITHM, "kid": self.kid, "typ": "JWT" });
