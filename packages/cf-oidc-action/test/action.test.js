@@ -304,11 +304,11 @@ describe("main", () => {
   });
 
   it("fails with a hint when the broker denies the request", async () => {
-    stub = await startStub({ tokenStatus: 403 });
+    stub = await startStub({ tokenStatus: 400 });
     const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
     expect(r.code).toBe(1);
     expect(r.stdout).toContain(
-      "::error::cf-oidc broker returned 403 (forbidden: no profile matches the token): the policy doesn't allow this workflow",
+      "::error::cf-oidc broker returned 400 (invalid_request: no profile matches the token): check that broker-url matches",
     );
     expect(r.env).toEqual({});
     expect(r.state).toEqual({});
@@ -318,9 +318,7 @@ describe("main", () => {
     stub = await startStub({ tokenStatus: 404 });
     const r = await action("main.js", { ...oidcEnv(stub.url), "INPUT_BROKER-URL": stub.url });
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain(
-      "::error::cf-oidc broker returned 404 (not_found: no route for POST /oauth/token): the broker doesn't serve /oauth/token",
-    );
+    expect(r.stdout).toContain("::error::cf-oidc broker returned 404: the broker doesn't serve /oauth/token");
   });
 
   it("retries a flaky OIDC endpoint", async () => {

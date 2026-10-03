@@ -37,8 +37,8 @@ use worker::Date;
 
 use crate::jwt::{LEEWAY_SECS, Unverified};
 pub use crate::{
-    crypto::{ALGORITHM, KeyError, SignedToken, SigningKey},
-    jwt::{Claims, Header, Jwt},
+    crypto::{ALGORITHM, AT_JWT, JWT, KeyError, SignedToken, SigningKey},
+    jwt::{AccessTokenClaims, Claims, Header, Jwt},
     rule::ClaimRule,
 };
 

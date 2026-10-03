@@ -39,7 +39,10 @@ use tower_service::Service;
 use tracing::warn;
 use worker::send::SendFuture;
 
-use super::config::{Config, PolicyConfig};
+use super::{
+    config::{Config, PolicyConfig},
+    handler::TOKEN_EXCHANGE,
+};
 
 /// Where the token exchange is.
 const TOKEN_PATH: &str = "/oauth/token";
@@ -109,11 +112,24 @@ where
             // The token is in the form body, which the handler reads again.
             let (parts, body) = req.into_parts();
             let Ok(body) = to_bytes(body, MAX_BODY_BYTES).await else {
-                let err = v1::Error::new(ErrorCode::BadRequest, "the body is over 16 KiB");
+                let err = v1::Error::new(ErrorCode::InvalidRequest, "the body is over 16 KiB");
                 return Ok((StatusCode::BAD_REQUEST, Json(err)).into_response());
             };
-            let token = subject_token(&body);
+            let grant_type = form_field(&body, "grant_type");
+            let token = form_field(&body, "subject_token");
             let req = Request::from_parts(parts, Body::from(body));
+
+            // Another grant is RFC 6749's unsupported_grant_type, which the
+            // generated validation can't tell from any other invalid body.
+            if let Some(grant_type) = grant_type
+                && grant_type != TOKEN_EXCHANGE
+            {
+                let shown: String = grant_type.chars().take(200).collect();
+                let message = format!("grant_type {shown} isn't supported: only token exchange");
+                warn!(event = "token.deny", error = "unsupported_grant_type", %message);
+                let err = v1::Error::new(ErrorCode::UnsupportedGrantType, message);
+                return Ok((StatusCode::BAD_REQUEST, Json(err)).into_response());
+            }
 
             // Without one, there's nothing to verify: the generated validation
             // refuses the request, and the handler would find no identity.
@@ -137,23 +153,25 @@ where
     }
 }
 
-/// The `subject_token` of a form body, if it has one.
-fn subject_token(body: &[u8]) -> Option<String> {
+/// The field of a form body named `name`, if it has one that isn't empty.
+fn form_field(body: &[u8], name: &str) -> Option<String> {
     let fields: Vec<(String, String)> = serde_urlencoded::from_bytes(body).ok()?;
     fields
         .into_iter()
-        .find(|(name, value)| name == "subject_token" && !value.is_empty())
-        .map(|(_, token)| token)
+        .find(|(field, value)| field == name && !value.is_empty())
+        .map(|(_, value)| value)
 }
 
 /// Refuses an exchange whose token `cf_oidc_core` didn't accept, with why
-/// logged, and returned unless it's an issuer's fault.
+/// logged, and returned unless it's an issuer's fault. A subject token that
+/// isn't valid, or that the policy doesn't take, is `invalid_request` (RFC
+/// 8693 §2.2.2).
 fn refuse(policy: &PolicyConfig, err: cf_oidc_core::Error) -> Response {
     let (status, body) = match err {
         cf_oidc_core::Error::InvalidToken(message) => {
-            warn!(event = "token.deny", error = "unauthorized", %message);
-            let body = v1::Error::new(ErrorCode::Unauthorized, message);
-            (StatusCode::UNAUTHORIZED, body)
+            warn!(event = "token.deny", error = "invalid_request", %message);
+            let body = v1::Error::new(ErrorCode::InvalidRequest, message);
+            (StatusCode::BAD_REQUEST, body)
         }
         cf_oidc_core::Error::InsufficientScope { issuer, subject } => {
             // Named as the policy names it.
@@ -167,19 +185,19 @@ fn refuse(policy: &PolicyConfig, err: cf_oidc_core::Error) -> Response {
                 event = "token.deny",
                 provider,
                 sub = subject,
-                error = "forbidden",
+                error = "invalid_request",
                 %message,
             );
-            let body = v1::Error::new(ErrorCode::Forbidden, message);
-            (StatusCode::FORBIDDEN, body)
+            let body = v1::Error::new(ErrorCode::InvalidRequest, message);
+            (StatusCode::BAD_REQUEST, body)
         }
         cf_oidc_core::Error::TemporarilyUnavailable(message) => {
-            warn!(event = "token.deny", error = "upstream_error", %message);
+            warn!(event = "token.deny", error = "temporarily_unavailable", %message);
             let body = v1::Error::new(
-                ErrorCode::UpstreamError,
+                ErrorCode::TemporarilyUnavailable,
                 "the subject token's issuer couldn't be reached",
             );
-            (StatusCode::BAD_GATEWAY, body)
+            (StatusCode::SERVICE_UNAVAILABLE, body)
         }
     };
     (status, Json(body)).into_response()
@@ -189,8 +207,8 @@ fn refuse(policy: &PolicyConfig, err: cf_oidc_core::Error) -> Response {
 /// and every response's `Cache-Control`.
 ///
 /// The generated validation answers `application/problem+json` with `400`,
-/// `413`, `415` or `422`; the contract has `400` with the `Error` body every
-/// error has.
+/// `413`, `415` or `422`; the contract has `400` with the OAuth error every
+/// error is, `invalid_request` (RFC 6749 §5.2).
 pub async fn respond(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_owned();
     let response = next.run(req).await;
@@ -203,7 +221,7 @@ pub async fn respond(req: Request, next: Next) -> Response {
         let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
             .await
             .unwrap_or_default();
-        let err = v1::Error::new(ErrorCode::BadRequest, rejection(&body));
+        let err = v1::Error::new(ErrorCode::InvalidRequest, rejection(&body));
         // Logged like any refusal, with what was wrong, which never includes
         // the values sent.
         let event = if path == TOKEN_PATH {
@@ -211,7 +229,7 @@ pub async fn respond(req: Request, next: Next) -> Response {
         } else {
             "token.revoke"
         };
-        warn!(event, error = err.error.as_str(), message = %err.message);
+        warn!(event, error = err.error.as_str(), message = %err.error_description);
         (StatusCode::BAD_REQUEST, Json(err)).into_response()
     } else {
         response
@@ -267,8 +285,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_the_subject_token_in_the_form() {
-        let form = |body: &str| subject_token(body.as_bytes());
+    fn finds_a_field_in_the_form() {
+        let form = |body: &str| form_field(body.as_bytes(), "subject_token");
         assert_eq!(
             form("grant_type=x&subject_token=a.b.c").as_deref(),
             Some("a.b.c")

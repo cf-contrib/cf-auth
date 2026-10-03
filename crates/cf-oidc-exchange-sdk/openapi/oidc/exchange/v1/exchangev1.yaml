@@ -6,12 +6,13 @@ info:
   title: cf-oidc-exchange
   version: "1"
   description: >-
-    Bodies are form-encoded, as RFC 8693 and RFC 7009 have it.
+    Bodies are form-encoded, and errors are OAuth errors (RFC 6749 §5.2), as RFC 8693 and
+    RFC 7009 have it.
 
-    Exchanges an OIDC token for short-lived Cloudflare credentials, or for a token the
-    broker signs for another service (RFC 8693 token exchange at `POST /oauth/token`), and
-    revokes Cloudflare tokens (RFC 7009 at `POST /oauth/revoke`). Services verify the
-    broker's tokens with the keys at `/.well-known/jwks`.
+    Exchanges an OIDC token for short-lived Cloudflare credentials, or for an access token
+    the broker signs for another service (RFC 8693 token exchange at `POST /oauth/token`;
+    RFC 9068), and revokes Cloudflare tokens (RFC 7009 at `POST /oauth/revoke`). Services
+    find the keys to verify the broker's tokens through its metadata (RFC 8414).
 servers:
   - url: https://cf-oidc-exchange.example.com
 tags:
@@ -26,8 +27,10 @@ paths:
       description: >-
         The subject token is in the body, not an `Authorization` header. Which profile
         applies follows the policy: a named `profile` must match, otherwise exactly one
-        profile must. Anything unsupported, such as `actor_token` or another `audience`,
-        is refused rather than ignored.
+        profile must. Anything unsupported, such as `actor_token`, is refused rather than
+        ignored. An invalid subject token, or one the policy doesn't take, is
+        `invalid_request`, as RFC 8693 §2.2.2 has it; an `audience` the broker issues
+        nothing for is `invalid_target`.
       requestBody:
         required: true
         content:
@@ -48,13 +51,9 @@ paths:
                 $ref: "#/components/schemas/TokenExchangeResponse"
         "400":
           $ref: "#/components/responses/Error"
-        "401":
-          $ref: "#/components/responses/Error"
-        "403":
-          $ref: "#/components/responses/Error"
         "500":
           $ref: "#/components/responses/Error"
-        "502":
+        "503":
           $ref: "#/components/responses/Error"
   /oauth/revoke:
     post:
@@ -63,8 +62,8 @@ paths:
       summary: Revoke a Cloudflare API token the broker minted.
       description: >-
         Holding the token is the proof. Answers `200` whether the token was revoked, already
-        gone or never valid, as RFC 7009 has it, and `403` for a token the broker didn't mint,
-        which it never deletes.
+        gone, never valid, or not one the broker minted, which it never deletes: to the
+        broker, that's an invalid token, which RFC 7009 §2.2 answers with `200` too.
       requestBody:
         required: true
         content:
@@ -73,30 +72,29 @@ paths:
               $ref: "#/components/schemas/TokenRevocationRequest"
       responses:
         "200":
-          description: Revoked, already gone, or never valid. No body.
+          description: Revoked, already gone, never valid, or not the broker's. No body.
         "400":
-          $ref: "#/components/responses/Error"
-        "403":
           $ref: "#/components/responses/Error"
         "500":
           $ref: "#/components/responses/Error"
-        "502":
+        "503":
           $ref: "#/components/responses/Error"
-  /.well-known/openid-configuration:
+  /.well-known/oauth-authorization-server:
     get:
-      operationId: discovery
+      operationId: metadata
       tags: [ExchangeService]
-      summary: Where to find the broker's keys and endpoints.
+      summary: The broker's Authorization Server Metadata (RFC 8414), with its keys and endpoints.
       description: >-
-        Tokens come from exchange only, so there's no authorization endpoint: the broker
-        isn't a login provider.
+        Tokens come from exchange only, so there's no authorization endpoint, and the broker
+        issues no ID tokens: it's an OAuth authorization server, not an OpenID Provider, so
+        it publishes no `/.well-known/openid-configuration`.
       responses:
         "200":
-          description: The discovery document. Cacheable for 5 minutes.
+          description: The metadata. Cacheable for 5 minutes.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Discovery"
+                $ref: "#/components/schemas/AuthorizationServerMetadata"
         "500":
           $ref: "#/components/responses/Error"
   /.well-known/jwks:
@@ -117,11 +115,11 @@ components:
   responses:
     Error:
       description: >-
-        400 for a malformed or unsupported exchange, 401 for an invalid subject token, 403
-        when no profile allows the caller, 500
-        when the broker is misconfigured, 502 when Cloudflare or the token's issuer
-        fail. For the caller's own mistakes, the message says what was wrong; for the
-        broker's faults it's generic, and the broker's logs say why.
+        An OAuth error (RFC 6749 §5.2): 400 for the caller's mistakes, 500 (`server_error`)
+        when the broker is misconfigured or fails, 503 (`temporarily_unavailable`) when
+        Cloudflare or the subject token's issuer fail. For the caller's own mistakes, the
+        description says what was wrong; for the broker's faults it's generic, and the
+        broker's logs say why.
       content:
         application/json:
           schema:
@@ -188,7 +186,8 @@ components:
           type: string
           description: >-
             The Cloudflare API token, absent for a profile with only buckets; or, for a
-            service's audience, the JWT the broker signed.
+            service's audience, the JWT access token (RFC 9068, `typ` `at+jwt`) the broker
+            signed.
         issued_token_type:
           $ref: "#/components/schemas/IssuedTokenType"
         token_type:
@@ -237,9 +236,11 @@ components:
         expires_on:
           type: string
           format: date-time
-    Discovery:
+    AuthorizationServerMetadata:
       type: object
-      required: [issuer, jwks_uri, token_endpoint, revocation_endpoint, grant_types_supported]
+      description: Authorization Server Metadata (RFC 8414 §2).
+      required:
+        [issuer, jwks_uri, token_endpoint, revocation_endpoint, response_types_supported, grant_types_supported]
       properties:
         issuer:
           type: string
@@ -253,6 +254,11 @@ components:
         revocation_endpoint:
           type: string
           format: uri
+        response_types_supported:
+          type: array
+          items:
+            type: string
+          description: Empty, since there's no authorization endpoint for a response type to be for.
         grant_types_supported:
           type: array
           items:
@@ -262,14 +268,6 @@ components:
           items:
             type: string
         revocation_endpoint_auth_methods_supported:
-          type: array
-          items:
-            type: string
-        subject_types_supported:
-          type: array
-          items:
-            type: string
-        id_token_signing_alg_values_supported:
           type: array
           items:
             type: string
@@ -300,21 +298,22 @@ components:
                 const: sig
     Error:
       type: object
-      description: An error, in the shape cf-nix-cache uses.
-      required: [error, message]
+      description: An OAuth error response (RFC 6749 §5.2).
+      required: [error, error_description]
       properties:
         error:
           $ref: "#/components/schemas/ErrorCode"
-        message:
+        error_description:
           type: string
           description: What went wrong.
     ErrorCode:
       type: string
+      description: >-
+        RFC 6749's error codes (§5.2, and §4.1.2.1 for the broker's own faults) and RFC
+        8693's `invalid_target`.
       enum:
-        - bad_request
-        - unauthorized
-        - forbidden
-        - not_found
-        - misconfigured
-        - internal_error
-        - upstream_error
+        - invalid_request
+        - invalid_target
+        - unsupported_grant_type
+        - server_error
+        - temporarily_unavailable

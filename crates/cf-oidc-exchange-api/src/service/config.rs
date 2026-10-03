@@ -374,7 +374,7 @@ pub struct ProviderConfig {
     pub issuer: String,
     /// A value the token's `aud` must have.
     pub audience: String,
-    /// Where its keys are. `None` means its discovery document says.
+    /// Where its keys are. `None` means its metadata says.
     #[serde(default)]
     pub jwks_uri: Option<String>,
     /// Every token from it must match one of these, whichever profile it gets.

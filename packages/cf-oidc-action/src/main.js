@@ -7,13 +7,16 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { brokerURL, fail, idToken, input, mask, write } from "./runner.js";
 
-/** Hints for the statuses a misconfigured workflow or policy usually produces. */
-const HINTS = /** @type {Record<number, string>} */ ({
-  401: "the broker rejected the OIDC token; check that broker-url matches the GitHub provider's audience in the policy",
-  403: "the policy doesn't allow this workflow",
-  404: "the broker doesn't serve /oauth/token; deploy the broker from the same release as the action",
-  500: "the broker is misconfigured; check its logs",
+/** Hints for the errors a misconfigured workflow or policy usually produces, by OAuth error code. */
+const HINTS = /** @type {Record<string, string>} */ ({
+  invalid_request:
+    "check that broker-url matches the GitHub provider's audience in the policy, and that the policy allows this workflow",
+  server_error: "the broker is misconfigured; check its logs",
+  temporarily_unavailable: "Cloudflare or GitHub's OIDC issuer failed; try again",
 });
+
+/** A broker that answers 404 isn't one that serves /oauth/token. */
+const NOT_FOUND = "the broker doesn't serve /oauth/token; deploy the broker from the same release as the action";
 
 /** Formats a Unix time in seconds like the broker's RFC 3339 timestamps, e.g. `2026-09-28T12:15:00Z`. */
 const rfc3339 = (/** @type {number} */ seconds) => new Date(seconds * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -59,9 +62,9 @@ try {
     signal: AbortSignal.timeout(30_000),
   });
   if (!response.ok) {
-    const { error, message } = /** @type {Partial<BrokerError>} */ (await response.json().catch(() => ({})));
-    const said = [error, message].filter(Boolean).join(": ");
-    const hint = HINTS[response.status];
+    const { error, error_description } = /** @type {Partial<BrokerError>} */ (await response.json().catch(() => ({})));
+    const said = [error, error_description].filter(Boolean).join(": ");
+    const hint = response.status === 404 ? NOT_FOUND : HINTS[error ?? ""];
     throw new Error(`cf-oidc broker returned ${response.status}${said ? ` (${said})` : ""}${hint ? `: ${hint}` : ""}`);
   }
 

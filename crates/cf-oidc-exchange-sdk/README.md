@@ -9,7 +9,7 @@ part of it: they're hand-written, in `src/service/handler.rs`, mounted into
 
 | Feature | |
 |---|---|
-| (always) | the types: requests, responses, the discovery document, the JWKS, errors |
+| (always) | the types: requests, responses, the authorization server metadata (RFC 8414), the JWKS, OAuth errors |
 | `server` | `ExchangeServiceApi`, a response enum per operation, and `exchange_service_api_router`, an axum router that checks each request against the spec before it reaches a handler. `HealthHandler`, which answers the health endpoints beside it, `/health/live` and `/health/ready`. |
 | `client` | `HttpClient`, a method per operation, and `HealthClient`, which asks the health endpoints. |
 

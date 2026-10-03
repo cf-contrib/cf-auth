@@ -1,6 +1,6 @@
 //! Issuers' keys: a JWK Set (RFC 7517 §5), found at the `jwks_uri` a
-//! provider configures or its OpenID Provider Metadata names (OpenID Connect
-//! Discovery 1.0 §4), and cached per isolate.
+//! provider configures or its metadata names (OpenID Connect Discovery 1.0
+//! §4, or RFC 8414 §3), and cached per isolate.
 
 use std::{cell::RefCell, collections::HashMap};
 
@@ -47,30 +47,46 @@ pub(crate) async fn find_key<P: Provider>(
 }
 
 async fn fetch_keys<P: Provider>(provider: &P, now_ms: u64) -> Result<KeySet, Error> {
-    let issuer = provider.issuer();
     let jwks_uri = match provider.jwks_uri() {
         Some(jwks_uri) => jwks_uri.to_string(),
-        None => {
-            let url = format!(
-                "{}/.well-known/openid-configuration",
-                issuer.trim_end_matches('/')
-            );
-            let metadata: ProviderMetadata = fetch_json(&url).await?;
-            // The metadata must name its own issuer (OpenID Connect Discovery
-            // 1.0 §4.3), so one issuer can't hand out another's keys.
-            if metadata.issuer != issuer {
-                return Err(Error::TemporarilyUnavailable(format!(
-                    "{url} is for issuer {}, not {issuer}",
-                    metadata.issuer
-                )));
-            }
-            check_url(&metadata.jwks_uri)
-                .map_err(|why| Error::TemporarilyUnavailable(format!("{url}: jwks_uri {why}")))?;
-            metadata.jwks_uri
-        }
+        None => metadata_jwks_uri(provider.issuer()).await?,
     };
     let jwks: JwkSet = fetch_json(&jwks_uri).await?;
     Ok(KeySet::parse(jwks, now_ms))
+}
+
+/// The `jwks_uri` in `issuer`'s metadata: its OpenID Provider Metadata, or,
+/// when it publishes none, its Authorization Server Metadata.
+async fn metadata_jwks_uri(issuer: &str) -> Result<String, Error> {
+    let mut failures = Vec::new();
+    for url in metadata_urls(issuer) {
+        match fetch_json::<Metadata>(&url).await {
+            Ok(metadata) => return metadata.jwks_uri(issuer, &url),
+            Err(err) => failures.push(err.to_string()),
+        }
+    }
+    Err(Error::TemporarilyUnavailable(failures.join("; ")))
+}
+
+/// Where `issuer` publishes its metadata, in the order tried:
+///
+/// - OpenID Connect Discovery 1.0 §4 appends
+///   `/.well-known/openid-configuration` to the issuer;
+/// - RFC 8414 §3.1 puts `/.well-known/oauth-authorization-server` between
+///   its host and its path.
+///
+/// A trailing `/` on the issuer is dropped first, as both say.
+fn metadata_urls(issuer: &str) -> [String; 2] {
+    let issuer = issuer.trim_end_matches('/');
+    let host_end = issuer
+        .find("://")
+        .and_then(|scheme| issuer[scheme + 3..].find('/').map(|path| scheme + 3 + path))
+        .unwrap_or(issuer.len());
+    let (origin, path) = issuer.split_at(host_end);
+    [
+        format!("{issuer}/.well-known/openid-configuration"),
+        format!("{origin}/.well-known/oauth-authorization-server{path}"),
+    ]
 }
 
 async fn fetch_json<T: DeserializeOwned>(url: &str) -> Result<T, Error> {
@@ -94,11 +110,32 @@ async fn fetch_json<T: DeserializeOwned>(url: &str) -> Result<T, Error> {
     resp.json().await.map_err(unavailable)
 }
 
-/// The OpenID Provider Metadata (OpenID Connect Discovery 1.0 §3) read.
+/// What's read of an issuer's metadata: OpenID Provider Metadata (OpenID
+/// Connect Discovery 1.0 §3) or Authorization Server Metadata (RFC 8414 §2),
+/// whose `issuer` and `jwks_uri` mean the same.
 #[derive(Deserialize)]
-struct ProviderMetadata {
+struct Metadata {
     issuer: String,
-    jwks_uri: String,
+    jwks_uri: Option<String>,
+}
+
+impl Metadata {
+    /// Its `jwks_uri`, if it's `issuer`'s, fetched from `url`. The metadata
+    /// must name its own issuer (OpenID Connect Discovery 1.0 §4.3, RFC 8414
+    /// §3.3), so one issuer can't hand out another's keys.
+    fn jwks_uri(self, issuer: &str, url: &str) -> Result<String, Error> {
+        let unavailable = |why: String| Err(Error::TemporarilyUnavailable(format!("{url}: {why}")));
+        if self.issuer != issuer {
+            return unavailable(format!("is for issuer {}, not {issuer}", self.issuer));
+        }
+        let Some(jwks_uri) = self.jwks_uri else {
+            return unavailable("names no jwks_uri".to_string());
+        };
+        if let Err(why) = check_url(&jwks_uri) {
+            return unavailable(format!("jwks_uri {why}"));
+        }
+        Ok(jwks_uri)
+    }
 }
 
 /// A JWK Set (RFC 7517 §5).
@@ -238,6 +275,61 @@ mod tests {
             .filter_map(|key| key.kid.as_deref())
             .collect();
         assert_eq!(kids, ["plain", "sig"]);
+    }
+
+    #[test]
+    fn finds_metadata_where_both_specs_put_it() {
+        assert_eq!(
+            metadata_urls("https://broker.example.com"),
+            [
+                "https://broker.example.com/.well-known/openid-configuration",
+                "https://broker.example.com/.well-known/oauth-authorization-server",
+            ]
+        );
+        assert_eq!(
+            metadata_urls("https://gitlab.example.com/tenant/"),
+            [
+                "https://gitlab.example.com/tenant/.well-known/openid-configuration",
+                "https://gitlab.example.com/.well-known/oauth-authorization-server/tenant",
+            ]
+        );
+        assert_eq!(
+            metadata_urls("http://127.0.0.1:8788"),
+            [
+                "http://127.0.0.1:8788/.well-known/openid-configuration",
+                "http://127.0.0.1:8788/.well-known/oauth-authorization-server",
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_must_be_the_issuers_own() {
+        const ISSUER: &str = "https://broker.example.com";
+        const URL: &str = "https://broker.example.com/.well-known/oauth-authorization-server";
+        let metadata =
+            |value: serde_json::Value| -> Metadata { serde_json::from_value(value).unwrap() };
+
+        assert_eq!(
+            metadata(json!({ "issuer": ISSUER, "jwks_uri": "https://broker.example.com/jwks" }))
+                .jwks_uri(ISSUER, URL),
+            Ok("https://broker.example.com/jwks".to_string())
+        );
+        for (value, why) in [
+            (
+                json!({ "issuer": "https://other.example.com", "jwks_uri": "https://other.example.com/jwks" }),
+                "is for issuer https://other.example.com, not https://broker.example.com",
+            ),
+            (json!({ "issuer": ISSUER }), "names no jwks_uri"),
+            (
+                json!({ "issuer": ISSUER, "jwks_uri": "http://broker.example.com/jwks" }),
+                "jwks_uri must be an https:// URL",
+            ),
+        ] {
+            assert_eq!(
+                metadata(value).jwks_uri(ISSUER, URL),
+                Err(Error::TemporarilyUnavailable(format!("{URL}: {why}")))
+            );
+        }
     }
 
     #[test]
