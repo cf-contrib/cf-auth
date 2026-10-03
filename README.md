@@ -28,7 +28,7 @@ steps:
 
 | Component | Ships as | What it is |
 |---|---|---|
-| [Action](packages/cf-oidc-action) | `uses: cf-contrib/cf-oidc-exchange@<version>` | Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. No runtime dependencies. |
+| [Action](action) | `uses: cf-contrib/cf-oidc-exchange@<version>` | Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. No runtime dependencies. |
 | [Broker](crates/cf-oidc-exchange-api) | A Rust Worker in [Releases](https://github.com/cf-contrib/cf-oidc-exchange/releases), deployed with the [Terraform module](deployment/terraform) | A Worker in your account that checks the OIDC token against your policy and mints the Cloudflare token. |
 
 The action and the broker, with its Terraform module, are released together from one tag, so deploy the broker from the release whose action you use. The action talks only to the broker, never to the Cloudflare API.
@@ -79,7 +79,7 @@ If a stored secret is acceptable to you, it's less to run.
 1. **Create the broker token.** In the Cloudflare dashboard, create an account-owned API token with **Account API Tokens Write** (plus R2 permissions for [buckets](crates/cf-oidc-exchange-api#buckets)), and store it in Secrets Store.
 2. **Write a policy** that says which repos, branches and environments get which permissions. See the [broker's README](crates/cf-oidc-exchange-api#policy).
 3. **Deploy the broker** with the [Terraform module](deployment/terraform), on workers.dev (a custom domain is optional), then check that `<broker-url>/.well-known/oauth-authorization-server` returns `200`.
-4. **Add the action** to a job with `permissions: id-token: write`. See the [action's README](packages/cf-oidc-action).
+4. **Add the action** to a job with `permissions: id-token: write`. See the [action's README](action).
 
 ## Development
 
@@ -94,7 +94,7 @@ crates/cf-oidc-exchange-api/tests/run.sh                    # the broker end to 
 
 | Directory | |
 |---|---|
-| [`packages/cf-oidc-action`](packages/cf-oidc-action) | The action, in JavaScript with no runtime dependencies. |
+| [`action`](action) | The action, in JavaScript with no runtime dependencies. |
 | [`crates/cf-oidc-exchange-api`](crates/cf-oidc-exchange-api) | The broker, a Rust Worker. |
 | [`crates/cf-oidc-exchange-sdk`](crates/cf-oidc-exchange-sdk) | The broker's API, generated from its OpenAPI document. |
 | [`crates/cf-oidc-core`](crates/cf-oidc-core) | OIDC tokens in Workers, verified and signed, which the broker and cf-nix-cache share. |

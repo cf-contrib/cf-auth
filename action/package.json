@@ -1,5 +1,5 @@
 {
-  "name": "cf-oidc-action",
+  "name": "cf-oidc-exchange-action",
   "version": "0.0.0",
   "private": true,
   "type": "module",

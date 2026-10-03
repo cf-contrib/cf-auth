@@ -16,5 +16,5 @@ inputs:
     description: Requested token lifetime such as 10m or 1h (capped by the broker)
 runs:
   using: node24
-  main: packages/cf-oidc-action/src/main.js
-  post: packages/cf-oidc-action/src/post.js
+  main: action/src/main.js
+  post: action/src/post.js

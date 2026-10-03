@@ -1,4 +1,4 @@
 packages:
-  - "packages/*"
+  - "action"
 allowBuilds:
   esbuild: true

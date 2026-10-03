@@ -11,7 +11,7 @@
       "bump-minor-pre-major": true,
       "extra-files": [
         "README.md",
-        "packages/cf-oidc-action/README.md",
+        "action/README.md",
         "deployment/terraform/README.md",
         "deployment/terraform/variables.tf"
       ]

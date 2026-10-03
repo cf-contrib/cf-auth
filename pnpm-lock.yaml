@@ -12,7 +12,7 @@ importers:
         specifier: ^2.5.14
         version: 2.5.14
 
-  packages/cf-oidc-action:
+  action:
     devDependencies:
       '@types/node':
         specifier: ^24.0.0
