@@ -25,7 +25,8 @@ crons = ["17 * * * *"] # hourly cleanup of expired cf-oidc:* tokens
 CF_OIDC_EXCHANGE_API_ACCOUNT_ID = "0123456789abcdef0123456789abcdef"
 CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL = "http://127.0.0.1:8791/cloudflare/client/v4"
 # `mismatched`'s discovery document names another issuer, and so does
-# `pinned`'s, whose keys are at its jwks_uri.
+# `pinned`'s, whose keys are at its jwks_uri. `typed` takes only access tokens,
+# which the stand-ins don't sign.
 CF_OIDC_EXCHANGE_API_POLICY = '''
 {
   "version": 3,
@@ -34,7 +35,8 @@ CF_OIDC_EXCHANGE_API_POLICY = '''
     { "name": "github", "issuer": "http://127.0.0.1:8791/issuers/actions", "audience": "http://127.0.0.1:8790", "claims": [{ "repository_owner_id": "100000001" }] },
     { "name": "gitlab", "issuer": "http://127.0.0.1:8791/issuers/gitlab", "audience": "http://127.0.0.1:8790", "claims": [{ "namespace_id": "4000001" }] },
     { "name": "mismatched", "issuer": "http://127.0.0.1:8791/issuers/mismatched", "audience": "http://127.0.0.1:8790", "claims": [{ "namespace_id": "4000001" }] },
-    { "name": "pinned", "issuer": "http://127.0.0.1:8791/issuers/pinned", "audience": "http://127.0.0.1:8790", "jwks_uri": "http://127.0.0.1:8791/issuers/pinned/.well-known/jwks", "claims": [{ "namespace_id": "4000001" }] }
+    { "name": "pinned", "issuer": "http://127.0.0.1:8791/issuers/pinned", "audience": "http://127.0.0.1:8790", "jwks_uri": "http://127.0.0.1:8791/issuers/pinned/.well-known/jwks", "claims": [{ "namespace_id": "4000001" }] },
+    { "name": "typed", "issuer": "http://127.0.0.1:8791/issuers/typed", "audience": "http://127.0.0.1:8790", "typ": "at+jwt", "claims": [{ "namespace_id": "4000001" }] }
   ],
   "defaults": { "ttl": "15m", "max_ttl": "1h" },
   "profiles": [
