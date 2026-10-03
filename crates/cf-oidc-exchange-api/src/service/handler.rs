@@ -176,7 +176,7 @@ impl ExchangeServiceHandler {
             provider = %provider.name,
             profile = %profile.name,
             sub = identity.claims.sub(),
-            claims = %serde_json::Value::Object(provider.matched(Some(profile), &identity.claims)),
+            claims = %serde_json::Value::Object(provider.matched_claims(Some(profile), &identity.claims)),
             audience = %profile.audience,
             jti = %signed.jti,
             expires_at,
@@ -204,7 +204,8 @@ impl ExchangeServiceHandler {
         ttl: u64,
     ) -> Result<TokenExchangeResponse, Error> {
         let account_id = self.config.account_id();
-        let claims = serde_json::Value::Object(provider.matched(Some(profile), &identity.claims));
+        let claims =
+            serde_json::Value::Object(provider.matched_claims(Some(profile), &identity.claims));
 
         // Filled in before anything is minted, so an unusable claim leaves
         // nothing behind.
@@ -503,7 +504,7 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                         profile,
                         sub = caller.as_ref().and_then(|(identity, _)| identity.claims.sub()),
                         claims = caller.as_ref().map(|(identity, provider)| {
-                            display(serde_json::Value::Object(provider.matched(named, &identity.claims)))
+                            display(serde_json::Value::Object(provider.matched_claims(named, &identity.claims)))
                         }),
                         error = err.error.as_str(),
                         message = %err.error_description,
@@ -547,9 +548,7 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
             // recognize one invalid, expired, deleted or another account's.
             let revoked = async {
                 let account_id = self.config.account_id();
-                let presenter = HttpClient::new()
-                    .with_base_url(self.config.cloudflare_url())
-                    .with_api_key(&request.token);
+                let presenter = self.config.cloudflare_as(&request.token);
                 let status = |err: &ApiOpError<_>| err.api().map(|api| api.status);
                 let id = match presenter.accounts_tokens_verify(account_id).await {
                     Ok(verified) => match verified.result {
@@ -751,7 +750,7 @@ fn payload(
         ));
     }
 
-    let mut other = provider.matched(Some(profile), claims);
+    let mut other = provider.matched_claims(Some(profile), claims);
     for (name, value) in [
         ("provider", json!(provider.name)),
         ("profile", json!(profile.name)),
