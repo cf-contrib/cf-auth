@@ -1,14 +1,81 @@
-//! Claim rules: what a JWT's claims must be for a provider to take it. Our
-//! policy, not any RFC's: [`authorize`](crate::authorize) applies them to a
-//! token [`verify`](crate::verify) accepted.
+//! The policy: what a JWT's claims must be to be let in. Ours, not any
+//! RFC's: [`ClaimRules::authorize`] applies it to a token
+//! [`Providers::verify`](crate::Providers::verify) accepted.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::Deref};
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+use crate::{Claims, Error};
+
+/// The claim rules a token must match one of: a provider's, or anything else
+/// a configuration lets a token in by. Written as a JSON array of
+/// [`ClaimRule`]s, which configurations call claim sets.
+///
+/// Deserializing doesn't check it isn't empty: [`check`](Self::check) does,
+/// saying where. An empty list lets nothing in either way.
+#[derive(Debug, Default, Deserialize)]
+#[serde(transparent)]
+pub struct ClaimRules(Vec<ClaimRule>);
+
+impl ClaimRules {
+    /// The index of the first rule `claims` match: what lets a verified
+    /// token in.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InsufficientScope`] when none does.
+    pub fn authorize(&self, claims: &Claims) -> Result<usize, Error> {
+        self.0
+            .iter()
+            .position(|rule| rule.matches(claims))
+            .ok_or_else(|| Error::InsufficientScope {
+                issuer: claims.iss().unwrap_or_default().to_string(),
+                subject: claims.sub().map(String::from),
+            })
+    }
+
+    /// Whether `claims` match any rule.
+    pub fn matches(&self, claims: &Map<String, Value>) -> bool {
+        self.0.iter().any(|rule| rule.matches(claims))
+    }
+
+    /// The claims any rule matches on.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().flat_map(ClaimRule::names)
+    }
+
+    /// What deserializing can't check: that there's a rule at all. `at` is
+    /// where the rules are, for the message.
+    ///
+    /// # Errors
+    ///
+    /// When there's none.
+    pub fn check(&self, at: &str) -> Result<(), String> {
+        if self.0.is_empty() {
+            return Err(format!("{at} must contain at least one claim set"));
+        }
+        Ok(())
+    }
+}
+
+impl Deref for ClaimRules {
+    type Target = [ClaimRule];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Vec<ClaimRule>> for ClaimRules {
+    fn from(rules: Vec<ClaimRule>) -> Self {
+        Self(rules)
+    }
+}
+
 /// Claim name to pattern: a rule a JWT Claims Set matches when every claim
-/// it names does. Configurations call a list of them a provider's claim sets.
+/// it names does. Configurations call it a claim set.
 ///
 /// Written as a JSON object: `{ "repository_owner_id": "100000001", "ref":
 /// "refs/heads/*" }`. Each value is a non-empty string, a number or a
@@ -56,8 +123,8 @@ impl TryFrom<Map<String, Value>> for ClaimRule {
 }
 
 impl ClaimRule {
-    /// Whether `claims` match every claim in the rule. A [`Claims`](crate::Claims)
-    /// derefs to the map this takes.
+    /// Whether `claims` match every claim in the rule. A [`Claims`] derefs to
+    /// the map this takes.
     pub fn matches(&self, claims: &Map<String, Value>) -> bool {
         self.0
             .iter()
@@ -132,6 +199,7 @@ mod tests {
 
     fn claims() -> Map<String, Value> {
         json!({
+            "iss": "https://token.actions.githubusercontent.com",
             "sub": "repo:example-org/app:ref:refs/heads/main",
             "repository": "example-org/app",
             "repository_id": "200000002",
@@ -165,6 +233,53 @@ mod tests {
             let err = rule(value.clone()).unwrap_err();
             assert!(err.contains(expected), "{value}: {err}");
         }
+    }
+
+    fn rules(value: Value) -> ClaimRules {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn authorize_returns_the_first_matching_rule() {
+        let rules = rules(json!([
+            { "ref": "refs/heads/release" },
+            { "repository_owner_id": "100000001" },
+            { "ref": "refs/heads/*" },
+        ]));
+        assert_eq!(rules.authorize(&claims().into()), Ok(1));
+        assert!(rules.matches(&claims()));
+        assert_eq!(
+            rules.names().collect::<Vec<_>>(),
+            ["ref", "repository_owner_id", "ref"]
+        );
+    }
+
+    #[test]
+    fn authorize_refuses_when_no_rule_matches() {
+        let err = rules(json!([{ "ref": "refs/heads/release" }]))
+            .authorize(&claims().into())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            Error::InsufficientScope {
+                issuer: "https://token.actions.githubusercontent.com".to_string(),
+                subject: Some("repo:example-org/app:ref:refs/heads/main".to_string()),
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "the token matches none of https://token.actions.githubusercontent.com's claim rules"
+        );
+        let none = ClaimRules::default();
+        assert!(
+            none.authorize(&claims().into()).is_err(),
+            "no rules, no access"
+        );
+        assert!(!none.matches(&claims()));
+        assert_eq!(
+            none.check("providers[0].claims"),
+            Err("providers[0].claims must contain at least one claim set".to_string())
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use cf_oidc_core::{ClaimRule, Provider, check_url};
+use cf_oidc_core::{ClaimRules, Provider, Providers, check_url};
 use cloudflare::v4::{
     HttpClient, IamEffect, IamPermissionGroup,
     IamPermissionsGroupResponseCollectionResultItem as PermissionGroup,
@@ -202,7 +202,7 @@ pub struct PolicyConfig {
     /// The broker's own URL: the issuer of the tokens it signs for other
     /// services.
     pub issuer: String,
-    pub providers: Vec<ProviderConfig>,
+    pub providers: Providers<ProviderConfig>,
     /// The TTLs of profiles that don't set their own.
     #[serde(default)]
     defaults: Ttls,
@@ -232,18 +232,15 @@ impl PolicyConfig {
         }
         check_origin(&self.issuer).map_err(|why| format!("issuer {why}"))?;
 
-        if self.providers.is_empty() {
-            return Err("providers must name at least one provider".to_string());
-        }
+        self.providers.check("providers")?;
         for (index, provider) in self.providers.iter().enumerate() {
             let at = format!("providers[{index}]");
             provider.check(&at)?;
-            let earlier = &self.providers[..index];
-            if earlier.iter().any(|other| other.name == provider.name) {
+            if self.providers[..index]
+                .iter()
+                .any(|other| other.name == provider.name)
+            {
                 return Err(format!("{at}: {} is named twice", provider.name));
-            }
-            if earlier.iter().any(|other| other.issuer == provider.issuer) {
-                return Err(format!("{at}: {} is configured twice", provider.issuer));
             }
         }
 
@@ -254,7 +251,7 @@ impl PolicyConfig {
             return Err("profiles must name at least one profile".to_string());
         }
         // With one provider, it's the only one a profile can be for.
-        let only = match self.providers.as_slice() {
+        let only = match &self.providers[..] {
             [only] => Some(only.name.clone()),
             _ => None,
         };
@@ -299,13 +296,10 @@ impl PolicyConfig {
             .get("iss")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        self.providers
-            .iter()
-            .find(|provider| provider.issuer == iss)
-            .ok_or_else(|| {
-                let shown: String = iss.chars().take(200).collect();
-                format!("no provider is for issuer {shown}")
-            })
+        self.providers.find(iss).ok_or_else(|| {
+            let shown: String = iss.chars().take(200).collect();
+            format!("no provider is for issuer {shown}")
+        })
     }
 
     /// The profile a token from `provider` with `claims` gets for
@@ -323,8 +317,7 @@ impl PolicyConfig {
         requested: Option<&str>,
         audience: &str,
     ) -> Result<&ProfileConfig, String> {
-        let matches =
-            |p: &ProfileConfig| p.enabled && p.claims.iter().any(|set| set.matches(claims));
+        let matches = |p: &ProfileConfig| p.enabled && p.claims.matches(claims);
         let mut profiles = self
             .profiles
             .iter()
@@ -378,7 +371,7 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub jwks_uri: Option<String>,
     /// Every token from it must match one of these, whichever profile it gets.
-    pub claims: Vec<ClaimRule>,
+    pub claims: ClaimRules,
 }
 
 /// What the auth layer verifies a token from it against.
@@ -405,11 +398,10 @@ impl ProviderConfig {
         profile: Option<&ProfileConfig>,
         claims: &Map<String, Value>,
     ) -> Map<String, Value> {
-        let profile = profile.map(|p| p.claims.as_slice()).unwrap_or_default();
+        let profile = profile.map(|p| p.claims.names());
         self.claims
-            .iter()
-            .chain(profile)
-            .flat_map(ClaimRule::names)
+            .names()
+            .chain(profile.into_iter().flatten())
             .filter_map(|name| {
                 let value = claims.get(name).filter(|v| copyable(v))?;
                 Some((name.to_string(), value.clone()))
@@ -418,20 +410,12 @@ impl ProviderConfig {
     }
 
     fn check(&self, at: &str) -> Result<(), String> {
+        // Its issuer, jwks_uri and audience are the providers' check.
         check_name(&self.name).map_err(|why| format!("{at}.name {why}"))?;
-        check_url(&self.issuer).map_err(|why| format!("{at}.issuer {why}"))?;
-        if let Some(jwks_uri) = &self.jwks_uri {
-            check_url(jwks_uri).map_err(|why| format!("{at}.jwks_uri {why}"))?;
-        }
-        if self.audience.is_empty() {
-            return Err(format!("{at}.audience must not be empty"));
-        }
         // Guardrail 1: the provider is pinned. An issuer that gives anyone's
         // projects a token, as GitHub Actions does, would otherwise let them
         // all in.
-        if self.claims.is_empty() {
-            return Err(format!("{at}.claims must contain at least one claim set"));
-        }
+        self.claims.check(&format!("{at}.claims"))?;
         Ok(())
     }
 }
@@ -454,7 +438,7 @@ pub struct ProfileConfig {
     #[serde(default = "cloudflare_audience")]
     pub audience: String,
     /// A token must match one of these, as well as one of its provider's.
-    pub claims: Vec<ClaimRule>,
+    pub claims: ClaimRules,
     /// For everything it hands out, the token and the buckets' credentials,
     /// in milliseconds. Taken from the defaults when unset.
     #[serde(default, deserialize_with = "duration")]
@@ -495,9 +479,7 @@ impl ProfileConfig {
 
     fn check(&self, at: &str, issuer: &str, account_id: &str) -> Result<(), String> {
         check_name(&self.name).map_err(|why| format!("{at}.name {why}"))?;
-        if self.claims.is_empty() {
-            return Err(format!("{at}.claims must contain at least one claim set"));
-        }
+        self.claims.check(&format!("{at}.claims"))?;
 
         // Guardrail 5: audiences are kept apart. The broker signs its own
         // token for another service; Cloudflare credentials are another
