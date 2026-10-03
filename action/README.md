@@ -1,11 +1,11 @@
 # cf-oidc-exchange action
 
-> The GitHub Action half of [cf-oidc-exchange](../..): exchange the job's OIDC token for
+> The GitHub Action half of [cf-oidc-exchange](..): exchange the job's OIDC token for
 > a short-lived Cloudflare API token and/or R2 credentials, export them, and revoke
 > the token when the job ends.
 
 [![CI](https://github.com/cf-contrib/cf-oidc-exchange/actions/workflows/ci.yml/badge.svg)](https://github.com/cf-contrib/cf-oidc-exchange/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 
 > [!NOTE]
 > **Pre-1.0.** Inputs may still change between minor versions.
@@ -27,7 +27,7 @@ jobs:
       - run: npx wrangler deploy
 ```
 
-It needs a deployed [broker](../../crates/cf-oidc-exchange-api) whose policy allows this workflow.
+It needs a deployed [broker](../crates/cf-oidc-exchange-api) whose policy allows this workflow.
 
 ## Versions
 
@@ -100,7 +100,7 @@ None of this can be switched off: what's exported is decided by the profile. Exp
 
 ### R2 over the S3 API
 
-When the matched profile has [`buckets`](../../crates/cf-oidc-exchange-api#buckets), the broker returns temporary R2 credentials for each bucket, limited to its key prefixes. The action writes them to a credentials file, `$RUNNER_TEMP/cf-oidc/credentials` (mode `0600`), with one AWS profile per bucket, named after it. It exports:
+When the matched profile has [`buckets`](../crates/cf-oidc-exchange-api#buckets), the broker returns temporary R2 credentials for each bucket, limited to its key prefixes. The action writes them to a credentials file, `$RUNNER_TEMP/cf-oidc/credentials` (mode `0600`), with one AWS profile per bucket, named after it. It exports:
 
 | Variable | One bucket | Several buckets |
 |---|---|---|
@@ -151,7 +151,7 @@ jobs:
 |---|---|
 | `OIDC unavailable: add permissions: id-token: write to the job` | The job can't request an OIDC token. Add the permission. Fork PRs on `pull_request` never get it. |
 | `broker returned 400 (invalid_request: …)` | The broker rejected the OIDC token, usually because `url` doesn't match the GitHub provider's `audience` in the policy; or no profile allows this workflow, or the named `profile` doesn't match. The description says which. |
-| `broker returned 503 (temporarily_unavailable: …)` | The Cloudflare API, GitHub or the token's issuer failed; the broker's audit log (`token.deny`) says which. For a profile with `buckets`, it's usually a broker token without enough R2 permissions on the bucket. |
+| `broker returned 503 (temporarily_unavailable: …)` | The Cloudflare API or the subject token's issuer failed; the broker's log (`token.deny`) says which. For a profile with `buckets`, it's usually a Cloudflare token without enough R2 permissions on the bucket. |
 | `broker returned 500 (server_error: …)` | The broker's policy or bindings are invalid. The broker's logs say why. |
 | `url must use https` | Plain `http` is only accepted for `localhost` and `127.0.0.1`. |
 | `AccessDenied` from S3 on some keys | The credentials only cover the bucket's prefixes: keep every key under `$CLOUDFLARE_R2_PREFIX`. |
@@ -166,4 +166,4 @@ jobs:
 
 ## License
 
-[MIT](../../LICENSE)
+[MIT](../LICENSE)
