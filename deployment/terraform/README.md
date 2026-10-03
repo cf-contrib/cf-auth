@@ -6,7 +6,7 @@
 > build is needed.
 
 ```hcl
-module "cf_oidc_broker" {
+module "cf_oidc_exchange" {
   source = "git::https://github.com/cf-contrib/cf-oidc-exchange.git//deployment/terraform?ref=v0.9.0" # x-release-please-version
 
   account_id              = var.account_id
@@ -34,7 +34,7 @@ module "cf_oidc_broker" {
 }
 
 output "broker_url" {
-  value = module.cf_oidc_broker.url
+  value = module.cf_oidc_exchange.url
 }
 ```
 
