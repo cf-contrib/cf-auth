@@ -1,6 +1,6 @@
 //! The integration tests' world: stand-ins for the OIDC issuers and
 //! Cloudflare's API, served from the test process. The Worker's policy is in
-//! `wrangler.test.toml`. All IDs, tokens and keys are made up.
+//! `wrangler.toml`. All IDs, tokens and keys are made up.
 
 #![allow(dead_code)]
 
@@ -33,7 +33,7 @@ use serde_json::{Map, Value, json};
 pub const BROKER: &str = "http://127.0.0.1:8790";
 pub const AUDIENCE: &str = BROKER;
 
-/// Where the stand-ins listen; `wrangler.test.toml` points the Worker here.
+/// Where the stand-ins listen; `wrangler.toml` points the Worker here.
 const STAND_INS: &str = "http://127.0.0.1:8791";
 const STAND_INS_ADDR: &str = "127.0.0.1:8791";
 

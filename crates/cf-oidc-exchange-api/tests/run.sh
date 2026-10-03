@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs the integration tests: creates the test secrets in a local Secrets Store,
-# starts the stand-ins build under `wrangler dev`, runs the tests against it, and
-# stops it. All keys and tokens are made up and thrown away afterwards.
+# starts the Worker as wrangler.toml has it under `wrangler dev`, runs the tests
+# against it, and stops it. All keys and tokens are made up and thrown away
+# afterwards.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,7 +21,7 @@ secret() {
 secret cloudflare-token test-cloudflare-token
 secret signing-key "$(cat "$KEYS/signing.pem")"
 
-wrangler dev -c wrangler.test.toml --port 8790 --persist-to "$PERSIST" --test-scheduled >"$LOG" 2>&1 &
+wrangler dev --persist-to "$PERSIST" --test-scheduled >"$LOG" 2>&1 &
 DEV=$!
 for _ in $(seq 120); do
   curl -s -o /dev/null http://127.0.0.1:8790/ && break

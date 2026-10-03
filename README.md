@@ -27,13 +27,13 @@ steps:
   - run: npx wrangler deploy # CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID are set
 ```
 
-| Part | Ships as | What it is |
+| | Ships as | What it is |
 |---|---|---|
-| [Action](action) | `uses: cf-contrib/cf-oidc-exchange@<version>` | Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. JavaScript, with no runtime dependencies. |
-| [Broker](crates/cf-oidc-exchange-api) | A Rust Worker in [Releases](https://github.com/cf-contrib/cf-oidc-exchange/releases) | A Worker in your account that checks the OIDC token against your policy and mints the Cloudflare token. |
-| [Terraform module](deployment/terraform) | `//deployment/terraform?ref=<version>` | Deploys the broker from a release: your policy, its bindings, its URL and its cron. |
-| [SDK](crates/cf-oidc-exchange-sdk) | A Rust crate, from git | The broker's API, generated from its OpenAPI document: its types, the server the broker implements, and a client. |
-| [cf-oidc-core](crates/cf-oidc-core) | A Rust crate, from git | OIDC tokens in Workers, verified and signed, which the broker and cf-nix-cache share. |
+| [`action`](action) | `uses: cf-contrib/cf-oidc-exchange@<version>` | The GitHub Action, in JavaScript with no runtime dependencies. Gets the job's OIDC token, exports the minted Cloudflare token, and revokes it at job end. |
+| [`crates/cf-oidc-exchange-api`](crates/cf-oidc-exchange-api) | `index.js` + `index_bg.wasm.base64` in [Releases](https://github.com/cf-contrib/cf-oidc-exchange/releases) | The broker, a Cloudflare Worker written in Rust, in your account. Checks the OIDC token against your policy, and mints the Cloudflare token or R2 credentials, or signs a token for another service. |
+| [`crates/cf-oidc-exchange-sdk`](crates/cf-oidc-exchange-sdk) | A Rust crate in this workspace; not published | The broker's HTTP API: its [OpenAPI document](crates/cf-oidc-exchange-sdk/openapi/oidc/exchange/v1/exchangev1.yaml), and the types, server traits and client generated from it; hand-written beside them, the health endpoints. The Worker builds on it. |
+| [`crates/cf-oidc-core`](crates/cf-oidc-core) | A Rust crate in this workspace; not published | OIDC tokens in Workers, verified and signed. The Worker builds on it, and cf-nix-cache can too. |
+| [`deployment/terraform`](deployment/terraform) | `//deployment/terraform?ref=<version>` | Deploys the released Worker with your policy, its bindings and its cron. |
 
 The action and the broker, with its Terraform module, are released together from one tag, so deploy the broker from the release whose action you use. The action talks only to the broker, never to the Cloudflare API.
 
