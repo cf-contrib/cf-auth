@@ -1,5 +1,5 @@
-//! What runs around the API's routes, as layers: exchange auth, and the
-//! contract every response keeps.
+//! What runs around the API's routes, as tower layers: exchange auth, and
+//! OAuth's rules for every response.
 //!
 //! [`AuthenticateLayer`] is layered over the API's routes in the crate root.
 //! Every token exchange needs an OIDC token from a provider the policy names,
@@ -12,9 +12,9 @@
 //! [`cf_oidc_core::verified`], by the token as sent: never by decoding it
 //! itself, so a token the layer didn't verify gets nothing.
 //!
-//! [`respond`] is layered over everything: it gives the generated validation's
-//! refusals the `Error` body every error has, and every response its
-//! `Cache-Control`.
+//! [`OAuthResponseLayer`] is layered over everything: it gives the generated
+//! validation's refusals the OAuth error body every error has, and every
+//! response its `Cache-Control`.
 
 use std::{
     convert::Infallible,
@@ -29,7 +29,6 @@ use axum::{
     body::{Body, to_bytes},
     extract::Request,
     http::{HeaderValue, Method, StatusCode, header},
-    middleware::Next,
     response::{IntoResponse, Response},
 };
 use cf_oidc_exchange_sdk::v1::{self, ErrorCode};
@@ -147,7 +146,7 @@ where
             });
             match accepted.await {
                 Ok(_) => inner.call(req).await,
-                Err(err) => Ok(refuse(policy, err)),
+                Err(err) => Ok(deny(policy, err)),
             }
         })
     }
@@ -162,11 +161,11 @@ fn form_field(body: &[u8], name: &str) -> Option<String> {
         .map(|(_, value)| value)
 }
 
-/// Refuses an exchange whose token `cf_oidc_core` didn't accept, with why
+/// Denies an exchange whose token `cf_oidc_core` didn't accept, with why
 /// logged, and returned unless it's an issuer's fault. A subject token that
 /// isn't valid, or that the policy doesn't take, is `invalid_request` (RFC
 /// 8693 §2.2.2).
-fn refuse(policy: &PolicyConfig, err: cf_oidc_core::Error) -> Response {
+fn deny(policy: &PolicyConfig, err: cf_oidc_core::Error) -> Response {
     let (status, body) = match err {
         cf_oidc_core::Error::InvalidToken(message) => {
             warn!(event = "token.deny", error = "invalid_request", %message);
@@ -202,56 +201,95 @@ fn refuse(policy: &PolicyConfig, err: cf_oidc_core::Error) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// The contract's error body for requests the generated validation refuses,
-/// and every response's `Cache-Control`.
+/// Makes every response one OAuth's rules allow (RFC 6749 §5): the generated
+/// validation's refusals the OAuth error every error is, and every response
+/// its `Cache-Control`.
 ///
 /// The generated validation answers `application/problem+json` with `400`,
-/// `413`, `415` or `422`; the contract has `400` with the OAuth error every
-/// error is, `invalid_request` (RFC 6749 §5.2).
-pub async fn respond(req: Request, next: Next) -> Response {
-    let path = req.uri().path().to_owned();
-    let response = next.run(req).await;
+/// `413`, `415` or `422`; OAuth has `400` with `invalid_request` (§5.2).
+/// Token responses must not be cached (§5.1), and neither must anything else
+/// but the metadata verifying the broker's tokens takes, which is public.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OAuthResponseLayer;
 
-    let problem = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .is_some_and(|value| value == "application/problem+json");
-    let mut response = if problem {
-        let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
-            .await
-            .unwrap_or_default();
-        let err = v1::Error::new(ErrorCode::InvalidRequest, rejection(&body));
-        // Logged like any refusal, with what was wrong, which never includes
-        // the values sent.
-        let event = if path == TOKEN_PATH {
-            "token.deny"
-        } else {
-            "token.revoke"
-        };
-        warn!(event, error = err.error.as_str(), message = %err.error_description);
-        (StatusCode::BAD_REQUEST, Json(err)).into_response()
-    } else {
-        response
-    };
+impl<S> Layer<S> for OAuthResponseLayer {
+    type Service = OAuthResponse<S>;
 
-    // What verifying the broker's tokens takes is public and cacheable;
-    // nothing else is.
-    let cache_control = if path.starts_with("/.well-known/") && response.status() == StatusCode::OK
-    {
-        "public, max-age=300"
-    } else {
-        "no-store"
-    };
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(cache_control),
-    );
-    response
+    fn layer(&self, inner: S) -> Self::Service {
+        OAuthResponse { inner }
+    }
+}
+
+/// [`OAuthResponseLayer`]'s service: hands the request to the service it
+/// wraps, then makes its response one OAuth's rules allow.
+#[derive(Clone)]
+pub struct OAuthResponse<S> {
+    inner: S,
+}
+
+impl<S> Service<Request> for OAuthResponse<S>
+where
+    S: Service<Request, Response = Response, Error = Infallible> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = Response;
+    type Error = Infallible;
+    type Future = Pin<Box<dyn Future<Output = Result<Response, Infallible>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request) -> Self::Future {
+        // The service polled ready is the one to call: a clone takes its
+        // place for the next request.
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+
+        Box::pin(async move {
+            let path = req.uri().path().to_owned();
+            let response = inner.call(req).await?;
+
+            let problem = response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .is_some_and(|value| value == "application/problem+json");
+            let mut response = if problem {
+                let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
+                    .await
+                    .unwrap_or_default();
+                let err = v1::Error::new(ErrorCode::InvalidRequest, problem_description(&body));
+                // Logged like any denial, with what was wrong, which never
+                // includes the values sent.
+                let event = if path == TOKEN_PATH {
+                    "token.deny"
+                } else {
+                    "token.revoke"
+                };
+                warn!(event, error = err.error.as_str(), message = %err.error_description);
+                (StatusCode::BAD_REQUEST, Json(err)).into_response()
+            } else {
+                response
+            };
+
+            let cache_control =
+                if path.starts_with("/.well-known/") && response.status() == StatusCode::OK {
+                    "public, max-age=300"
+                } else {
+                    "no-store"
+                };
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static(cache_control),
+            );
+            Ok(response)
+        })
+    }
 }
 
 /// What the generated validation found wrong, from its problem details: each
 /// violation's place and what's wrong there, or the problem itself.
-fn rejection(body: &[u8]) -> String {
+fn problem_description(body: &[u8]) -> String {
     let problem: Value = serde_json::from_slice(body).unwrap_or_default();
     let violations: Vec<String> = problem["errors"]
         .as_array()
@@ -306,12 +344,12 @@ mod tests {
             ],
         });
         assert_eq!(
-            rejection(problem.to_string().as_bytes()),
+            problem_description(problem.to_string().as_bytes()),
             "/body/token does not meet the length constraint; /body/grant_type is required"
         );
         let media = json!({ "type": "x", "title": "Unsupported media type", "status": 415, "code": "unsupported_media_type" });
         assert_eq!(
-            rejection(media.to_string().as_bytes()),
+            problem_description(media.to_string().as_bytes()),
             "the body must be form-encoded (application/x-www-form-urlencoded)"
         );
     }
