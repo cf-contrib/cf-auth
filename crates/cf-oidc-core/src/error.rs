@@ -31,7 +31,7 @@ impl fmt::Display for Error {
                 f.write_str(message)
             }
             Self::InsufficientScope { issuer, .. } => {
-                write!(f, "the token matches none of {issuer}'s claim rules")
+                write!(f, "the token matches none of {issuer}'s claim sets")
             }
         }
     }

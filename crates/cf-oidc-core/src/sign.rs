@@ -29,7 +29,8 @@ pub struct SigningKey {
     kid: String,
 }
 
-/// A token [`SigningKey::sign`] signed.
+/// A token a [`SigningKey`] signed, with [`sign`](SigningKey::sign) or
+/// [`sign_access_token`](SigningKey::sign_access_token).
 pub struct SignedToken {
     /// The token, a JWT.
     pub jwt: String,
@@ -93,7 +94,8 @@ impl SigningKey {
         })
     }
 
-    /// The key's ID: its public key's thumbprint.
+    /// The key's ID: its public key's RFC 7638 thumbprint, SHA-256 and
+    /// base64url, so a new key gets a new one without any configuration.
     pub fn kid(&self) -> &str {
         &self.kid
     }
