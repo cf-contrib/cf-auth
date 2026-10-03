@@ -375,7 +375,7 @@ impl ExchangeServiceHandler {
             None => (
                 None,
                 None,
-                IssuedTokenType::UrnCfOidcAuthParamsOauthTokenTypeR2Credentials,
+                IssuedTokenType::UrnCfOidcExchangeParamsOauthTokenTypeR2Credentials,
                 TokenType::NA,
             ),
         };
@@ -425,7 +425,7 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
                     (true, Some(t)) => matches!(
                         t,
                         IssuedTokenType::UrnIetfParamsOauthTokenTypeAccessToken
-                            | IssuedTokenType::UrnCfOidcAuthParamsOauthTokenTypeR2Credentials
+                            | IssuedTokenType::UrnCfOidcExchangeParamsOauthTokenTypeR2Credentials
                     ),
                     (false, Some(t)) => matches!(
                         t,

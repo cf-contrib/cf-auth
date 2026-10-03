@@ -10,7 +10,7 @@ import { brokerURL, fail, idToken, input, mask, write } from "./runner.js";
 /** Hints for the errors a misconfigured workflow or policy usually produces, by OAuth error code. */
 const HINTS = /** @type {Record<string, string>} */ ({
   invalid_request:
-    "check that broker-url matches the GitHub provider's audience in the policy, and that the policy allows this workflow",
+    "check that url matches the GitHub provider's audience in the policy, and that the policy allows this workflow",
   server_error: "the broker is misconfigured; check its logs",
   temporarily_unavailable: "Cloudflare or GitHub's OIDC issuer failed; try again",
 });
@@ -38,7 +38,7 @@ function requireStrings(obj, fields, at = "") {
 }
 
 try {
-  const broker = brokerURL(input("broker-url"));
+  const broker = brokerURL(input("url"));
   const jwt = await idToken(broker.origin);
   mask(jwt);
 

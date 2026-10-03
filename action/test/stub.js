@@ -26,7 +26,7 @@ export const STUB_BUCKET_2 = {
   prefixes: [],
 };
 const ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token";
-const R2_CREDENTIALS = "urn:cf-oidc-auth:params:oauth:token-type:r2-credentials";
+const R2_CREDENTIALS = "urn:cf-oidc-exchange:params:oauth:token-type:r2-credentials";
 /** A profile the stub answers as one with only buckets: no token, just STUB_BUCKET. */
 export const STUB_R2_PROFILE = "smoke-r2";
 /** A profile the stub answers as one with two buckets and no token. */

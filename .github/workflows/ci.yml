@@ -73,7 +73,7 @@ jobs:
           ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:8787/oidc?api-version=2.0
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: stub-request-token
         with:
-          broker-url: http://127.0.0.1:8787
+          url: http://127.0.0.1:8787
           profile: smoke-r2
       - name: Check Exported R2 Credentials
         run: |
@@ -98,7 +98,7 @@ jobs:
           ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:8787/oidc?api-version=2.0
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: stub-request-token
         with:
-          broker-url: http://127.0.0.1:8787
+          url: http://127.0.0.1:8787
           profile: smoke-r2-multi
       - name: Check Exported AWS Profiles
         run: |
@@ -117,7 +117,7 @@ jobs:
           ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:8787/oidc?api-version=2.0
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: stub-request-token
         with:
-          broker-url: http://127.0.0.1:8787
+          url: http://127.0.0.1:8787
           profile: smoke
           ttl: 5m
       - name: Check Exported Token
