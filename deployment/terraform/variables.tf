@@ -92,7 +92,7 @@ variable "defaults" {
 variable "release_tag" {
   type        = string
   description = "cf-oidc-exchange release to deploy, e.g. v1.2.3, or \"latest\". Defaults to the release this module comes from."
-  default     = "v0.9.0" # x-release-please-version
+  default     = "v0.10.0" # x-release-please-version
 }
 
 variable "worker_dir" {

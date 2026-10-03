@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.0](https://github.com/cf-contrib/cf-oidc-exchange/compare/v0.9.0...v0.10.0) (2026-10-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* the module's policy_file and policy_vars variables are gone; pass oidc_providers, profiles and defaults instead, with "com.cloudflare.api.account.${var.account_id}" in place of ${account_id} and the module's audience default in place of ${broker_url}.
+
+### Features
+
+* a provider may name the typ its tokens must have ([49a4374](https://github.com/cf-contrib/cf-oidc-exchange/commit/49a4374a18582b5a0cdac169aeb18675c919668e))
+* the Terraform module takes the policy as variables, as cf-nix-cache's does ([45b8100](https://github.com/cf-contrib/cf-oidc-exchange/commit/45b8100a5e5180ff8b12ed261b8a28c33445e4cb))
+
 ## [0.9.0](https://github.com/cf-contrib/cf-oidc-exchange/compare/v0.8.0...v0.9.0) (2026-10-03)
 
 
