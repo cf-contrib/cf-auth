@@ -1,7 +1,8 @@
 locals {
   custom_domain = !endswith(var.hostname, ".workers.dev")
 
-  # The OIDC audience. The policy gets it as $${broker_url}, so the two can't drift.
+  # The broker's URL: the issuer of its own tokens, and the audience of the
+  # tokens it takes, unless a provider names another.
   broker_url = "https://${var.hostname}"
 }
 
@@ -26,10 +27,25 @@ resource "cloudflare_worker" "this" {
 }
 
 locals {
-  policy_json = jsonencode(yamldecode(templatefile(var.policy_file, merge(var.policy_vars, {
-    account_id = var.account_id
-    broker_url = local.broker_url
-  }))))
+  # The policy, as the broker reads it from CF_OIDC_EXCHANGE_API_POLICY. The
+  # module fills in what the deployment decides, and leaves out what's unset:
+  # the broker takes a missing field, not a null one.
+  policy = merge(
+    {
+      version = 3
+      issuer  = local.broker_url
+      providers = [
+        for provider in var.oidc_providers : {
+          for key, value in merge(provider, { audience = coalesce(provider.audience, local.broker_url) }) :
+          key => value if value != null
+        }
+      ]
+      profiles = var.profiles
+    },
+    { for key, value in { defaults = local.defaults } : key => value if length(value) > 0 },
+  )
+  defaults    = { for key, value in var.defaults : key => value if value != null }
+  policy_json = jsonencode(local.policy)
 }
 
 # Upload a new version on every artifact, policy or binding change.

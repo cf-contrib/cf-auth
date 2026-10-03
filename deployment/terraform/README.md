@@ -9,10 +9,28 @@
 module "cf_oidc_broker" {
   source = "git::https://github.com/cf-contrib/cf-oidc-exchange.git//deployment/terraform?ref=v0.9.0" # x-release-please-version
 
-  account_id          = var.account_id
-  hostname            = "cf-oidc-exchange.example.workers.dev"
+  account_id              = var.account_id
+  hostname                = "cf-oidc-exchange.example.workers.dev"
   cloudflare_token_secret = { secret_store_id = var.secret_store_id, secret_name = "cf-oidc-exchange-cloudflare-token" }
-  policy_file         = "${path.root}/policy.yaml"
+
+  oidc_providers = [
+    {
+      name   = "github"
+      issuer = "https://token.actions.githubusercontent.com"
+      claims = [{ repository_owner_id = "100000001" }] # pin the provider: your numeric org ID
+    },
+  ]
+
+  profiles = [
+    {
+      name   = "workers-deploy"
+      claims = [{ repository_id = "200000002", ref = "refs/heads/main", environment = "prod" }]
+      token = { policies = [{
+        permissions = ["Workers Scripts Write"]
+        resources   = { "com.cloudflare.api.account.${var.account_id}" = "*" }
+      }] }
+    },
+  ]
 }
 
 output "broker_url" {
@@ -47,7 +65,7 @@ by default deploys the broker of the release its `ref` points to.
 wrangler secrets-store store list --remote     # note the store ID
 wrangler secrets-store secret create <store-id> --name cf-oidc-exchange-cloudflare-token --scopes workers --remote
 
-$EDITOR policy.yaml                            # providers, profiles; see Policy below
+$EDITOR main.tf                                # oidc_providers and profiles; see Policy below
 
 export CLOUDFLARE_API_TOKEN=...                # deploy token, not the broker's Cloudflare token
 tofu init
@@ -75,49 +93,59 @@ Either way the broker is reachable on exactly one URL, the `url` output, which i
 
 ## Policy
 
-`policy_file` is rendered with `templatefile`. The module fills in:
+The policy is three variables, as cf-nix-cache's module takes its providers,
+in the policy's own format (see the [broker's README](../../crates/cf-oidc-exchange-api#policy)):
 
-- `${broker_url}`: use it for the top-level `issuer` and for each provider's `audience`, so both always match the deployed URL.
-- `${account_id}`: use it for account resources.
-- Anything in `policy_vars`, e.g. repository IDs looked up with the `github` provider, so no IDs are hard-coded.
+- `oidc_providers`: the OIDC issuers the broker trusts. Typed, and checked at
+  plan time: every provider needs a claim set. `audience` defaults to the
+  broker's URL, which is what the action asks for.
+- `profiles`: what callers may get. Untyped, because a token policy's
+  `resources` are flat in one profile and nested in another, as Cloudflare
+  takes them; the plan checks each has a name and a claim set, and the broker
+  checks the rest.
+- `defaults`: the TTLs of profiles that don't set their own.
 
-Bucket prefixes use the broker's own `{claim}` placeholders, which `templatefile` leaves alone. Don't write `${repository}`: Terraform would try to fill it in and fail the plan.
+The module fills in the rest: the policy's `version`, and its `issuer`, the
+broker's URL. Since it's plain HCL, IDs can come from data sources, so none are
+hard-coded:
 
-```yaml
-version: 3
-issuer: ${broker_url}
+```hcl
+  oidc_providers = [{
+    name   = "github"
+    issuer = "https://token.actions.githubusercontent.com"
+    claims = [{ repository_owner_id = data.github_organization.org.id }]
+  }]
 
-providers:
-  - name: github
-    issuer: https://token.actions.githubusercontent.com
-    audience: ${broker_url}
-    claims:
-      - repository_owner_id: "${owner_id}"  # policy_vars = { owner_id = data.github_organization.org.id }
-
-profiles:
-  - name: deploy
-    claims:
-      - repository_id: "${repo_id}"  # policy_vars = { repo_id = data.github_repository.app.repo_id }
-    token:
-      policies:
-        - permissions: ["Workers Scripts Write"]
-          resources:
-            "com.cloudflare.api.account.${account_id}": "*"
-  - name: terraform-state          # every repo gets its own prefix in one shared bucket
-    claims:
-      - ref: refs/heads/main
-    buckets:
-      - name: org-terraform-state
-        permission: object-read-write
-        prefixes: ["{repository_owner_id}/{repository_id}/"]  # filled in by the broker, per job
+  profiles = [
+    {
+      name   = "deploy"
+      claims = [{ repository_id = data.github_repository.app.repo_id }]
+      token = { policies = [{
+        permissions = ["Workers Scripts Write"]
+        resources   = { "com.cloudflare.api.account.${var.account_id}" = "*" }
+      }] }
+    },
+    {
+      name   = "terraform-state" # every repo gets its own prefix in one shared bucket
+      claims = [{ ref = "refs/heads/main" }]
+      buckets = [{
+        name       = "org-terraform-state"
+        permission = "object-read-write"
+        prefixes   = ["{repository_owner_id}/{repository_id}/"] # filled in by the broker, per job
+      }]
+    },
+  ]
 ```
 
-The format is documented in the [broker's README](../../crates/cf-oidc-exchange-api#policy). A
-fuller sample is in [`tests/fixtures/policy.yaml`](tests/fixtures/policy.yaml).
+Bucket prefixes use the broker's own `{claim}` placeholders, which HCL leaves
+alone. Don't write `${repository}`: Terraform would try to fill it in and fail
+the plan.
 
-The rendered policy is bound as `CF_OIDC_EXCHANGE_API_POLICY`, compact JSON. A
-Worker variable holds at most 5 KB, and the plan fails on a policy over that.
-Every policy change creates a new Worker version.
+A policy kept in a file still works: `profiles = yamldecode(file("${path.module}/policy.yaml")).profiles`.
+
+The policy is bound as `CF_OIDC_EXCHANGE_API_POLICY`, compact JSON. A Worker
+variable holds at most 5 KB, and the plan fails on a policy over that. Every
+policy change creates a new Worker version.
 
 ## Upgrading and pinning
 
@@ -154,8 +182,9 @@ worker-build --release   # worker_dir = ".../crates/cf-oidc-exchange-api/build"
 | `zone_id` | for a custom domain | `null` | Zone ID of the zone holding a custom-domain `hostname`. |
 | `cloudflare_token_secret` | yes | | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the Cloudflare token. With `buckets`, the token also needs R2 permissions covering what they delegate. |
 | `signing_key_secret` | for profiles with an `audience` | `null` | `{ secret_store_id, secret_name }` of the Secrets Store secret holding the RSA key the broker signs its own tokens with. See [Tokens for other services](../../crates/cf-oidc-exchange-api#tokens-for-other-services). |
-| `policy_file` | yes | | Policy YAML path, rendered as a template. |
-| `policy_vars` | no | `{}` | Extra template variables for the policy. |
+| `oidc_providers` | yes | | The OIDC issuers the broker trusts: `{ name, issuer, audience?, jwks_uri?, typ?, claims }` each. `audience` defaults to the broker's URL. See [Policy](#policy). |
+| `profiles` | yes | | What callers may get, in the policy's format. See [Policy](#policy). |
+| `defaults` | no | `{}` | `{ ttl?, max_ttl? }`: the TTLs of profiles that don't set their own. |
 | `worker_dir` | no | `null` | A local build (`index.js`, `index_bg.wasm`) to deploy instead of a release. |
 | `release_tag` | no | the module's release | Release to deploy, or `latest`. |
 | `checksums_sha256` | no | `null` | Expected SHA-256 of the release's `SHA256SUMS`. |
@@ -169,5 +198,5 @@ worker-build --release   # worker_dir = ".../crates/cf-oidc-exchange-api/build"
 - Worker bindings are reset on every version upload, so every binding the broker
   needs is declared here.
 - `tofu test` plans the module with mocked providers (no credentials needed) and
-  checks the Cloudflare token binding, both URL modes, local artifacts, checksums, the
-  policy template (including bucket prefix placeholders) and its size.
+  checks the Cloudflare token binding, both URL modes, local artifacts, checksums, and
+  the policy built from its variables: what it fills in, what it leaves out, and its size.
