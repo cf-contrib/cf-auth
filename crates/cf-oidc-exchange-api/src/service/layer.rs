@@ -5,8 +5,10 @@
 //! Every token exchange needs an OIDC token from a provider the policy names,
 //! as its `subject_token`. The layer verifies it with [`cf_oidc_core`] before
 //! the request reaches the handler, and refuses the exchange if it isn't
-//! valid, or none of its provider's claim sets matches. Everything else
-//! passes straight through.
+//! valid, or none of its provider's claim sets matches: `invalid_request`, or
+//! `temporarily_unavailable` when the issuer's keys can't be had. An exchange
+//! with another `grant_type` is refused as `unsupported_grant_type`.
+//! Everything else passes straight through.
 //!
 //! The handler takes the caller's verified token from
 //! [`cf_oidc_core::verified`], by the token as sent: never by decoding it

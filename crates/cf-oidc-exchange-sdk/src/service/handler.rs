@@ -3,8 +3,8 @@
 //! API's OpenAPI document.
 
 /// The liveness endpoint: the server is up and serving HTTP. Shared by the
-/// server that answers it and the [`HealthClient`] that asks, so the two can't
-/// drift apart.
+/// server that answers it, `HealthHandler`, and the client that asks,
+/// `HealthClient`, so the two can't drift apart.
 pub const HEALTH_LIVE_PATH: &str = "/health/live";
 
 /// The readiness endpoint: the server can serve. Shared as
@@ -183,7 +183,7 @@ mod server {
                 if self.0 {
                     Ok(())
                 } else {
-                    Err("the broker token can't be read".into())
+                    Err("the Cloudflare token can't be read".into())
                 }
             }
         }

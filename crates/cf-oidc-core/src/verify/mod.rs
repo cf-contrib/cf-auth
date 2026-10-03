@@ -5,8 +5,9 @@
 //!
 //! What verifying does with a provider is [`ProviderExt`]'s: implemented for
 //! every [`Provider`], so an implementor can neither override it nor see it.
-//! Its keys are [`keys`]', found through its [`metadata`]. Verified tokens are
-//! cached per isolate until they expire, so [`verified`] can give one back.
+//! Its keys come from [`keys`], found through its [`metadata`] unless it
+//! names a `jwks_uri`. Verified tokens are cached per isolate until they
+//! expire, so [`verified`] can give one back.
 
 mod keys;
 mod metadata;

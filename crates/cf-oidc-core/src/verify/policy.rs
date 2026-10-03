@@ -268,7 +268,7 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "the token matches none of https://token.actions.githubusercontent.com's claim rules"
+            "the token matches none of https://token.actions.githubusercontent.com's claim sets"
         );
         let none = ClaimRules::default();
         assert!(

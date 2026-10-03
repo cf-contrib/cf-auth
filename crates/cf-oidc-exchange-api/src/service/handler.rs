@@ -701,7 +701,8 @@ fn token_name(provider: &ProviderConfig, identity: &Jwt) -> String {
     name.chars().take(NAME_MAX).collect()
 }
 
-/// A Cloudflare API failure, reported as a `502`.
+/// A Cloudflare API failure: `temporarily_unavailable`, a `503`, which says
+/// why only in the log.
 fn upstream<E: std::fmt::Debug>(what: &str, err: ApiOpError<E>) -> Error {
     let why = match &err {
         ApiOpError::Api(api) => format!("returned {}", api.status),
@@ -713,7 +714,8 @@ fn upstream<E: std::fmt::Debug>(what: &str, err: ApiOpError<E>) -> Error {
     )
 }
 
-/// A Cloudflare API answer without what it should have had.
+/// A Cloudflare API answer without what it should have had, reported as
+/// [`upstream`] reports a failure.
 fn missing(what: &str) -> Error {
     Error::new(
         ErrorCode::TemporarilyUnavailable,

@@ -5,8 +5,12 @@
 //! Each request reads the Worker's configuration from its bindings, then
 //! serves the SDK's router over it: the exchange API, with the auth layer
 //! authenticating every exchange before its handler, and the health endpoints
-//! beside it. A configuration that can't be read, an unset account or an
-//! invalid policy, fails every request instead.
+//! beside it, with OAuth's rules for responses over all of it. A
+//! configuration that can't be read, an unset account, a Cloudflare token
+//! that isn't a Secrets Store binding or an invalid policy, fails every
+//! request instead, with a `server_error`.
+//!
+//! The hourly cron deletes the expired tokens the broker minted.
 
 mod service;
 
