@@ -70,14 +70,10 @@ const DEFAULT_MAX_TTL: u64 = HOUR;
 
 /// What the Worker is configured with, from its bindings.
 pub struct Config {
-    /// `CF_OIDC_EXCHANGE_API_ACCOUNT_ID`.
-    account_id: String,
     /// `CF_OIDC_EXCHANGE_API_POLICY`, checked against the account.
     policy: PolicyConfig,
-    /// `CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN`'s binding, not yet its value.
-    cloudflare_token: Secret,
-    /// Where Cloudflare's API is.
-    cloudflare_url: String,
+    /// The account tokens are minted in, and its API.
+    cloudflare: CloudflareConfig,
     /// `CF_OIDC_EXCHANGE_API_SIGNING_KEY`'s binding. None issues no tokens of
     /// the broker's own.
     signing_key: Option<Secret>,
@@ -88,41 +84,21 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// When the account isn't set, the policy is invalid, or a secret isn't a
-    /// Secrets Store binding.
+    /// When the account isn't set, a secret isn't a Secrets Store binding, or
+    /// the policy is invalid.
     pub fn from_env(env: &Env) -> worker::Result<Self> {
-        let var = |key| env.var(key).map(|value| value.to_string()).ok();
-        let Some(account_id) = var(ACCOUNT_KEY).filter(|id| !id.is_empty()) else {
-            return Err(Error::RustError(format!("{ACCOUNT_KEY} must be set")));
-        };
-        let policy = PolicyConfig::parse(&var(POLICY_KEY).unwrap_or_default(), &account_id)
+        let cloudflare = CloudflareConfig::from_env(env)?;
+        let policy = env
+            .var(POLICY_KEY)
+            .map(|var| var.to_string())
+            .unwrap_or_default();
+        let policy = PolicyConfig::parse(&policy, cloudflare.account_id())
             .map_err(|why| Error::RustError(format!("{POLICY_KEY}: {why}")))?;
-        let cloudflare_token = Secret::from_env(env, CLOUDFLARE_TOKEN_KEY)?.ok_or_else(|| {
-            Error::RustError(format!(
-                "{CLOUDFLARE_TOKEN_KEY} must be a Secrets Store binding"
-            ))
-        })?;
-
-        // Only a `stand-ins` build, for the integration tests, takes Cloudflare's
-        // API from anywhere but Cloudflare.
-        #[cfg(feature = "stand-ins")]
-        let cloudflare_url = var("CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL")
-            .unwrap_or_else(|| CLOUDFLARE_URL.to_string());
-        #[cfg(not(feature = "stand-ins"))]
-        let cloudflare_url = CLOUDFLARE_URL.to_string();
-
         Ok(Self {
-            account_id,
             policy,
-            cloudflare_token,
-            cloudflare_url,
+            cloudflare,
             signing_key: Secret::from_env(env, SIGNING_KEY_KEY)?,
         })
-    }
-
-    /// The account tokens are minted in.
-    pub fn account_id(&self) -> &str {
-        &self.account_id
     }
 
     /// The policy.
@@ -130,17 +106,9 @@ impl Config {
         &self.policy
     }
 
-    /// Cloudflare's API, as the Cloudflare token, read now.
-    pub async fn cloudflare(&self) -> worker::Result<HttpClient> {
-        let token = self.cloudflare_token.read().await?;
-        Ok(self.cloudflare_as(&token))
-    }
-
-    /// Cloudflare's API, as `token`: one a caller presents, say.
-    pub fn cloudflare_as(&self, token: &str) -> HttpClient {
-        HttpClient::new()
-            .with_base_url(&self.cloudflare_url)
-            .with_api_key(token)
+    /// The account tokens are minted in, and its API.
+    pub fn cloudflare(&self) -> &CloudflareConfig {
+        &self.cloudflare
     }
 
     /// Reads the signing key, a PKCS#8 PEM, or `None` if none is bound.
@@ -149,6 +117,63 @@ impl Config {
             Some(secret) => secret.read().await.map(Some),
             None => Ok(None),
         }
+    }
+}
+
+/// The Cloudflare account tokens are minted in, and how to reach its API.
+pub struct CloudflareConfig {
+    /// `CF_OIDC_EXCHANGE_API_ACCOUNT_ID`.
+    account_id: String,
+    /// `CF_OIDC_EXCHANGE_API_CLOUDFLARE_TOKEN`'s binding, not yet its value.
+    token: Secret,
+    /// Where its API is.
+    url: String,
+}
+
+impl CloudflareConfig {
+    /// Reads the account and the Cloudflare token's binding.
+    fn from_env(env: &Env) -> worker::Result<Self> {
+        let var = |key| env.var(key).map(|value| value.to_string()).ok();
+        let Some(account_id) = var(ACCOUNT_KEY).filter(|id| !id.is_empty()) else {
+            return Err(Error::RustError(format!("{ACCOUNT_KEY} must be set")));
+        };
+        let token = Secret::from_env(env, CLOUDFLARE_TOKEN_KEY)?.ok_or_else(|| {
+            Error::RustError(format!(
+                "{CLOUDFLARE_TOKEN_KEY} must be a Secrets Store binding"
+            ))
+        })?;
+
+        // Only a `stand-ins` build, for the integration tests, takes Cloudflare's
+        // API from anywhere but Cloudflare.
+        #[cfg(feature = "stand-ins")]
+        let url = var("CF_OIDC_EXCHANGE_API_CLOUDFLARE_URL")
+            .unwrap_or_else(|| CLOUDFLARE_URL.to_string());
+        #[cfg(not(feature = "stand-ins"))]
+        let url = CLOUDFLARE_URL.to_string();
+
+        Ok(Self {
+            account_id,
+            token,
+            url,
+        })
+    }
+
+    /// The account tokens are minted in.
+    pub fn account_id(&self) -> &str {
+        &self.account_id
+    }
+
+    /// The API, as the Cloudflare token, read now.
+    pub async fn client(&self) -> worker::Result<HttpClient> {
+        let token = self.token.read().await?;
+        Ok(self.client_as(&token))
+    }
+
+    /// The API, as `token`: one a caller presents, say.
+    pub fn client_as(&self, token: &str) -> HttpClient {
+        HttpClient::new()
+            .with_base_url(&self.url)
+            .with_api_key(token)
     }
 }
 
