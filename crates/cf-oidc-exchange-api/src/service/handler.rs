@@ -72,7 +72,7 @@ impl ExchangeServiceHandler {
 
     /// Cloudflare's API, as the Cloudflare token, read now.
     async fn cloudflare(&self) -> Result<HttpClient, Error> {
-        let client = self.config.cloudflare().await;
+        let client = self.config.cloudflare().client().await;
         client.map_err(|err| Error::new(ErrorCode::ServerError, err.to_string()))
     }
 
@@ -92,7 +92,7 @@ impl ExchangeServiceHandler {
     /// Deletes expired `cf-oidc:` tokens, for the hourly cron. Returns how many.
     pub async fn cleanup(&self) -> Result<usize, Error> {
         let cloudflare = self.cloudflare().await?;
-        let account_id = self.config.account_id();
+        let account_id = self.config.cloudflare().account_id();
         let now = Date::now().as_millis() / 1000;
 
         // Collect first: deleting while paginating would shift later pages and
@@ -203,7 +203,7 @@ impl ExchangeServiceHandler {
         profile: &ProfileConfig,
         ttl: u64,
     ) -> Result<TokenExchangeResponse, Error> {
-        let account_id = self.config.account_id();
+        let account_id = self.config.cloudflare().account_id();
         let claims =
             serde_json::Value::Object(provider.matched_claims(Some(profile), &identity.claims));
 
@@ -547,8 +547,8 @@ impl ExchangeServiceApi for ExchangeServiceHandler {
             // and it's deleted if the broker minted it. Cloudflare doesn't
             // recognize one invalid, expired, deleted or another account's.
             let revoked = async {
-                let account_id = self.config.account_id();
-                let presenter = self.config.cloudflare_as(&request.token);
+                let account_id = self.config.cloudflare().account_id();
+                let presenter = self.config.cloudflare().client_as(&request.token);
                 let status = |err: &ApiOpError<_>| err.api().map(|api| api.status);
                 let id = match presenter.accounts_tokens_verify(account_id).await {
                     Ok(verified) => match verified.result {
