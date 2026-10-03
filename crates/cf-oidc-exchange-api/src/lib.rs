@@ -15,7 +15,6 @@ use std::sync::Arc;
 use axum::{
     Json,
     http::StatusCode,
-    middleware,
     response::{IntoResponse, Response as HttpResponse},
 };
 use cf_oidc_exchange_sdk::v1::{self, ErrorCode};
@@ -27,7 +26,7 @@ use worker::*;
 use crate::service::{
     config::Config,
     handler::ExchangeServiceHandler,
-    layer::{self, AuthenticateLayer},
+    layer::{AuthenticateLayer, OAuthResponseLayer},
 };
 
 /// Logs as JSON lines, one per event with its fields at the top level, which
@@ -58,7 +57,8 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<HttpResponse
                 // Merged after the layer, so outside it. Not in the spec:
                 // they're for whoever deploys the Worker, not its clients.
                 .merge(v1::HealthHandler::new().into_router())
-                .layer(middleware::from_fn(layer::respond))
+                // Over everything, the health endpoints too.
+                .layer(OAuthResponseLayer)
         }
         // Misconfigured, the Worker serves nothing: every request, the health
         // endpoints' too, is refused, with why logged.
