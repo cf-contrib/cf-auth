@@ -50,7 +50,7 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync",
 # Signs the stand-in issuers' tokens and verifies the broker's, with keys made
 # from fixed seeds. Only in the tests: the Worker signs with WebCrypto.
 rand_chacha = "0.3"
-base64 = "0.22"
+base64 = "0.23"
 rsa = { version = "0.9", features = ["sha2"] }
 
 [features]
